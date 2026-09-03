@@ -25,6 +25,24 @@ yunohost-mcp-connect --remote-url https://your-yunohost-domain/mcp --key-file ~/
 - `--delegation-file` (or `$YUNOHOST_MCP_CLIENT_DELEGATION_FILE`) presents a delegation event (PLAN.md Phase 11) alongside your own signature, for a disposable agent identity an owner granted a subset of their access to.
 - Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are all forwarded verbatim; every other MCP feature and all authorization/policy/audit still happens exactly as it would if you'd signed the request yourself, because you did.
 
+## Granting a disposable agent identity access: yunohost-mcp-delegate
+
+An `identity.toml` entry grants access to one specific pubkey, permanently (until edited). A delegation (PLAN.md Phase 11) is the other way to grant access: an owner signs a short-lived, scoped grant to an agent's own disposable key, without ever adding that key to `identity.toml` or handing over any private key. `yunohost-mcp-delegate` is what an owner runs to create one:
+
+```
+yunohost-mcp-delegate --key-file ~/.config/yunohost-mcp/key \
+  --delegate npub1... \
+  --remote-url https://your-yunohost-domain/mcp \
+  --role readonly --ttl 24h \
+  --out agent-delegation.json
+```
+
+- `--delegate` is the agent's own pubkey (it must sign its own NIP-98 requests as always — a delegation never replaces that, it only adds standing).
+- `--remote-url` fetches the server's pubkey and this owner's own current scopes automatically — no need to type the server's pubkey by hand, and an over-broad `--scope`/`--role` request is flagged (the server can never grant more than the delegator's own current scopes; see `auth/delegation.py`). Pass `--server` instead if you'd rather supply the server's pubkey directly.
+- `--scope`/`--role` (repeatable, combinable) choose what to grant; `--ttl` (e.g. `24h`, `7d`) how long — the server rejects anything over 30 days.
+- The output is a signed delegation event: a bearer credential once issued. Hand the file to the agent to use with `yunohost-mcp-connect --delegation-file agent-delegation.json`, over a channel you trust (the same as you'd hand over an API key).
+- To take a delegation back before it expires, add its `id` (printed after signing) to `revoked_delegations.toml` — this is independent of, and finer-grained than, removing the delegator's own `identity.toml` entry (which revokes every delegation they've ever issued).
+
 ## Development
 
 ```

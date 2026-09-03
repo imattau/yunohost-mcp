@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 yunohost-mcp = "yunohost_mcp.server:main"
 yunohost-mcp-connect = "yunohost_mcp.bridge:main"
+yunohost-mcp-delegate = "yunohost_mcp.delegate:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

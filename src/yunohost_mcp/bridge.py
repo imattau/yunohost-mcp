@@ -57,7 +57,7 @@ class Nip98BridgeAuth(httpx2.Auth):
         yield request
 
 
-def _load_identity(args: argparse.Namespace) -> ClientIdentity:
+def load_identity(args: argparse.Namespace) -> ClientIdentity:
     key = args.key or os.environ.get("YUNOHOST_MCP_CLIENT_KEY")
     key_file = args.key_file or os.environ.get("YUNOHOST_MCP_CLIENT_KEY_FILE")
 
@@ -117,7 +117,7 @@ def _build_local_server(remote: Client, *, name: str) -> MCPServer:
 
 
 async def _async_main(args: argparse.Namespace) -> None:
-    identity = _load_identity(args)
+    identity = load_identity(args)
     delegation_header = _load_delegation_header(args)
     auth = Nip98BridgeAuth(identity, delegation_header)
 
