@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     system_python: str = "/usr/bin/python3"
     system_python_timeout_seconds: int = 1800
 
+    # service_logs(): structured systemd journal entries for one
+    # YunoHost-managed service (see adapter.py). journalctl_path lets a
+    # deployment point at a non-default binary; the other two bound a
+    # single call's cost/response size the same way max_request_body_bytes
+    # etc. do for the HTTP layer generally.
+    journalctl_path: str = "journalctl"
+    service_logs_timeout_seconds: int = 30
+    service_logs_max_lines: int = 2000
+
     # Same-host Nostr YunoHost catalogue publisher integration.
     catalog_cli_path: Path = Path("/var/lib/nostr-catalogd/nostr-ynh")
     catalog_publisher_key_path: Path = Path("/etc/nostr-catalogd/publisher.key")

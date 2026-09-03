@@ -318,6 +318,99 @@ class YunohostAdapter:
         service_status = _import_attr("yunohost.service", "service_status")
         return {"fake": False, "services": service_status([])}
 
+    def service_logs(
+        self,
+        service: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        priority: str | None = None,
+        grep: str | None = None,
+        lines: int = 200,
+    ) -> dict[str, Any]:
+        """Structured systemd journal entries for one YunoHost-managed
+        service - normalized timestamp/service/priority/message per
+        entry, filterable by time range (`since`/`until`, journalctl's
+        own syntax: "-1h", "2026-09-03 07:00:00", "today", ...), syslog
+        `priority` (emerg/alert/crit/err/warning/notice/info/debug, or a
+        range like "err..emerg"), and a `grep` text pattern.
+
+        Fills a real gap: operation_logs()/package_logs() only cover
+        formal YunoHost *operations* (backups, installs, ...) - never a
+        service's own crash/error output on its way to becoming one.
+        Every real bug found against a live YunoHost host during this
+        project's own development needed exactly this, previously
+        obtainable only by reading `journalctl -u <service>` over SSH one
+        call at a time.
+
+        `service` must be one of services_list()'s own known service
+        names - deliberately not "any systemd unit at all", so this
+        can't be used to read some unrelated system service's journal
+        (which might carry content this MCP server has no business
+        exposing) just because the caller happens to guess its unit
+        name.
+        """
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "service": service,
+                "entries": [
+                    {
+                        "timestamp": "2026-09-03T12:00:00+00:00",
+                        "service": service,
+                        "priority": "info",
+                        "message": f"fake log entry for {service}",
+                    }
+                ],
+            }
+        known_services = set(self.services_list().get("services", {}))
+        if service not in known_services:
+            raise ToolInputError(f"{service!r} is not a known YunoHost-managed service")
+
+        capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
+        args = [
+            self.settings.journalctl_path,
+            "-u",
+            service,
+            "--no-pager",
+            "-o",
+            "json",
+            "-n",
+            str(capped_lines),
+        ]
+        if since:
+            args += ["--since", since]
+        if until:
+            args += ["--until", until]
+        if priority:
+            args += ["-p", priority]
+        if grep:
+            args += ["--grep", grep]
+
+        try:
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=self.settings.service_logs_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise YunohostUnavailableError("journalctl timed out") from exc
+        if proc.returncode != 0:
+            raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
+
+        entries = []
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entries.append(_normalize_journal_entry(raw, default_service=service))
+        return {"fake": False, "service": service, "entries": entries}
+
     def service_status(self, names: list[str]) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "services": {name: {"status": "running"} for name in names}}
@@ -393,7 +486,19 @@ class YunohostAdapter:
         # underlying record.
         return self.operation_logs(name)
 
-    def operation_logs(self, name: str) -> dict[str, Any]:
+    def operation_logs(self, name: str, tail_lines: int | None = None) -> dict[str, Any]:
+        """`tail_lines` caps how many of the most recent log lines are
+        returned (None means "all"). Always passed through explicitly -
+        never omitted - because of a real bug in yunohost.log.log_show()
+        itself: when called with no `number` at all, it takes a different
+        internal branch (`read_file()` returning the whole log as one
+        string) than when a number is given (`_tail()`, returning a real
+        list of lines), and then unconditionally does `list(logs)` on
+        whichever it got - exploding the no-number case's plain string
+        into a list of *individual characters* instead of lines. Always
+        supplying a number (a large one when the caller wants "all")
+        keeps this on the correct, line-based code path.
+        """
         if self.settings.fake_yunohost:
             return {
                 "fake": True,
@@ -403,7 +508,7 @@ class YunohostAdapter:
                 "log": "fake log content for " + name,
             }
         log_show = _import_attr("yunohost.log", "log_show")
-        return {"fake": False, **log_show(name)}
+        return {"fake": False, **log_show(name, number=tail_lines if tail_lines is not None else 1_000_000)}
 
     def updates_check(self) -> dict[str, Any]:
         # Deliberately the no-refresh, cache-only variant: a real network
@@ -1006,6 +1111,45 @@ class YunohostAdapter:
             "diagnosis_before": before["diagnosis"],
             "diagnosis_after": after["diagnosis"],
         }
+
+
+_JOURNAL_PRIORITY_NAMES = {
+    "0": "emerg",
+    "1": "alert",
+    "2": "crit",
+    "3": "err",
+    "4": "warning",
+    "5": "notice",
+    "6": "info",
+    "7": "debug",
+}
+
+
+def _normalize_journal_entry(raw: dict[str, Any], *, default_service: str) -> dict[str, Any]:
+    """One `journalctl -o json` record -> {timestamp, service, priority,
+    message}. __REALTIME_TIMESTAMP is microseconds since the epoch, as a
+    decimal string; PRIORITY is a syslog priority number 0-7, also a
+    string; MESSAGE is normally a string but journalctl encodes a
+    non-UTF8 one as a JSON array of byte values instead - handle both."""
+    import datetime as _dt
+
+    timestamp = raw.get("__REALTIME_TIMESTAMP")
+    if timestamp is not None:
+        try:
+            timestamp = _dt.datetime.fromtimestamp(int(timestamp) / 1_000_000, tz=_dt.timezone.utc).isoformat()
+        except (ValueError, OverflowError):
+            timestamp = None
+
+    message = raw.get("MESSAGE", "")
+    if isinstance(message, list):
+        message = bytes(message).decode("utf-8", errors="replace")
+
+    return {
+        "timestamp": timestamp,
+        "service": raw.get("_SYSTEMD_UNIT", default_service),
+        "priority": _JOURNAL_PRIORITY_NAMES.get(str(raw.get("PRIORITY")), raw.get("PRIORITY")),
+        "message": message,
+    }
 
 
 def _latest_operation_id() -> str | None:

@@ -15,6 +15,7 @@ EXPECTED_TOOLS = frozenset(
         "diagnosis_get",
         "services_list",
         "service_status",
+        "service_logs",
         "domains_list",
         "users_list",
         "backups_list",

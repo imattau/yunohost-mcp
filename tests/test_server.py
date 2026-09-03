@@ -497,6 +497,21 @@ async def test_tool_input_error_surfaces_its_real_message_not_a_generic_crash():
 
 
 @pytest.mark.anyio
+async def test_service_logs_is_registered_and_callable():
+    # Fills a real gap: operation_logs()/package_logs() only cover formal
+    # YunoHost *operations*, never a service's own raw crash/error output -
+    # see adapter.py's service_logs() docstring and the cross-agent
+    # handoff (Codex) that identified it.
+    async with Client(mcp) as client:
+        result = await client.call_tool("service_logs", {"service": "yunohost_mcp"})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert data["service"] == "yunohost_mcp"
+        assert isinstance(data["entries"], list) and data["entries"]
+        assert set(data["entries"][0]) == {"timestamp", "service", "priority", "message"}
+
+
+@pytest.mark.anyio
 async def test_phase7_plan_then_execute_upgrades_the_app():
     async with Client(mcp) as client:
         plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})

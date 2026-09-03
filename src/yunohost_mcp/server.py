@@ -250,6 +250,33 @@ def service_status(names: list[str]) -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.LOGS_READ)
+def service_logs(
+    service: str,
+    since: str | None = None,
+    until: str | None = None,
+    priority: str | None = None,
+    grep: str | None = None,
+    lines: int = 200,
+) -> dict[str, Any]:
+    """Structured systemd journal entries for one YunoHost-managed
+    service (must be a name services_list() reports) - normalized
+    timestamp/service/priority/message per entry.
+
+    `since`/`until` accept journalctl's own syntax ("-1h",
+    "2026-09-03 07:00:00", "today", ...). `priority` is a syslog level
+    (emerg/alert/crit/err/warning/notice/info/debug, or a range like
+    "err..emerg") - e.g. priority="err..emerg" for error-level entries
+    only. `grep` filters by a text/regex pattern. `lines` caps how many
+    of the most recent matching entries come back (server-enforced
+    maximum applies regardless of what's requested).
+    """
+    return adapter.service_logs(service, since=since, until=until, priority=priority, grep=grep, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.DOMAINS_READ)
 def domains_list() -> dict[str, Any]:
     """List domains configured on this YunoHost server."""
@@ -296,9 +323,10 @@ def operation_status(name: str) -> dict[str, Any]:
 @redact_response
 @translate_known_errors
 @require_scope(Scope.LOGS_READ)
-def operation_logs(name: str) -> dict[str, Any]:
-    """Return the full log content for one YunoHost operation."""
-    return adapter.operation_logs(name)
+def operation_logs(name: str, tail_lines: int | None = None) -> dict[str, Any]:
+    """Return the log content for one YunoHost operation, most recent
+    `tail_lines` lines only (default: all)."""
+    return adapter.operation_logs(name, tail_lines=tail_lines)
 
 
 @mcp.tool()
