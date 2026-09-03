@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish (for example, v0.1.8)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -26,13 +33,15 @@ jobs:
           python-version: '3.12'
 
       - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
           package_version="$(uv version --short)"
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${RELEASE_TAG#v}"
           if [[ "$package_version" != "$tag_version" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package version ${package_version}" >&2
+            echo "Tag ${RELEASE_TAG} does not match package version ${package_version}" >&2
             exit 1
           fi
 
