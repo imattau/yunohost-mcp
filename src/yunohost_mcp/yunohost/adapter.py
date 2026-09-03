@@ -195,3 +195,94 @@ class YunohostAdapter:
             }
         tools_update_norefresh = _import_attr("yunohost.tools", "tools_update_norefresh")
         return {"fake": False, **tools_update_norefresh()}
+
+    # -- Phase 5: writes -------------------------------------------------
+    #
+    # Every write below either returns {"operation_id": ...} (when we
+    # construct the OperationLogger ourselves, per PHASE0_INVESTIGATION.md)
+    # or omits it (when the underlying function manages its own logger
+    # internally, e.g. app_upgrade does one per app) - callers should treat
+    # a missing operation_id as "check operations_list() by time/app instead
+    # of by id", not as an error.
+
+    def service_restart(self, names: list[str]) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "restarted": names}
+        service_restart = _import_attr("yunohost.service", "service_restart")
+        service_restart(names)
+        return {"fake": False, "restarted": names}
+
+    def backup_create(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        apps: list[str] | None = None,
+        system: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-backup_create",
+                "name": name or "fake-backup",
+            }
+        backup_create = _import_attr("yunohost.backup", "backup_create")
+        operation_logger = _new_operation_logger("backup_create")
+        try:
+            result = backup_create(
+                operation_logger,
+                name=name,
+                description=description,
+                apps=apps or [],
+                system=system or [],
+            )
+        except Exception as exc:
+            _try_close_with_error(operation_logger, exc)
+            raise
+        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+
+    def app_install(
+        self,
+        app: str,
+        label: str | None = None,
+        args: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-app_install", "app": app}
+        app_install = _import_attr("yunohost.app", "app_install")
+        operation_logger = _new_operation_logger("app_install", related_to=[("app", app)])
+        try:
+            result = app_install(operation_logger, app, label=label, args=args, force=force)
+        except Exception as exc:
+            _try_close_with_error(operation_logger, exc)
+            raise
+        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+
+    def app_upgrade(self, app: str | list[str] | None = None, force: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "app": app, "result": "success"}
+        # No operation_logger to construct here: app_upgrade() builds its
+        # own internally, once per app it actually upgrades (PHASE0
+        # finding), so there's no single id to hand back for a multi-app
+        # call - the per-app result dict plus operations_list() cover it.
+        app_upgrade = _import_attr("yunohost.app", "app_upgrade")
+        result = app_upgrade(app=app or [], force=force)
+        return {"fake": False, "app": app, "result": result}
+
+
+def _new_operation_logger(operation: str, **kwargs: Any) -> Any:
+    operation_logger_cls = _import_attr("yunohost.log", "OperationLogger")
+    return operation_logger_cls(operation, **kwargs)
+
+
+def _try_close_with_error(operation_logger: Any, exc: Exception) -> None:
+    """Best-effort: close the operation log with the error before re-raising.
+
+    Several core functions already do this themselves on handled failure
+    paths; this only matters for exceptions they didn't catch. Never lets a
+    problem here mask the original exception.
+    """
+    try:
+        operation_logger.error(str(exc))
+    except Exception:  # noqa: BLE001 - logging the original failure must not be lost
+        pass

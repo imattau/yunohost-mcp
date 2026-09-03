@@ -7,9 +7,15 @@ Phase 3: adds identity.toml authorization on top — proves *what* they may
 do. A validly-signed request from a pubkey with no identity.toml entry (or
 an expired one) is rejected before it ever reaches a tool; a request from a
 known identity can only call tools whose required scope its roles grant.
-Phase 4: fills out PLAN.md's v0.1 read-only tool list. Every tool here is a
-read: no tool in this file can install, upgrade, remove, restart, or
-otherwise change YunoHost state. That starts at Phase 5.
+Phase 4: fills out PLAN.md's v0.1 read-only tool list.
+Phase 5: adds the first writes (service_restart, backup_create,
+app_install, app_upgrade). Every write tool is wrapped in both
+@require_scope (authorization) and @audited_write (a global write lock so
+at most one is ever in flight, plus a JSON-lines audit entry per call -
+audit/log.py, policy/locks.py). There is no confirmation step yet
+(PLAN.md Phase 6) and no dry-run/planning (Phase 7) - these four were
+chosen as PLAN.md's "low-risk" writes for exactly that reason; riskier
+writes (app removal, backup restore, system upgrade) wait for Phase 6.
 """
 
 from __future__ import annotations
@@ -19,16 +25,21 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from yunohost_mcp.audit.decorator import audited_write
+from yunohost_mcp.audit.log import AuditLog
 from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, IdentityStore, get_current_request, set_current_request
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.config import load_settings
 from yunohost_mcp.policy.enforcement import require_scope
+from yunohost_mcp.policy.locks import WriteLock
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
 settings = load_settings()
 adapter = YunohostAdapter(settings=settings)
+write_lock = WriteLock()
+audit_log = AuditLog(path=settings.audit_log_path())
 
 mcp = MCPServer(settings.server_name)
 
@@ -136,6 +147,43 @@ def operation_logs(name: str) -> dict[str, Any]:
 def updates_check() -> dict[str, Any]:
     """List apps and system components with pending updates, from cache (no network refresh)."""
     return adapter.updates_check()
+
+
+@mcp.tool()
+@require_scope(Scope.SERVICES_RESTART)
+@audited_write("services.restart", lock=write_lock, audit_log=audit_log)
+def service_restart(names: list[str]) -> dict[str, Any]:
+    """Restart one or more YunoHost services."""
+    return adapter.service_restart(names)
+
+
+@mcp.tool()
+@require_scope(Scope.BACKUPS_CREATE)
+@audited_write("backups.create", lock=write_lock, audit_log=audit_log)
+def backup_create(
+    name: str | None = None,
+    description: str | None = None,
+    apps: list[str] | None = None,
+    system: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create a new local backup archive."""
+    return adapter.backup_create(name=name, description=description, apps=apps, system=system)
+
+
+@mcp.tool()
+@require_scope(Scope.APPS_INSTALL)
+@audited_write("apps.install", lock=write_lock, audit_log=audit_log)
+def app_install(app: str, label: str | None = None, args: str | None = None, force: bool = False) -> dict[str, Any]:
+    """Install a YunoHost app."""
+    return adapter.app_install(app, label=label, args=args, force=force)
+
+
+@mcp.tool()
+@require_scope(Scope.APPS_UPGRADE)
+@audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
+def app_upgrade(app: str | None = None, force: bool = False) -> dict[str, Any]:
+    """Upgrade one installed YunoHost app, or all upgradable apps if none is specified."""
+    return adapter.app_upgrade(app=app, force=force)
 
 
 @mcp.tool()

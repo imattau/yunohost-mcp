@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         store: deny-by-default, not fail-open."""
         return self.config_dir / "identity.toml"
 
+    def audit_log_path(self) -> Path:
+        """JSON-lines audit trail for write tools (Phase 5/10). Created on first write."""
+        return self.config_dir / "audit.jsonl"
+
 
 def load_settings() -> Settings:
     return Settings()

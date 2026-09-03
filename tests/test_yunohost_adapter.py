@@ -73,3 +73,26 @@ def test_updates_check():
     result = make_adapter().updates_check()
     assert isinstance(result["apps"], list)
     assert isinstance(result["system"], list)
+
+
+def test_service_restart():
+    result = make_adapter().service_restart(["nginx", "postgresql"])
+    assert result["restarted"] == ["nginx", "postgresql"]
+
+
+def test_backup_create_has_operation_id():
+    result = make_adapter().backup_create(name="my-backup")
+    assert result["name"] == "my-backup"
+    assert "operation_id" in result
+
+
+def test_app_install_has_operation_id():
+    result = make_adapter().app_install("nextcloud")
+    assert result["app"] == "nextcloud"
+    assert "operation_id" in result
+
+
+def test_app_upgrade():
+    result = make_adapter().app_upgrade("nextcloud")
+    assert result["app"] == "nextcloud"
+    assert result["result"] == "success"

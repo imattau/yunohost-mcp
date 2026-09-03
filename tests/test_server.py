@@ -11,12 +11,16 @@ context themselves, the way server.py's stdio branch of main() does.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from mcp.client import Client
 
 from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOCAL_STDIO_REQUEST, set_current_request
 from yunohost_mcp.policy.roles import scopes_for_roles
-from yunohost_mcp.server import mcp
+from yunohost_mcp.server import audit_log, mcp
+
+PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -47,7 +51,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
     async with Client(mcp) as client:
         result = await client.list_tools()
         names = {tool.name for tool in result.tools}
-        assert {"server_info", "health_check", "whoami"} | PHASE4_TOOLS <= names
+        assert {"server_info", "health_check", "whoami"} | PHASE4_TOOLS | PHASE5_WRITE_TOOLS <= names
 
 
 @pytest.mark.anyio
@@ -91,6 +95,46 @@ async def test_phase4_tool_denied_for_identity_without_scope():
     set_current_request(no_scopes)
     async with Client(mcp) as client:
         result = await client.call_tool("apps_list", {})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("service_restart", {"names": ["nginx"]}),
+        ("backup_create", {"name": "test-backup"}),
+        ("app_install", {"app": "nextcloud"}),
+        ("app_upgrade", {"app": "nextcloud"}),
+    ],
+)
+async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    async with Client(mcp) as client:
+        result = await client.call_tool(tool, args)
+        assert result.is_error is not True, result.content
+        assert result.structured_content is not None
+        assert result.structured_content.get("fake") is True
+
+    new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["caller"] == "local-stdio"
+    assert entry["result"] == "success"
+    assert entry["decision"] == "allowed"
+
+
+@pytest.mark.anyio
+async def test_phase5_write_tool_denied_for_identity_without_scope():
+    no_scopes = AuthenticatedRequest(
+        pubkey="deadbeef",
+        event_id="e" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(pubkey="deadbeef", name="no-roles", roles=(), scopes=scopes_for_roles(())),
+    )
+    set_current_request(no_scopes)
+    async with Client(mcp) as client:
+        result = await client.call_tool("app_install", {"app": "nextcloud"})
         assert result.is_error is True
 
 
