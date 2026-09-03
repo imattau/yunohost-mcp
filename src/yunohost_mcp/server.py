@@ -255,6 +255,51 @@ def updates_check() -> dict[str, Any]:
     return adapter.updates_check()
 
 
+# Read-only resource mirrors for MCP clients that prefer stable contextual
+# resources over tool calls. They intentionally reuse the same scope checks
+# and adapter seam as the corresponding tools.
+@mcp.resource("yunohost://server")
+@redact_response
+@require_scope(Scope.SERVER_READ)
+def server_resource() -> dict[str, Any]:
+    return adapter.server_info()
+
+
+@mcp.resource("yunohost://diagnosis")
+@redact_response
+@require_scope(Scope.DIAGNOSIS_READ)
+def diagnosis_resource() -> dict[str, Any]:
+    return adapter.health_check()
+
+
+@mcp.resource("yunohost://apps")
+@redact_response
+@require_scope(Scope.APPS_READ)
+def apps_resource() -> dict[str, Any]:
+    return adapter.apps_list()
+
+
+@mcp.resource("yunohost://apps/{app}")
+@redact_response
+@require_scope(Scope.APPS_READ)
+def app_resource(app: str) -> dict[str, Any]:
+    return adapter.app_info(app, full=True)
+
+
+@mcp.resource("yunohost://services")
+@redact_response
+@require_scope(Scope.SERVICES_READ)
+def services_resource() -> dict[str, Any]:
+    return adapter.services_list()
+
+
+@mcp.resource("yunohost://operations")
+@redact_response
+@require_scope(Scope.LOGS_READ)
+def operations_resource() -> dict[str, Any]:
+    return adapter.operations_list(limit=50)
+
+
 @mcp.tool()
 @redact_response
 @require_scope(Scope.SERVICES_RESTART)
@@ -670,6 +715,9 @@ def create_http_app():
         clock_skew_seconds=settings.nip98_clock_skew_seconds,
         server_identity=get_server_identity(),
         revocation_store=RevocationStore.load(settings.revoked_delegations_path()),
+        max_request_body_bytes=settings.max_request_body_bytes,
+        request_timeout_seconds=settings.request_timeout_seconds,
+        max_concurrent_requests=settings.max_concurrent_requests,
     )
 
 

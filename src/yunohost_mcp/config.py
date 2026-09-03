@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     # When true, the YunoHost adapter layer returns canned/fake data instead
     # of importing yunohost.* modules. Lets the MCP server run and be
     # exercised on a machine without YunoHost installed (e.g. this dev box).
-    fake_yunohost: bool = True
+    # Real mode is the safe production default. Tests and local development
+    # must opt in explicitly with YUNOHOST_MCP_FAKE_YUNOHOST=true.
+    fake_yunohost: bool = False
 
     # NIP-98 auth (Phase 2), only relevant for the http transport.
     nip98_clock_skew_seconds: int = 60
@@ -49,6 +51,12 @@ class Settings(BaseSettings):
     # (which, run via `uv run`, is yunohost-mcp's own isolated venv and
     # does NOT have them). An absolute path avoids PATH ambiguity entirely.
     package_linter_python: str = "python3"
+
+    # HTTP exposure limits. These are deliberately bounded defaults; a
+    # deployment can lower them, but should not silently run unbounded.
+    max_request_body_bytes: int = 1_048_576
+    request_timeout_seconds: int = 120
+    max_concurrent_requests: int = 8
 
     def identity_file_path(self) -> Path:
         """pubkey -> role mapping (Phase 3). A missing file means an empty

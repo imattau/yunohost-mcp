@@ -173,6 +173,19 @@ async def test_exempt_path_bypasses_auth():
 
 
 @pytest.mark.anyio
+async def test_request_body_limit_rejects_oversized_body():
+    app = NostrAuthMiddleware(
+        echo_identity_app,
+        identity_store=IdentityStore({}),
+        max_request_body_bytes=3,
+    )
+    scope = _make_scope(method="POST", path="/mcp", headers={})
+    status, payload = await _call(app, scope, body=b"1234")
+    assert status == 413
+    assert payload["error"] == "forbidden"
+
+
+@pytest.mark.anyio
 async def test_delegated_agent_authenticates_via_x_nostr_delegation_header(tmp_path):
     server_identity = ServerIdentity.load_or_generate(tmp_path / "server.key")
     owner_sk, owner_pubkey = new_keypair()

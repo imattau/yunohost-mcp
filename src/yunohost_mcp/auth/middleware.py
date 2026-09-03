@@ -33,6 +33,8 @@ import base64
 import json
 import logging
 
+import anyio
+
 from yunohost_mcp.auth.delegation import DelegationError, resolve_delegated_identity, verify_delegation_event
 from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, IdentityStore, set_current_request
 from yunohost_mcp.auth.nip98 import Nip98Error, verify_nip98_request
@@ -57,6 +59,9 @@ class NostrAuthMiddleware:
         exempt_paths: frozenset[str] = frozenset(),
         server_identity: ServerIdentity | None = None,
         revocation_store: RevocationStore | None = None,
+        max_request_body_bytes: int = 1_048_576,
+        request_timeout_seconds: int = 120,
+        max_concurrent_requests: int = 8,
     ) -> None:
         self.app = app
         self.identity_store = identity_store
@@ -65,13 +70,20 @@ class NostrAuthMiddleware:
         self.exempt_paths = exempt_paths
         self.server_identity = server_identity
         self.revocation_store = revocation_store or RevocationStore(frozenset())
+        self.max_request_body_bytes = max_request_body_bytes
+        self.request_timeout_seconds = request_timeout_seconds
+        self._request_slots = anyio.Semaphore(max_concurrent_requests)
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http" or scope["path"] in self.exempt_paths:
             await self.app(scope, receive, send)
             return
 
-        body, receive = await _buffer_body(receive)
+        try:
+            body, receive = await _buffer_body(receive, max_bytes=self.max_request_body_bytes)
+        except RequestTooLargeError as exc:
+            await _send_error(send, 413, str(exc))
+            return
 
         method = scope["method"]
         url = _reconstruct_url(scope)
@@ -106,7 +118,9 @@ class NostrAuthMiddleware:
         )
         set_current_request(request)
         try:
-            await self.app(scope, receive, send)
+            with anyio.fail_after(self.request_timeout_seconds):
+                async with self._request_slots:
+                    await self.app(scope, receive, send)
         finally:
             set_current_request(None)
 
@@ -134,7 +148,11 @@ class NostrAuthMiddleware:
             return None
 
 
-async def _buffer_body(receive):
+class RequestTooLargeError(ValueError):
+    """The request body exceeds the configured HTTP limit."""
+
+
+async def _buffer_body(receive, *, max_bytes: int):
     """Fully drain `receive`, returning (body_bytes, replacement_receive).
 
     NIP-98 needs the exact body bytes to check the 'payload' tag before the
@@ -142,12 +160,17 @@ async def _buffer_body(receive):
     once. Buffer it and hand back a receive callable that replays it.
     """
     chunks = []
+    total_bytes = 0
     more_body = True
     while more_body:
         message = await receive()
         if message["type"] != "http.request":
             break
-        chunks.append(message.get("body", b""))
+        chunk = message.get("body", b"")
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise RequestTooLargeError(f"request body exceeds {max_bytes} bytes")
+        chunks.append(chunk)
         more_body = message.get("more_body", False)
     body = b"".join(chunks)
 
