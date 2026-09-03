@@ -92,13 +92,17 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")
     ),
     # PLAN.md Phase 13's two highest-risk, already-implemented candidates
-    # get owner co-signing by default - the others it names (user deletion,
-    # domain removal, firewall/permission changes) aren't implemented as
-    # tools yet, and "app removal with data" would need argument-conditional
-    # policy (require_owner_signature only when purge=true) this dataclass
-    # doesn't support - noted as a real gap, not silently assumed covered.
+    # get owner co-signing by default - "app removal with data" would need
+    # argument-conditional policy (require_owner_signature only when
+    # purge=true) this dataclass doesn't support - noted as a real gap, not
+    # silently assumed covered. "domain removal" and "firewall changes" are
+    # still not implemented as tools; "user deletion" and "permission
+    # changes" now are (below), matching what Phase 13 names them as.
     "backups.restore": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "system.upgrade": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    "users.write": PolicyRule(require_confirmation=True),
+    "users.delete": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    "users.permissions": PolicyRule(require_confirmation=True, require_owner_signature=True),
 }
 
 

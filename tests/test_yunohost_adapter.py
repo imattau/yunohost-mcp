@@ -75,6 +75,66 @@ def test_users_list():
     assert "alice" in result["users"]
 
 
+def test_user_create():
+    result = make_adapter().user_create("alice", domain="example.com", password="hunter2", fullname="Alice Example")
+    assert result["fake"] is True
+    assert result["username"] == "alice"
+
+
+def test_user_update():
+    result = make_adapter().user_update("alice", fullname="Alice New")
+    assert result["fake"] is True
+    assert result["username"] == "alice"
+
+
+def test_user_delete():
+    result = make_adapter().user_delete("alice", purge=True)
+    assert result["fake"] is True
+    assert result["username"] == "alice"
+
+
+def test_user_group_list():
+    result = make_adapter().user_group_list()
+    assert "all_users" in result["groups"]
+
+
+def test_user_group_create():
+    result = make_adapter().user_group_create("editors")
+    assert result["fake"] is True
+    assert result["groupname"] == "editors"
+
+
+def test_user_group_update():
+    result = make_adapter().user_group_update("editors", add=["alice"])
+    assert result["fake"] is True
+    assert result["groupname"] == "editors"
+
+
+def test_user_group_delete():
+    result = make_adapter().user_group_delete("editors")
+    assert result["fake"] is True
+    assert result["groupname"] == "editors"
+
+
+def test_user_permission_list():
+    result = make_adapter().user_permission_list()
+    assert "permissions" in result
+
+
+def test_user_permission_add():
+    result = make_adapter().user_permission_add("myapp.main", ["alice"])
+    assert result["fake"] is True
+    assert result["permission"] == "myapp.main"
+    assert result["names"] == ["alice"]
+
+
+def test_user_permission_remove():
+    result = make_adapter().user_permission_remove("myapp.main", ["alice"])
+    assert result["fake"] is True
+    assert result["permission"] == "myapp.main"
+    assert result["names"] == ["alice"]
+
+
 def test_backups_list():
     result = make_adapter().backups_list()
     assert isinstance(result["archives"], list)

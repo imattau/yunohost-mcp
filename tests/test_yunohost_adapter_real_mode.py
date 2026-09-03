@@ -140,6 +140,76 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     # so injecting a fake yunohost.domain submodule wouldn't reach it.
     yunohost_domain = types.ModuleType("yunohost.domain")
 
+    @_is_unit_operation()
+    def user_create(operation_logger, username, domain, password, fullname, mailbox_quota="0", admin=False, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(username, str), f"username corrupted: got {username!r}"
+        calls["user_create"] = {
+            "username": username,
+            "domain": domain,
+            "fullname": fullname,
+            "mailbox_quota": mailbox_quota,
+            "admin": admin,
+        }
+        return {"fullname": fullname, "username": username}
+
+    @_is_unit_operation()
+    def user_update(operation_logger, username, fullname=None, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(username, str), f"username corrupted: got {username!r}"
+        calls["user_update"] = {"username": username, "fullname": fullname}
+        return None
+
+    @_is_unit_operation()
+    def user_delete(operation_logger, username, purge=False, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(username, str), f"username corrupted: got {username!r}"
+        calls["user_delete"] = {"username": username, "purge": purge}
+        return None
+
+    @_is_unit_operation()
+    def user_group_create(operation_logger, groupname, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(groupname, str), f"groupname corrupted: got {groupname!r}"
+        calls["user_group_create"] = {"groupname": groupname}
+        return {"groupname": groupname}
+
+    @_is_unit_operation()
+    def user_group_update(operation_logger, groupname, add=None, remove=None, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(groupname, str), f"groupname corrupted: got {groupname!r}"
+        calls["user_group_update"] = {"groupname": groupname, "add": add, "remove": remove}
+        return None
+
+    @_is_unit_operation()
+    def user_group_delete(operation_logger, groupname, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(groupname, str), f"groupname corrupted: got {groupname!r}"
+        calls["user_group_delete"] = {"groupname": groupname}
+        return None
+
+    # user_permission_add/user_permission_remove are @is_flash_unit_operation
+    # (flash=True) in the real code - log.py's is_unit_operation() never
+    # prepends an OperationLogger when flash=True, so these two never take
+    # one at all. Plain functions here, not wrapped in _is_unit_operation().
+    def user_permission_add(permission, names, **_):
+        calls["user_permission_add"] = {"permission": permission, "names": names}
+        return {"allowed": names}
+
+    def user_permission_remove(permission, names, **_):
+        calls["user_permission_remove"] = {"permission": permission, "names": names}
+        return {"allowed": []}
+
+    yunohost_user = types.ModuleType("yunohost.user")
+    yunohost_user.user_create = user_create
+    yunohost_user.user_update = user_update
+    yunohost_user.user_delete = user_delete
+    yunohost_user.user_group_create = user_group_create
+    yunohost_user.user_group_update = user_group_update
+    yunohost_user.user_group_delete = user_group_delete
+    yunohost_user.user_permission_add = user_permission_add
+    yunohost_user.user_permission_remove = user_permission_remove
+
     def certificate_status(domains, **_):
         return {"certificates": {d: {"CA_type": "selfsigned"} for d in domains}}
 
@@ -154,6 +224,7 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
         "yunohost.service": yunohost_service,
         "yunohost.domain": yunohost_domain,
         "yunohost.certificate": yunohost_certificate,
+        "yunohost.user": yunohost_user,
     }.items():
         monkeypatch.setitem(__import__("sys").modules, name, module)
 
@@ -190,3 +261,59 @@ def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
     # correct.
     real_mode_adapter.service_restart(["nginx"])
     assert real_mode_adapter._test_calls["service_restart"] == {"names": ["nginx"]}
+
+
+def test_user_create_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_create("alice", domain="example.com", password="hunter2", fullname="Alice Example")
+    assert real_mode_adapter._test_calls["user_create"] == {
+        "username": "alice",
+        "domain": "example.com",
+        "fullname": "Alice Example",
+        "mailbox_quota": "0",
+        "admin": False,
+    }
+
+
+def test_user_update_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_update("alice", fullname="Alice New")
+    assert real_mode_adapter._test_calls["user_update"] == {"username": "alice", "fullname": "Alice New"}
+
+
+def test_user_delete_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_delete("alice", purge=True)
+    assert real_mode_adapter._test_calls["user_delete"] == {"username": "alice", "purge": True}
+
+
+def test_user_group_create_receives_correct_groupname_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_group_create("editors")
+    assert real_mode_adapter._test_calls["user_group_create"] == {"groupname": "editors"}
+
+
+def test_user_group_update_receives_correct_groupname_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_group_update("editors", add=["alice"])
+    assert real_mode_adapter._test_calls["user_group_update"] == {
+        "groupname": "editors",
+        "add": ["alice"],
+        "remove": None,
+    }
+
+
+def test_user_group_delete_receives_correct_groupname_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_group_delete("editors")
+    assert real_mode_adapter._test_calls["user_group_delete"] == {"groupname": "editors"}
+
+
+def test_user_permission_add_unaffected(real_mode_adapter: YunohostAdapter):
+    # user_permission_add/remove are @is_flash_unit_operation (flash=True),
+    # so - like service_restart - they never receive an OperationLogger at
+    # all; nothing for the corruption bug to have a chance to hit.
+    real_mode_adapter.user_permission_add("myapp.main", ["alice"])
+    assert real_mode_adapter._test_calls["user_permission_add"] == {"permission": "myapp.main", "names": ["alice"]}
+
+
+def test_user_permission_remove_unaffected(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.user_permission_remove("myapp.main", ["alice"])
+    assert real_mode_adapter._test_calls["user_permission_remove"] == {
+        "permission": "myapp.main",
+        "names": ["alice"],
+    }

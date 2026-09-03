@@ -333,6 +333,234 @@ def users_list() -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda username, domain, password=None, fullname=None, mailbox_quota="0", admin=False, **_: {
+        "action": "create user",
+        "username": username,
+        "domain": domain,
+        "fullname": fullname,
+        "admin": admin,
+        "mailbox_quota": mailbox_quota,
+    },
+)
+def user_create(
+    username: str,
+    domain: str,
+    password: str,
+    fullname: str,
+    mailbox_quota: str | None = "0",
+    admin: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a YunoHost user account/mailbox on `domain` (must already be
+    registered - see domain_add/domains_list). `admin` adds the new user to
+    the `admins` group, granting webadmin/SSH access - grant with care."""
+    return adapter.user_create(
+        username, domain=domain, password=password, fullname=fullname, mailbox_quota=mailbox_quota, admin=admin
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda username, change_password=None, **kwargs: {
+        "action": "update user",
+        "username": username,
+        "changing_password": change_password is not None,
+        "fields": sorted(k for k, v in kwargs.items() if v is not None),
+    },
+)
+def user_update(
+    username: str,
+    mail: str | None = None,
+    change_password: str | None = None,
+    add_mailforward: list[str] | None = None,
+    remove_mailforward: list[str] | None = None,
+    add_mailalias: list[str] | None = None,
+    remove_mailalias: list[str] | None = None,
+    mailbox_quota: str | None = None,
+    fullname: str | None = None,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing YunoHost user's mail/password/quota/fullname.
+    Only the fields passed are changed; omitted fields are left as-is."""
+    return adapter.user_update(
+        username,
+        mail=mail,
+        change_password=change_password,
+        add_mailforward=add_mailforward,
+        remove_mailforward=remove_mailforward,
+        add_mailalias=add_mailalias,
+        remove_mailalias=remove_mailalias,
+        mailbox_quota=mailbox_quota,
+        fullname=fullname,
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_DELETE)
+@audited_write("users.delete", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.delete",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda username, purge=False, **_: {
+        "action": "delete user",
+        "username": username,
+        "purge": purge,
+        "warning": "Irreversible. purge=true also deletes the user's mailbox/home directory.",
+    },
+)
+def user_delete(username: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Delete a YunoHost user account. Requires owner co-signature
+    (approve_operation) in addition to confirmation - see PLAN.md Phase 13."""
+    return adapter.user_delete(username, purge=purge)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_READ)
+def user_group_list() -> dict[str, Any]:
+    """List YunoHost user groups (e.g. `all_users`, `admins`, and any
+    per-app permission groups) and their members."""
+    return adapter.user_group_list()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda groupname, **_: {"action": "create group", "groupname": groupname},
+)
+def user_group_create(groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Create a new YunoHost user group - a prerequisite for granting a
+    custom set of users access to an app permission (see
+    user_permission_add) rather than an individual username."""
+    return adapter.user_group_create(groupname)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda groupname, add=None, remove=None, **_: {
+        "action": "update group",
+        "groupname": groupname,
+        "add": add,
+        "remove": remove,
+    },
+)
+def user_group_update(
+    groupname: str, add: list[str] | None = None, remove: list[str] | None = None, confirmation_id: str | None = None
+) -> dict[str, Any]:
+    """Add or remove usernames from a YunoHost group (e.g. adding a user to
+    `admins` grants webadmin/SSH access - grant with care)."""
+    return adapter.user_group_update(groupname, add=add, remove=remove)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_DELETE)
+@audited_write("users.delete", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.delete",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda groupname, **_: {
+        "action": "delete group",
+        "groupname": groupname,
+        "warning": "Irreversible. Any permissions granted to this group are revoked.",
+    },
+)
+def user_group_delete(groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Delete a YunoHost user group. Requires owner co-signature
+    (approve_operation) in addition to confirmation - see PLAN.md Phase 13."""
+    return adapter.user_group_delete(groupname)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_READ)
+def user_permission_list() -> dict[str, Any]:
+    """List app/system permissions and which users/groups are allowed each
+    one (e.g. which apps a given group can access)."""
+    return adapter.user_permission_list()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.permissions", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.permissions",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda permission, names, **_: {
+        "action": "grant permission",
+        "permission": permission,
+        "names": names,
+    },
+)
+def user_permission_add(permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+    """Grant a user or group access to an app permission (e.g. "myapp.main"
+    - see user_permission_list for existing permission names). Requires
+    owner co-signature (approve_operation) in addition to confirmation -
+    see PLAN.md Phase 13's "permission changes" candidate."""
+    return adapter.user_permission_add(permission, names)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.permissions", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.permissions",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda permission, names, **_: {
+        "action": "revoke permission",
+        "permission": permission,
+        "names": names,
+    },
+)
+def user_permission_remove(permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+    """Revoke a user or group's access to an app permission. Requires owner
+    co-signature (approve_operation) in addition to confirmation - see
+    PLAN.md Phase 13's "permission changes" candidate."""
+    return adapter.user_permission_remove(permission, names)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_READ)
 def backups_list() -> dict[str, Any]:
     """List available backup archives."""

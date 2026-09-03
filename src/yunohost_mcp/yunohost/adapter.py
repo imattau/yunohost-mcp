@@ -430,6 +430,128 @@ class YunohostAdapter:
         user_list = _import_attr("yunohost.user", "user_list")
         return {"fake": False, **user_list()}
 
+    # user_create/user_delete/user_update/user_group_create/user_group_delete/
+    # user_group_update are @is_unit_operation-decorated (yunohost.user), same
+    # no-manual-operation_logger convention as app_remove/domain_add above -
+    # called with real args only, letting the decorator prepend its own
+    # OperationLogger. None of them import yunohost.utils.form (checked
+    # against /tmp/yunohost-src at review time: neither user.py nor
+    # permission.py references it), so - unlike domain_add/app_install -
+    # there's no pydantic v1/v2 conflict requiring _call_via_system_python
+    # here; a plain in-process _import_attr call is fine.
+    def user_create(
+        self,
+        username: str,
+        domain: str,
+        password: str,
+        fullname: str,
+        mailbox_quota: str | None = "0",
+        admin: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_create", "username": username}
+        user_create = _import_attr("yunohost.user", "user_create")
+        result = user_create(
+            username=username,
+            domain=domain,
+            password=password,
+            fullname=fullname,
+            mailbox_quota=mailbox_quota,
+            admin=admin,
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
+
+    def user_update(
+        self,
+        username: str,
+        mail: str | None = None,
+        change_password: str | None = None,
+        add_mailforward: list[str] | None = None,
+        remove_mailforward: list[str] | None = None,
+        add_mailalias: list[str] | None = None,
+        remove_mailalias: list[str] | None = None,
+        mailbox_quota: str | None = None,
+        fullname: str | None = None,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_update", "username": username}
+        user_update = _import_attr("yunohost.user", "user_update")
+        result = user_update(
+            username=username,
+            mail=mail,
+            change_password=change_password,
+            add_mailforward=add_mailforward,
+            remove_mailforward=remove_mailforward,
+            add_mailalias=add_mailalias,
+            remove_mailalias=remove_mailalias,
+            mailbox_quota=mailbox_quota,
+            fullname=fullname,
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
+
+    def user_delete(self, username: str, purge: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_delete", "username": username}
+        user_delete = _import_attr("yunohost.user", "user_delete")
+        user_delete(username=username, purge=purge)
+        return {"fake": False, "operation_id": _latest_operation_id(), "username": username}
+
+    def user_group_list(self) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "groups": {"all_users": {"members": ["alice"]}}}
+        user_group_list = _import_attr("yunohost.user", "user_group_list")
+        return {"fake": False, **user_group_list()}
+
+    def user_group_create(self, groupname: str) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_group_create", "groupname": groupname}
+        user_group_create = _import_attr("yunohost.user", "user_group_create")
+        result = user_group_create(groupname=groupname)
+        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+
+    def user_group_update(
+        self, groupname: str, add: list[str] | None = None, remove: list[str] | None = None
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_group_update", "groupname": groupname}
+        user_group_update = _import_attr("yunohost.user", "user_group_update")
+        result = user_group_update(groupname=groupname, add=add, remove=remove)
+        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+
+    def user_group_delete(self, groupname: str) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-user_group_delete", "groupname": groupname}
+        user_group_delete = _import_attr("yunohost.user", "user_group_delete")
+        user_group_delete(groupname=groupname)
+        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname}
+
+    def user_permission_list(self) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "permissions": {"myapp.main": {"allowed": ["all_users"]}}}
+        user_permission_list = _import_attr("yunohost.user", "user_permission_list")
+        return {"fake": False, **user_permission_list(full=True)}
+
+    # user_permission_add/user_permission_remove are @is_flash_unit_operation
+    # (flash=True) - log.py's is_unit_operation() only prepends an
+    # OperationLogger positionally when flash=False, so unlike every other
+    # write in this file these two never take one at all; nothing to avoid
+    # corrupting here, no _latest_operation_id() to recover either (a flash
+    # operation's log entry isn't findable the same way - PLAN.md's
+    # operation_status/operation_logs tools won't have an id for this call).
+    def user_permission_add(self, permission: str, names: list[str]) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "permission": permission, "names": names}
+        user_permission_add = _import_attr("yunohost.user", "user_permission_add")
+        result = user_permission_add(permission=permission, names=names)
+        return {"fake": False, "permission": permission, "result": result}
+
+    def user_permission_remove(self, permission: str, names: list[str]) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "permission": permission, "names": names}
+        user_permission_remove = _import_attr("yunohost.user", "user_permission_remove")
+        result = user_permission_remove(permission=permission, names=names)
+        return {"fake": False, "permission": permission, "result": result}
+
     def backups_list(self) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "archives": ["20260901-000000"]}

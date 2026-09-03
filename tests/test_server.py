@@ -39,6 +39,9 @@ PHASE10_TOOLS = {"audit_list", "audit_get"}
 PHASE11_TOOLS = {"server_identity"}
 PHASE13_TOOLS = {"approve_operation"}
 PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app", "test_package"}
+USER_MGMT_READ_TOOLS = {"user_group_list", "user_permission_list"}
+USER_MGMT_PLAIN_CONFIRM_TOOLS = {"user_create", "user_update", "user_group_create", "user_group_update"}
+USER_MGMT_OWNER_COSIGN_TOOLS = {"user_delete", "user_group_delete", "user_permission_add", "user_permission_remove"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -104,6 +107,9 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE11_TOOLS
             | PHASE13_TOOLS
             | PHASE14_TOOLS
+            | USER_MGMT_READ_TOOLS
+            | USER_MGMT_PLAIN_CONFIRM_TOOLS
+            | USER_MGMT_OWNER_COSIGN_TOOLS
         )
         assert expected <= names
 
@@ -121,6 +127,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("service_status", {"names": ["nginx"]}),
         ("domains_list", {}),
         ("users_list", {}),
+        ("user_group_list", {}),
+        ("user_permission_list", {}),
         ("backups_list", {}),
         ("operations_list", {}),
         ("operation_status", {"name": "20260901-120000-app_install"}),
@@ -235,6 +243,90 @@ async def test_domain_add_requires_then_accepts_a_plain_confirmation():
         assert confirmed.structured_content.get("fake") is True
         assert confirmed.structured_content["domain"] == "new.example.com"
         assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        (
+            "user_create",
+            {"username": "alice", "domain": "example.com", "password": "hunter2", "fullname": "Alice Example"},
+        ),
+        ("user_update", {"username": "alice", "fullname": "Alice New"}),
+        ("user_group_create", {"groupname": "editors"}),
+        ("user_group_update", {"groupname": "editors", "add": ["alice"]}),
+    ],
+)
+async def test_user_mgmt_plain_confirmable_write_requires_then_accepts_confirmation(tool: str, args: dict):
+    # users.write has require_confirmation but not require_owner_signature -
+    # same single-caller confirmation shape as domain_add above.
+    async with Client(mcp) as client:
+        first = await client.call_tool(tool, args)
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("user_delete", {"username": "alice"}),
+        ("user_group_delete", {"groupname": "editors"}),
+        ("user_permission_add", {"permission": "myapp.main", "names": ["alice"]}),
+        ("user_permission_remove", {"permission": "myapp.main", "names": ["alice"]}),
+    ],
+)
+async def test_user_mgmt_owner_cosign_write_requires_then_accepts_confirmation(tool: str, args: dict):
+    # users.delete / users.permissions both require owner co-signature -
+    # same two-identity shape as backup_restore/system_upgrade above
+    # (PLAN.md Phase 13 names "user deletion" and "permission changes" as
+    # candidates for this).
+    async with Client(mcp) as client:
+        first = await client.call_tool(tool, args)
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is True
+        confirmation_id = plan_response["confirmation_id"]
+
+        not_yet_approved = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert not_yet_approved.is_error is True
+
+        await _approve_as_second_admin(client, confirmation_id)
+
+        confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_user_create_password_is_redacted_from_confirmation_plan_and_audit_log():
+    # password must never appear in the echoed operation_plan (returned to
+    # the caller) or the audit log entry - redaction.py's is_sensitive_key
+    # substring-matches "password" in both the plan_builder's own fields and
+    # the raw kwargs audit_log.record() stores.
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    args = {"username": "alice", "domain": "example.com", "password": "hunter2", "fullname": "Alice Example"}
+    async with Client(mcp) as client:
+        first = await client.call_tool("user_create", args)
+        assert "hunter2" not in json.dumps(first.structured_content)
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        confirmed = await client.call_tool("user_create", {**args, "confirmation_id": confirmation_id})
+        assert "hunter2" not in json.dumps(confirmed.structured_content)
+
+    new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+    assert "hunter2" not in "\n".join(new_lines)
 
 
 @pytest.mark.anyio
