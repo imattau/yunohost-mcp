@@ -13,6 +13,21 @@ yunohost-mcp --transport http --host 127.0.0.1 --port 8765   # NIP-98-authentica
 
 By default `fake_yunohost` is off (real mode) — set `YUNOHOST_MCP_FAKE_YUNOHOST=true` to run against canned data on a machine without YunoHost installed. See `identity.example.toml` for `identity.toml`'s shape (pubkey → role mapping; required before any HTTP request can do anything).
 
+## Installing the client tools
+
+Once published, install the Python package with:
+
+```bash
+python3 -m pip install yunohost-mcp
+```
+
+This installs `yunohost-mcp`, `yunohost-mcp-connect`, and
+`yunohost-mcp-delegate`. For an isolated command-line installation, use:
+
+```bash
+uv tool install yunohost-mcp
+```
+
 ## Connecting a client: yunohost-mcp-connect
 
 Mainstream MCP clients (Claude Desktop, a plain Codex install, etc.) have no way to sign a NIP-98 `Authorization` header — that's specific to this server. `yunohost-mcp-connect` bridges the gap: a small local process that speaks plain MCP over stdio to your actual client, and forwards every request to the remote `--transport http` server, signed with your own Nostr key.
