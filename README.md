@@ -25,6 +25,39 @@ yunohost-mcp-connect --remote-url https://your-yunohost-domain/mcp --key-file ~/
 - `--delegation-file` (or `$YUNOHOST_MCP_CLIENT_DELEGATION_FILE`) presents a delegation event (PLAN.md Phase 11) alongside your own signature, for a disposable agent identity an owner granted a subset of their access to.
 - Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are all forwarded verbatim; every other MCP feature and all authorization/policy/audit still happens exactly as it would if you'd signed the request yourself, because you did.
 
+## Connecting Claude Desktop or Codex
+
+Both point at `yunohost-mcp-connect`, not at the server directly — the bridge is what signs each request with your Nostr key. Use the full path to `yunohost-mcp-connect` in whatever environment you installed `yunohost-mcp` into (e.g. `~/.local/pipx/venvs/yunohost-mcp/bin/yunohost-mcp-connect`, or a venv's `bin/` directory — `which yunohost-mcp-connect` after activating it will tell you).
+
+**Claude Desktop** (`claude_desktop_config.json` — Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "yunohost-mcp": {
+      "command": "/full/path/to/yunohost-mcp-connect",
+      "env": {
+        "YUNOHOST_MCP_CLIENT_REMOTE_URL": "https://your-yunohost-domain/mcp",
+        "YUNOHOST_MCP_CLIENT_KEY_FILE": "/home/you/.config/yunohost-mcp/key"
+      }
+    }
+  }
+}
+```
+
+**Codex CLI** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.yunohost-mcp]
+command = "/full/path/to/yunohost-mcp-connect"
+
+[mcp_servers.yunohost-mcp.env]
+YUNOHOST_MCP_CLIENT_REMOTE_URL = "https://your-yunohost-domain/mcp"
+YUNOHOST_MCP_CLIENT_KEY_FILE = "/home/you/.config/yunohost-mcp/key"
+```
+
+For a delegated (disposable) identity instead of your own key, add `YUNOHOST_MCP_CLIENT_DELEGATION_FILE` pointing at the file `yunohost-mcp-delegate` produced (see below). Restart the client after editing its config — both read this file once, at startup.
+
 ## Granting a disposable agent identity access: yunohost-mcp-delegate
 
 An `identity.toml` entry grants access to one specific pubkey, permanently (until edited). A delegation (PLAN.md Phase 11) is the other way to grant access: an owner signs a short-lived, scoped grant to an agent's own disposable key, without ever adding that key to `identity.toml` or handing over any private key. `yunohost-mcp-delegate` is what an owner runs to create one:
