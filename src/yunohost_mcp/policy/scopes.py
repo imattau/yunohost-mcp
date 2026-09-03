@@ -42,6 +42,10 @@ class Scope(StrEnum):
     PACKAGES_INSPECT = "packages.inspect"
     PACKAGES_TEST = "packages.test"
 
+    CATALOG_INSPECT = "catalog.inspect"
+    CATALOG_VERIFY = "catalog.verify"
+    CATALOG_PUBLISH = "catalog.publish"
+
     # Not granted by any role except administrator (policy/roles.py) - this
     # is what makes audit_list()/audit_get() "administrator-only" per
     # PLAN.md Phase 10, without a role-name check in the tool itself.

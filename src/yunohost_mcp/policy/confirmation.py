@@ -98,6 +98,16 @@ class ConfirmationStore:
         self._pending[confirmation_id] = updated
         return updated
 
+    def peek(self, confirmation_id: str) -> ConfirmationTicket:
+        """Return a pending ticket without consuming it."""
+        ticket = self._pending.get(confirmation_id)
+        if ticket is None:
+            raise ConfirmationError("unknown or already-used confirmation_id")
+        if time.time() >= ticket.expires_at:
+            del self._pending[confirmation_id]
+            raise ConfirmationError("confirmation has expired")
+        return ticket
+
     def consume(
         self,
         confirmation_id: str,

@@ -13,3 +13,4 @@ os.environ.setdefault("YUNOHOST_MCP_CONFIG_DIR", tempfile.mkdtemp(prefix="yunoho
 # Tests run on hosts without YunoHost installed; fake mode is an explicit
 # test fixture now that production correctly defaults to real mode.
 os.environ.setdefault("YUNOHOST_MCP_FAKE_YUNOHOST", "true")
+os.environ.setdefault("YUNOHOST_MCP_CATALOG_RELAYS", "wss://relay.test")

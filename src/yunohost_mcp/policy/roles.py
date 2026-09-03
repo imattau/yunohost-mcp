@@ -22,6 +22,8 @@ _READONLY: frozenset[Scope] = frozenset(
         Scope.USERS_READ,
         Scope.DOMAINS_READ,
         Scope.PACKAGES_INSPECT,
+        Scope.CATALOG_INSPECT,
+        Scope.CATALOG_VERIFY,
     }
 )
 

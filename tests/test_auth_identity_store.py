@@ -103,3 +103,75 @@ def test_malformed_toml_raises_config_error(tmp_path: Path):
     toml_path.write_text("this is not [valid toml")
     with pytest.raises(IdentityConfigError):
         IdentityStore.load(toml_path)
+
+
+def test_live_store_picks_up_changes_without_reconstruction(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    store = IdentityStore.live(toml_path)
+
+    # No file yet: deny-by-default, same as a static store over a missing file.
+    assert store.lookup(HEX_PUBKEY) is None
+    assert len(store) == 0
+
+    # An admin grants access by editing the file - no restart, no new store.
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Newly granted agent"
+roles = ["readonly"]
+"""
+    )
+    record = store.lookup(HEX_PUBKEY)
+    assert record is not None
+    assert record.name == "Newly granted agent"
+    assert len(store) == 1
+
+    # And revoking it (deleting the entry) takes effect immediately too.
+    toml_path.write_text("")
+    assert store.lookup(HEX_PUBKEY) is None
+    assert len(store) == 0
+
+
+def test_live_store_denies_everyone_on_transient_parse_error(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Admin"
+roles = ["administrator"]
+"""
+    )
+    store = IdentityStore.live(toml_path)
+    assert store.lookup(HEX_PUBKEY) is not None
+
+    # A mid-edit typo must not crash the request - it denies everyone
+    # (deny-by-default) rather than raising IdentityConfigError up through
+    # the middleware.
+    toml_path.write_text("this is not [valid toml")
+    assert store.lookup(HEX_PUBKEY) is None
+    assert len(store) == 0
+
+    # And recovers once the file is fixed again.
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Admin"
+roles = ["administrator"]
+"""
+    )
+    assert store.lookup(HEX_PUBKEY) is not None
+
+
+def test_static_load_is_unaffected_by_later_file_changes(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Admin"
+roles = ["administrator"]
+"""
+    )
+    store = IdentityStore.load(toml_path)
+    toml_path.write_text("")
+    # .load() is a one-time snapshot: existing behavior/tests must not change.
+    assert store.lookup(HEX_PUBKEY) is not None

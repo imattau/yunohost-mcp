@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # does NOT have them). An absolute path avoids PATH ambiguity entirely.
     package_linter_python: str = "python3"
 
+    # Same-host Nostr YunoHost catalogue publisher integration.
+    catalog_cli_path: Path = Path("/var/lib/nostr-catalogd/nostr-ynh")
+    catalog_publisher_key_path: Path = Path("/etc/nostr-catalogd/publisher.key")
+    catalog_relays: str = ""
+    catalog_cli_timeout_seconds: int = 120
+    catalog_require_remote_ref: bool = True
+
     # HTTP exposure limits. These are deliberately bounded defaults; a
     # deployment can lower them, but should not silently run unbounded.
     max_request_body_bytes: int = 1_048_576

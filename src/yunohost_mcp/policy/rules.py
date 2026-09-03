@@ -85,6 +85,7 @@ def _parse_duration(value: str) -> int:
 
 
 DEFAULT_POLICY: dict[str, PolicyRule] = {
+    "catalog.publish": PolicyRule(require_confirmation=True),
     "apps.upgrade": PolicyRule(require_backup=True, minimum_free_space_bytes=_parse_size("2GB")),
     "apps.remove": PolicyRule(
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")

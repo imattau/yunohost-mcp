@@ -23,7 +23,12 @@ live YunoHost.
 from __future__ import annotations
 
 import importlib
+import json
+import os
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from yunohost_mcp.config import Settings
@@ -393,6 +398,174 @@ class YunohostAdapter:
             ) from exc
         passed = not report.get("error") and not report.get("critical")
         return {"fake": False, "passed": passed, **report}
+
+    # -- Nostr YunoHost catalogue -----------------------------------------
+
+    def catalog_package_inspect(self, source: str, ref: str | None = None) -> dict[str, Any]:
+        """Inspect a local or remote package without signing or publishing."""
+        self._validate_catalog_source(source, ref)
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "source": source,
+                "ref": ref,
+                "id": "example",
+                "version": "1.0~ynh1",
+                "commit": "a" * 40,
+                "manifest_hash": "sha256:" + "0" * 64,
+                "content_hash": "sha256:" + "1" * 64,
+            }
+        if ref is not None or source.startswith(("https://", "http://")):
+            if not source.startswith("https://"):
+                raise ValueError("remote catalogue package sources must use HTTPS")
+            args = ["preview"]
+            if ref:
+                args += ["--ref", ref]
+            args.append(source)
+            return {"fake": False, **self._run_catalog_json(args)}
+        package = self.package_inspect(source)
+        return {"fake": False, "source": str(Path(source).resolve()), **package}
+
+    def catalog_publish_plan(self, source: str, ref: str | None = None) -> dict[str, Any]:
+        """Build and sign a declaration locally, without contacting relays."""
+        self._validate_catalog_source(source, ref)
+        relays = self._catalog_relays()
+        args = ["publish", "--json", "--dry-run", "--private-key-file", str(self.settings.catalog_publisher_key_path)]
+        if relays:
+            args += ["--relays", ",".join(relays)]
+        if ref is not None:
+            args += ["--repository-url", source, "--ref", ref]
+        else:
+            args += ["--repo", source]
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "source": source,
+                "ref": ref,
+                "relays": relays,
+                "app_id": "example",
+                "version": "1.0~ynh1",
+                "commit": "a" * 40,
+                "manifest_hash": "sha256:" + "0" * 64,
+                "content_hash": "sha256:" + "1" * 64,
+                "naddr": "naddr1qqxyz",
+                "event": {"id": "0" * 64, "kind": 30078},
+            }
+        result = self._run_catalog_json(args, requires_key=True)
+        event = result.get("event", {})
+        tags = {tag[0]: tag[1] for tag in event.get("tags", []) if len(tag) >= 2}
+        return {
+            "fake": False,
+            "source": source,
+            "ref": ref,
+            "relays": relays,
+            "app_id": tags.get("d"),
+            "version": tags.get("version"),
+            "commit": tags.get("commit"),
+            "manifest_hash": tags.get("manifest"),
+            "content_hash": tags.get("content"),
+            **result,
+        }
+
+    def catalog_publish(self, source: str, ref: str | None = None) -> dict[str, Any]:
+        """Publish a previously planned package declaration to configured relays."""
+        self._validate_catalog_source(source, ref)
+        relays = self._catalog_relays()
+        if not relays:
+            raise ValueError("catalog_relays must contain at least one relay URL")
+        args = ["publish", "--json", "--private-key-file", str(self.settings.catalog_publisher_key_path), "--relays", ",".join(relays)]
+        if ref is not None:
+            args += ["--repository-url", source, "--ref", ref]
+        else:
+            args += ["--repo", source]
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "source": source,
+                "ref": ref,
+                "relays": [{"relay": r, "published": True} for r in relays],
+                "published": True,
+                "naddr": "naddr1qqxyz",
+                "event": {"id": "0" * 64, "kind": 30078},
+                "verification": {"valid": True, "mode": "local-event"},
+            }
+        result = self._run_catalog_json(args, requires_key=True)
+        event = result.get("event")
+        if result.get("published") and isinstance(event, dict):
+            result["verification"] = self.catalog_verify(json.dumps(event))
+        return {"fake": False, **result}
+
+    def catalog_verify(self, event_or_naddr: str) -> dict[str, Any]:
+        """Verify a declaration event or fetch and verify an naddr."""
+        if self.settings.fake_yunohost:
+            return {"fake": True, "valid": True, "value": event_or_naddr}
+        if event_or_naddr.startswith("naddr"):
+            return {"fake": False, **self._run_catalog_json(["inspect", "--json", event_or_naddr])}
+        try:
+            event = json.loads(event_or_naddr)
+        except json.JSONDecodeError as exc:
+            raise ValueError("event_or_naddr must be a JSON event or naddr") from exc
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(event, handle)
+            event_path = handle.name
+        try:
+            return {"fake": False, **self._run_catalog_json(["verify", "--json", event_path])}
+        finally:
+            Path(event_path).unlink(missing_ok=True)
+
+    def _catalog_relays(self) -> list[str]:
+        return [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
+
+    def _validate_catalog_source(self, source: str, ref: str | None) -> None:
+        if ref is not None:
+            if not source.startswith("https://"):
+                raise ValueError("a ref may only be used with an HTTPS remote repository")
+            if not ref.strip():
+                raise ValueError("remote repository ref must not be empty")
+            return
+        if source.startswith(("https://", "http://")):
+            if not source.startswith("https://"):
+                raise ValueError("remote catalogue package sources must use HTTPS")
+            if self.settings.catalog_require_remote_ref:
+                raise ValueError("an explicit ref is required for remote catalogue sources")
+            return
+        path = Path(source)
+        if not path.exists() or not path.is_dir():
+            raise ValueError("local catalogue source must be an existing directory")
+
+    def _run_catalog_json(self, args: list[str], *, requires_key: bool = False) -> dict[str, Any]:
+        cli = self.settings.catalog_cli_path
+        if not cli.is_file() or not os.access(cli, os.X_OK):
+            raise YunohostUnavailableError(f"catalog CLI is not executable: {cli}")
+        if requires_key:
+            key = self.settings.catalog_publisher_key_path
+            if not key.is_file() or key.is_symlink():
+                raise YunohostUnavailableError(f"catalog publisher key is not a regular file: {key}")
+            if key.stat().st_mode & 0o077:
+                raise YunohostUnavailableError(f"catalog publisher key is not owner-only (expected mode 0600): {key}")
+        try:
+            proc = subprocess.run(
+                [str(cli), *args],
+                capture_output=True,
+                text=True,
+                timeout=self.settings.catalog_cli_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise YunohostUnavailableError("catalog CLI timed out") from exc
+        if len(proc.stdout) > 2_000_000:
+            raise YunohostUnavailableError("catalog CLI output exceeded the configured limit")
+        try:
+            result = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise YunohostUnavailableError(
+                f"catalog CLI produced invalid JSON (exit {proc.returncode}): {proc.stderr[-2000:]}"
+            ) from exc
+        if proc.returncode != 0:
+            raise YunohostUnavailableError(f"catalog CLI failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
+        if not isinstance(result, dict):
+            raise YunohostUnavailableError("catalog CLI JSON result must be an object")
+        return result
 
     def package_install_test(self, source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
         """app_install() already accepts a local path/git URL as `source` -

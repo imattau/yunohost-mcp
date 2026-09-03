@@ -10,11 +10,14 @@ module is deny-by-default.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from yunohost_mcp.auth.npub import Bech32Error, npub_to_hex
 from yunohost_mcp.policy.roles import UnknownRoleError, scopes_for_roles
@@ -43,47 +46,89 @@ class IdentityRecord:
 
 
 class IdentityStore:
-    """pubkey (hex) -> IdentityRecord, loaded from identity.toml."""
+    """pubkey (hex) -> IdentityRecord, loaded from identity.toml.
 
-    def __init__(self, records: dict[str, IdentityRecord]) -> None:
+    Two modes:
+      - IdentityStore(records) / IdentityStore.load(path): a fixed, static
+        snapshot - what every existing test in this codebase uses, and fine
+        for that (no disk access needed per lookup).
+      - IdentityStore.live(path): re-reads `path` from disk on every
+        lookup()/__len__() call. This is what create_http_app() actually
+        uses - identity.toml is meant to be edited by an admin while the
+        server is running (granting or revoking an identity), and a store
+        that only ever reflects the file's state *at process startup*
+        silently requires a full service restart for that to take effect,
+        which is real, previously-shipped-wrong behavior (see git history)
+        that undermines the entire "revoking an identity is how you take
+        access away" story. Re-parsing a small TOML file per request is
+        negligible cost for a low-volume control-plane API; simplicity (no
+        cache/staleness bugs possible) beats the marginal I/O savings a
+        cache would buy here.
+    """
+
+    def __init__(self, records: dict[str, IdentityRecord], *, live_path: Path | None = None) -> None:
         self._records = records
+        self._live_path = live_path
 
     @classmethod
     def load(cls, path: Path) -> IdentityStore:
-        if not path.exists():
-            return cls({})
+        return cls(_load_records(path))
 
+    @classmethod
+    def live(cls, path: Path) -> IdentityStore:
+        return cls({}, live_path=path)
+
+    def _current_records(self) -> dict[str, IdentityRecord]:
+        if self._live_path is None:
+            return self._records
         try:
-            data = tomllib.loads(path.read_text())
-        except tomllib.TOMLDecodeError as exc:
-            raise IdentityConfigError(f"{path}: invalid TOML: {exc}") from exc
-
-        records: dict[str, IdentityRecord] = {}
-        for raw_key, entry in data.get("identity", {}).items():
-            pubkey = _resolve_key_to_hex(raw_key)
-            roles = tuple(entry.get("roles", []))
-            try:
-                scopes = scopes_for_roles(roles)
-            except UnknownRoleError as exc:
-                raise IdentityConfigError(f"{path}: identity {raw_key!r}: {exc}") from exc
-
-            expires_raw = entry.get("expires")
-            expires = datetime.fromisoformat(expires_raw) if expires_raw else None
-
-            records[pubkey] = IdentityRecord(
-                pubkey=pubkey,
-                name=entry.get("name", raw_key),
-                roles=roles,
-                scopes=scopes,
-                expires=expires,
-            )
-        return cls(records)
+            return _load_records(self._live_path)
+        except IdentityConfigError as exc:
+            # A mid-edit identity.toml (e.g. a typo, or a save caught
+            # half-written) must not crash every in-flight request or lock
+            # the whole server out until it's fixed - deny-by-default means
+            # "nothing verifies" here, the same as an empty file, not "the
+            # control plane itself breaks". The error is still loud, in the
+            # logs, not swallowed silently.
+            logger.error("identity.toml reload failed, denying all identities until fixed: %s", exc)
+            return {}
 
     def lookup(self, pubkey_hex: str) -> IdentityRecord | None:
-        return self._records.get(pubkey_hex)
+        return self._current_records().get(pubkey_hex)
 
     def __len__(self) -> int:
-        return len(self._records)
+        return len(self._current_records())
+
+
+def _load_records(path: Path) -> dict[str, IdentityRecord]:
+    if not path.exists():
+        return {}
+
+    try:
+        data = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        raise IdentityConfigError(f"{path}: invalid TOML: {exc}") from exc
+
+    records: dict[str, IdentityRecord] = {}
+    for raw_key, entry in data.get("identity", {}).items():
+        pubkey = _resolve_key_to_hex(raw_key)
+        roles = tuple(entry.get("roles", []))
+        try:
+            scopes = scopes_for_roles(roles)
+        except UnknownRoleError as exc:
+            raise IdentityConfigError(f"{path}: identity {raw_key!r}: {exc}") from exc
+
+        expires_raw = entry.get("expires")
+        expires = datetime.fromisoformat(expires_raw) if expires_raw else None
+
+        records[pubkey] = IdentityRecord(
+            pubkey=pubkey,
+            name=entry.get("name", raw_key),
+            roles=roles,
+            scopes=scopes,
+            expires=expires,
+        )
+    return records
 
 
 def _resolve_key_to_hex(raw_key: str) -> str:

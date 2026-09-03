@@ -111,6 +111,7 @@ audit_log = AuditLog(path=settings.audit_log_path())
 policy_rules = load_policy(settings.policy_file_path())
 confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
+catalog_plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 
 class AsyncToolMCPServer(MCPServer):
     """Run synchronous tools in asyncio's worker pool.
@@ -700,6 +701,71 @@ def test_package(source: str, app_id: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@require_scope(Scope.CATALOG_INSPECT)
+def catalog_package_inspect(source: str, ref: str | None = None) -> dict[str, Any]:
+    """Inspect a local or remote YunoHost package for catalogue publication."""
+    return adapter.catalog_package_inspect(source, ref=ref)
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.CATALOG_INSPECT)
+def catalog_publish_plan(source: str, ref: str | None = None) -> dict[str, Any]:
+    """Build a signed catalogue declaration without contacting any relay."""
+    plan = adapter.catalog_publish_plan(source, ref=ref)
+    ticket = catalog_plan_store.create(
+        pubkey=require_current_request().pubkey,
+        tool="catalog.publish",
+        arguments={"source": source, "ref": ref},
+        plan=plan,
+    )
+    return {**plan, "plan_id": ticket.confirmation_id, "expires_at": ticket.expires_at}
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.CATALOG_VERIFY)
+def catalog_verify(event_or_naddr: str) -> dict[str, Any]:
+    """Verify a signed declaration event or fetch and verify an naddr."""
+    return adapter.catalog_verify(event_or_naddr)
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.CATALOG_PUBLISH)
+@audited_write("catalog.publish", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "catalog.publish",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda plan_id, **_: {
+        "action": "publish YunoHost package declaration to configured Nostr relays",
+        "plan_id": plan_id,
+        "warning": "This publishes externally visible catalogue metadata.",
+    },
+)
+def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Publish an existing catalogue plan after administrator confirmation."""
+    request = require_current_request()
+    try:
+        pending = catalog_plan_store.peek(plan_id)
+        arguments = {"source": pending.plan.get("source"), "ref": pending.plan.get("ref")}
+        plan_ticket = catalog_plan_store.consume(
+            plan_id,
+            pubkey=request.pubkey,
+            tool="catalog.publish",
+            arguments=arguments,
+        )
+    except (ConfirmationError, KeyError) as exc:
+        raise ConfirmationError(f"invalid catalog plan_id: {exc}") from exc
+    return adapter.catalog_publish(
+        source=plan_ticket.plan["source"],
+        ref=plan_ticket.plan.get("ref"),
+    )
+
+
+@mcp.tool()
+@redact_response
 def whoami() -> dict[str, Any]:
     """Return the caller's resolved Nostr identity: pubkey, name, roles, and scopes.
 
@@ -734,16 +800,23 @@ def server_identity() -> dict[str, Any]:
 
 
 def create_http_app():
-    """Build the ASGI app for the Streamable HTTP transport: MCP wrapped in NIP-98 auth + authz."""
+    """Build the ASGI app for the Streamable HTTP transport: MCP wrapped in NIP-98 auth + authz.
+
+    identity.toml/revoked_delegations.toml use the `.live()` stores, not
+    `.load()`: both files are meant to be edited by an admin while the
+    server keeps running (granting an identity, revoking a delegation), and
+    a one-time snapshot taken here at startup would silently require a
+    full service restart for either to take effect.
+    """
     inner_app = mcp.streamable_http_app()
-    identity_store = IdentityStore.load(settings.identity_file_path())
+    identity_store = IdentityStore.live(settings.identity_file_path())
     return NostrAuthMiddleware(
         inner_app,
         identity_store=identity_store,
         replay_cache=ReplayCache(ttl_seconds=settings.nip98_replay_ttl_seconds),
         clock_skew_seconds=settings.nip98_clock_skew_seconds,
         server_identity=get_server_identity(),
-        revocation_store=RevocationStore.load(settings.revoked_delegations_path()),
+        revocation_store=RevocationStore.live(settings.revoked_delegations_path()),
         max_request_body_bytes=settings.max_request_body_bytes,
         request_timeout_seconds=settings.request_timeout_seconds,
         max_concurrent_requests=settings.max_concurrent_requests,
