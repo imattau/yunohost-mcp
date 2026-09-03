@@ -1,0 +1,103 @@
+"""Regression tests for _call_via_system_python and the backup_create/
+backup_restore rewiring onto it.
+
+backup_create/backup_restore transitively import yunohost.utils.form (via
+backup's storage-location settings), which defines pydantic models using
+pydantic v1's @validator(field=..., config=...) signature - only valid
+against the actual pydantic v1 Debian's apt-installed python3-pydantic
+provides. This venv installs its own newer pydantic v2 (required by the
+mcp SDK and this server's own models), which shadows the system one for
+any *in-process* import of yunohost.utils.form, crashing with:
+    PydanticUserError: The `field` and `config` parameters are not
+    available in Pydantic V2, please use the `info` parameter instead.
+Since a process can only ever have one `pydantic` module loaded (Python
+caches imports in sys.modules; nothing later can make a plain `import
+pydantic` elsewhere in the same process see v1 once v2 is already loaded),
+in-process coexistence of both versions is impossible - caught against a
+real YunoHost host after fixing the three earlier moulinette-bootstrap
+bugs had gotten backup_create just far enough to hit it.
+
+_call_via_system_python sidesteps this by running the real yunohost.*
+call in a subprocess using the *system* python3, which never sees this
+venv's site-packages (and therefore its pydantic v2) at all.
+"""
+
+from __future__ import annotations
+
+import sys
+
+import pytest
+
+import yunohost_mcp.yunohost.adapter as adapter_module
+from yunohost_mcp.config import Settings
+from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError, _call_via_system_python
+
+
+def _settings(**overrides) -> Settings:
+    return Settings(fake_yunohost=False, system_python=sys.executable, system_python_timeout_seconds=30, **overrides)
+
+
+def test_call_via_system_python_round_trips_kwargs_through_a_real_subprocess():
+    # builtins.dict(**kwargs) just echoes kwargs back as a dict - a real
+    # subprocess round trip (JSON out, spawn, bootstrap best-effort import
+    # of yunohost/moulinette which aren't installed in this dev sandbox
+    # and must be swallowed harmlessly, JSON back) without needing a real
+    # YunoHost host.
+    result = _call_via_system_python("builtins", "dict", {"a": 1, "b": "x", "c": None}, _settings())
+    assert result == {"a": 1, "b": "x", "c": None}
+
+
+def test_call_via_system_python_wraps_a_subprocess_crash():
+    with pytest.raises(YunohostUnavailableError, match="totally_not_a_real_module_xyz"):
+        _call_via_system_python("totally_not_a_real_module_xyz", "whatever", {}, _settings())
+
+
+def test_call_via_system_python_reports_nonzero_exit_and_stderr():
+    with pytest.raises(YunohostUnavailableError, match="failed in the system-python subprocess"):
+        _call_via_system_python("totally_not_a_real_module_xyz", "whatever", {}, _settings())
+
+
+def test_backup_create_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"name": "my-backup", "size": 123, "results": {}}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260903-000000-backup_create")
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.backup_create(name="my-backup", apps=["nextcloud"])
+
+    assert captured["module_name"] == "yunohost.backup"
+    assert captured["attr"] == "backup_create"
+    assert captured["kwargs"] == {"name": "my-backup", "description": None, "apps": ["nextcloud"], "system": []}
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-backup_create",
+        "name": "my-backup",
+        "result": {"name": "my-backup", "size": 123, "results": {}},
+    }
+
+
+def test_backup_restore_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.backup_restore("20260901-000000", apps=["nextcloud"])
+
+    assert captured["module_name"] == "yunohost.backup"
+    assert captured["attr"] == "backup_restore"
+    assert captured["kwargs"] == {"name": "20260901-000000", "system": [], "apps": ["nextcloud"], "force": False}
+    assert result == {"fake": False, "name": "20260901-000000", "result": None}

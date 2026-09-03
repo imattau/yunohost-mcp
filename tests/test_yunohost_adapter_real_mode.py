@@ -4,8 +4,10 @@ This sandbox has no real `yunohost` package installed, so these build fake
 `yunohost.*` modules under sys.modules whose decorated functions faithfully
 reproduce `@is_unit_operation`'s actual argument-remapping behavior (copied
 from /tmp/yunohost-src's src/log.py at review time) - the same decorator
-that wraps app_install, app_remove, backup_create, tools_upgrade, and
-diagnosis_run in the real codebase.
+that wraps app_install, app_remove, tools_upgrade, and diagnosis_run in
+the real codebase (backup_create/backup_restore now go through
+_call_via_system_python instead - see
+test_yunohost_adapter_system_python.py).
 
 Why this matters: the decorator constructs its own OperationLogger
 internally and prepends it to the call - callers must NOT pass one. An
@@ -89,21 +91,11 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     yunohost_app.app_remove = app_remove
     yunohost_app.app_upgrade = app_upgrade
 
-    @_is_unit_operation()
-    def backup_create(operation_logger, name=None, description=None, apps=None, system=None, **_):
-        assert operation_logger is FAKE_OPERATION_LOGGER
-        assert name is None or isinstance(name, str), f"name corrupted: got {name!r}"
-        calls["backup_create"] = {"name": name, "apps": apps}
-        return {"name": name or "auto-name"}
-
-    def backup_restore(name, apps=None, system=None, force=False, **_):
-        assert isinstance(name, str), f"name corrupted: got {name!r}"
-        calls["backup_restore"] = {"name": name, "apps": apps}
-        return None
-
-    yunohost_backup = types.ModuleType("yunohost.backup")
-    yunohost_backup.backup_create = backup_create
-    yunohost_backup.backup_restore = backup_restore
+    # backup_create/backup_restore are NOT exercised here - they no longer
+    # go through _import_attr at all (see test_yunohost_adapter_system_python.py):
+    # both now route through _call_via_system_python, a subprocess call, so
+    # injecting fake yunohost.backup submodules into this process's
+    # sys.modules wouldn't reach them.
 
     @_is_unit_operation()
     def tools_upgrade(operation_logger, target=None, **_):
@@ -148,7 +140,6 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
 
     for name, module in {
         "yunohost.app": yunohost_app,
-        "yunohost.backup": yunohost_backup,
         "yunohost.tools": yunohost_tools,
         "yunohost.diagnosis": yunohost_diagnosis,
         "yunohost.log": yunohost_log,
@@ -172,11 +163,6 @@ def test_app_remove_receives_correct_app_name_not_operation_logger(real_mode_ada
     assert real_mode_adapter._test_calls["app_remove"] == {"app": "nextcloud", "purge": True}
 
 
-def test_backup_create_receives_correct_name_not_operation_logger(real_mode_adapter: YunohostAdapter):
-    real_mode_adapter.backup_create(name="my-backup", apps=["nextcloud"])
-    assert real_mode_adapter._test_calls["backup_create"] == {"name": "my-backup", "apps": ["nextcloud"]}
-
-
 def test_system_upgrade_receives_correct_target_not_operation_logger(real_mode_adapter: YunohostAdapter):
     real_mode_adapter.system_upgrade()
     assert real_mode_adapter._test_calls["tools_upgrade"] == {"target": "system"}
@@ -187,13 +173,11 @@ def test_diagnosis_run_receives_correct_categories_not_operation_logger(real_mod
     assert real_mode_adapter._test_calls["diagnosis_run"] == {"categories": ["ip"]}
 
 
-def test_app_upgrade_and_backup_restore_and_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
-    # These three are NOT @is_unit_operation-decorated, so they should never
-    # have received a caller-constructed OperationLogger in the first
-    # place - confirming the fix didn't touch what was already correct.
+def test_app_upgrade_and_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
+    # These are NOT @is_unit_operation-decorated, so they should never have
+    # received a caller-constructed OperationLogger in the first place -
+    # confirming the fix didn't touch what was already correct.
     real_mode_adapter.app_upgrade(app="nextcloud")
-    real_mode_adapter.backup_restore("20260901-000000", apps=["nextcloud"])
     real_mode_adapter.service_restart(["nginx"])
     assert real_mode_adapter._test_calls["app_upgrade"] == {"app": "nextcloud"}
-    assert real_mode_adapter._test_calls["backup_restore"] == {"name": "20260901-000000", "apps": ["nextcloud"]}
     assert real_mode_adapter._test_calls["service_restart"] == {"names": ["nginx"]}

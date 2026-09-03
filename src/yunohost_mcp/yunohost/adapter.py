@@ -126,6 +126,89 @@ def _import_attr(module_name: str, attr: str) -> Any:
         ) from exc
 
 
+_SYSTEM_PYTHON_CALL_SCRIPT = """
+import importlib
+import json
+import sys
+
+module_name, attr = {module_name!r}, {attr!r}
+
+try:
+    import yunohost
+
+    yunohost.init_i18n()
+except ImportError:
+    pass
+try:
+    from logging import addLevelName, setLoggerClass
+
+    from yunohost.utils.logging import SUCCESS, YunohostLogger
+
+    addLevelName(SUCCESS, "SUCCESS")
+    setLoggerClass(YunohostLogger)
+except ImportError:
+    pass
+try:
+    from moulinette import Moulinette
+
+    class _HeadlessInterface:
+        type = "api"
+
+    if Moulinette.interface is None:
+        Moulinette._interface = _HeadlessInterface()
+except ImportError:
+    pass
+
+fn = getattr(importlib.import_module(module_name), attr)
+kwargs = json.loads(sys.stdin.read())
+result = fn(**kwargs)
+json.dump(result, sys.stdout, default=str)
+"""
+
+
+def _call_via_system_python(module_name: str, attr: str, kwargs: dict[str, Any], settings: Settings) -> Any:
+    """Call a real yunohost.* function in a subprocess using the *system*
+    python3 rather than importing it in-process.
+
+    Needed specifically for calls that transitively import
+    yunohost.utils.form (e.g. backup's storage-location settings) - that
+    module defines pydantic models using pydantic v1's
+    @validator(field=..., config=...) signature, which only works against
+    the actual pydantic v1 the system's python3 has on its path (Debian's
+    apt-installed python3-pydantic). This venv installs its own newer
+    pydantic v2 (required by the mcp SDK and this server's own models),
+    which shadows the system one for any in-process import - and once
+    loaded, every subsequent `import pydantic` anywhere in this process
+    returns that same cached v2 module, so there is no way to get v1's
+    behavior in-process once v2 has already been imported once. A
+    subprocess using an interpreter that never sees this venv's
+    site-packages at all sidesteps the conflict entirely.
+
+    kwargs must be JSON-serializable; the target function's return value
+    must be too (or json.dump(..., default=str)-representable).
+    """
+    script = _SYSTEM_PYTHON_CALL_SCRIPT.format(module_name=module_name, attr=attr)
+    proc = subprocess.run(
+        [settings.system_python, "-c", script],
+        input=json.dumps(kwargs),
+        capture_output=True,
+        text=True,
+        timeout=settings.system_python_timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise YunohostUnavailableError(
+            f"{module_name}.{attr} failed in the system-python subprocess "
+            f"(exit {proc.returncode}): {proc.stderr[-4000:]}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        raise YunohostUnavailableError(
+            f"{module_name}.{attr} produced non-JSON output from the system-python "
+            f"subprocess: {proc.stdout[-2000:]}"
+        ) from exc
+
+
 @dataclass
 class YunohostAdapter:
     """Thin wrapper around yunohost.* read operations."""
@@ -344,8 +427,12 @@ class YunohostAdapter:
                 "operation_id": "20260903-000000-backup_create",
                 "name": name or "fake-backup",
             }
-        backup_create = _import_attr("yunohost.backup", "backup_create")
-        result = backup_create(name=name, description=description, apps=apps or [], system=system or [])
+        result = _call_via_system_python(
+            "yunohost.backup",
+            "backup_create",
+            {"name": name, "description": description, "apps": apps or [], "system": system or []},
+            self.settings,
+        )
         # backup_create()'s own return is {"name": ..., "size": ..., "results": ...}
         # (real archive name, possibly auto-generated if `name` was None) -
         # surfaced at the top level here too so callers (package_run_tests
@@ -401,8 +488,12 @@ class YunohostAdapter:
             return {"fake": True, "name": name, "apps": apps or [], "system": system or []}
         # backup_restore() is not @is_unit_operation-decorated either - no
         # operation id to capture here at all, best-effort or otherwise.
-        backup_restore = _import_attr("yunohost.backup", "backup_restore")
-        result = backup_restore(name, system=system or [], apps=apps or [], force=force)
+        result = _call_via_system_python(
+            "yunohost.backup",
+            "backup_restore",
+            {"name": name, "system": system or [], "apps": apps or [], "force": force},
+            self.settings,
+        )
         return {"fake": False, "name": name, "result": result}
 
     def system_upgrade(self) -> dict[str, Any]:

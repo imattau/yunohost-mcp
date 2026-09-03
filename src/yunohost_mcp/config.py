@@ -52,6 +52,24 @@ class Settings(BaseSettings):
     # does NOT have them). An absolute path avoids PATH ambiguity entirely.
     package_linter_python: str = "python3"
 
+    # The *system* python3 (Debian's own, with yunohost/moulinette and
+    # their actual apt-installed deps on its path) - used to run specific
+    # real yunohost.* calls in a subprocess instead of in-process, when
+    # the in-process import would resolve `pydantic` to this venv's own
+    # (newer, v2) copy instead of the system's v1 one that some yunohost
+    # code (yunohost.utils.form's pydantic v1-style validators, reached
+    # e.g. via backup's storage-location settings) is actually written
+    # against. Once a `pydantic` module is loaded once in a process every
+    # later `import pydantic` anywhere in that same process returns the
+    # same cached module (Python's own import system, not something this
+    # server can work around at import time) - so in-process coexistence
+    # of both pydantic versions is impossible, and a subprocess using an
+    # interpreter that never loads this venv's site-packages at all is
+    # the only way to actually get pydantic v1's behavior for these
+    # specific calls. See yunohost/adapter.py's _call_via_system_python().
+    system_python: str = "/usr/bin/python3"
+    system_python_timeout_seconds: int = 1800
+
     # Same-host Nostr YunoHost catalogue publisher integration.
     catalog_cli_path: Path = Path("/var/lib/nostr-catalogd/nostr-ynh")
     catalog_publisher_key_path: Path = Path("/etc/nostr-catalogd/publisher.key")
