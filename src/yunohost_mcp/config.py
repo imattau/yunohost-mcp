@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # exercised on a machine without YunoHost installed (e.g. this dev box).
     fake_yunohost: bool = True
 
+    # NIP-98 auth (Phase 2), only relevant for the http transport.
+    nip98_clock_skew_seconds: int = 60
+    nip98_replay_ttl_seconds: int = 300
+
 
 def load_settings() -> Settings:
     return Settings()
