@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
-from coincurve import PublicKeyXOnly
+from coincurve import PrivateKey, PublicKeyXOnly
 from pydantic import BaseModel, field_validator
 
 HEX32_LEN = 64  # 32 bytes as hex
@@ -97,3 +98,30 @@ def verify_event(event: NostrEvent) -> None:
 
     if not ok:
         raise NostrEventError("invalid schnorr signature")
+
+
+def sign_event(
+    private_key: PrivateKey,
+    *,
+    pubkey: str,
+    kind: int,
+    tags: list[list[str]],
+    content: str = "",
+    created_at: int | None = None,
+) -> NostrEvent:
+    """Build and sign a NIP-01 event. The counterpart to verify_event() -
+    used client-side (auth/signing.py's ClientIdentity) to sign outgoing
+    NIP-98 and delegation events.
+
+    `pubkey` is the x-only hex public key matching `private_key` - passed
+    in rather than derived here, since every caller already has it from
+    key loading and re-deriving it on every signed event would be wasted
+    work.
+    """
+    created_at = int(time.time()) if created_at is None else created_at
+    unsigned = NostrEvent(
+        id="0" * 64, pubkey=pubkey, created_at=created_at, kind=kind, tags=tags, content=content, sig="0" * 128
+    )
+    event_id = compute_event_id(unsigned)
+    sig = private_key.sign_schnorr(bytes.fromhex(event_id)).hex()
+    return NostrEvent(id=event_id, pubkey=pubkey, created_at=created_at, kind=kind, tags=tags, content=content, sig=sig)

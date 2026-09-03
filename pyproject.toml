@@ -6,8 +6,10 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
+    "anyio>=4.15.0",
     "bech32>=1.2.0",
     "coincurve>=21.0.0",
+    "httpx2>=2.5.0",
     "mcp[cli]>=2.1.1",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
@@ -16,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 yunohost-mcp = "yunohost_mcp.server:main"
+yunohost-mcp-connect = "yunohost_mcp.bridge:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

@@ -934,8 +934,10 @@ name = "yunohost-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "bech32" },
     { name = "coincurve" },
+    { name = "httpx2" },
     { name = "mcp", extra = ["cli"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -950,8 +952,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.15.0" },
     { name = "bech32", specifier = ">=1.2.0" },
     { name = "coincurve", specifier = ">=21.0.0" },
+    { name = "httpx2", specifier = ">=2.5.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.1.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
