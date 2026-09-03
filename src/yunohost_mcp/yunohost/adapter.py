@@ -563,8 +563,11 @@ class YunohostAdapter:
                 "resources": {"system_user": {}, "install_dir": {}, "permissions": {}},
                 "unknown_resource_types": [],
             }
-        app_manifest = _import_attr("yunohost.app", "app_manifest")
-        manifest = app_manifest(source)
+        # app_manifest() imports yunohost.utils.form (for its "install"
+        # questions field), which hits the same pydantic v1/v2 conflict as
+        # backup_create/backup_restore (see _call_via_system_python's
+        # docstring) - route it through the same subprocess.
+        manifest = _call_via_system_python("yunohost.app", "app_manifest", {"app": source}, self.settings)
         resources = manifest.get("resources", {})
         try:
             known_types = set(_import_attr("yunohost.utils.resources", "AppResourceClassesByType").keys())

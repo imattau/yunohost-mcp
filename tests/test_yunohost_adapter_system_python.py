@@ -1,8 +1,9 @@
 """Regression tests for _call_via_system_python and the backup_create/
-backup_restore rewiring onto it.
+backup_restore/package_inspect rewiring onto it.
 
 backup_create/backup_restore transitively import yunohost.utils.form (via
-backup's storage-location settings), which defines pydantic models using
+backup's storage-location settings, or directly via app_manifest() for
+package_inspect), which defines pydantic models using
 pydantic v1's @validator(field=..., config=...) signature - only valid
 against the actual pydantic v1 Debian's apt-installed python3-pydantic
 provides. This venv installs its own newer pydantic v2 (required by the
@@ -101,3 +102,28 @@ def test_backup_restore_calls_call_via_system_python_with_correct_kwargs(monkeyp
     assert captured["attr"] == "backup_restore"
     assert captured["kwargs"] == {"name": "20260901-000000", "system": [], "apps": ["nextcloud"], "force": False}
     assert result == {"fake": False, "name": "20260901-000000", "result": None}
+
+
+def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # app_manifest() imports yunohost.utils.form (for its "install"
+    # questions field) - same pydantic v1/v2 conflict as backup_create/
+    # backup_restore, previously unnoticed because package_inspect had no
+    # test exercising its real-mode path at all.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"id": "my_webapp", "resources": {"permissions": {}}}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.package_inspect("my_webapp")
+
+    assert captured["module_name"] == "yunohost.app"
+    assert captured["attr"] == "app_manifest"
+    assert captured["kwargs"] == {"app": "my_webapp"}
+    assert result["id"] == "my_webapp"
+    assert result["fake"] is False
