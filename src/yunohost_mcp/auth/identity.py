@@ -87,6 +87,18 @@ class IdentityStore:
 
 
 def _resolve_key_to_hex(raw_key: str) -> str:
+    if raw_key.startswith("nsec1"):
+        # identity.toml keys are public identities to authorize, never
+        # secrets - PLAN.md Phase 9: "private Nostr keys must never be
+        # stored by yunohost-mcp". Reject loudly rather than let an
+        # accidentally-pasted private key sit in a config file believing
+        # it's being used as a pubkey (bech32-decoding it as an npub would
+        # silently fail anyway with a confusing wrong-HRP error - this is
+        # the same failure, named for what it actually is).
+        raise IdentityConfigError(
+            "identity.toml key looks like an nsec (private key), not an npub/hex pubkey - "
+            "yunohost-mcp must never be given a private key"
+        )
     if raw_key.startswith("npub1"):
         try:
             return npub_to_hex(raw_key)

@@ -83,6 +83,21 @@ roles = ["superuser"]
         IdentityStore.load(toml_path)
 
 
+def test_nsec_key_rejected_loudly(tmp_path: Path):
+    # A private key accidentally pasted where a pubkey belongs must never
+    # be silently accepted (PLAN.md Phase 9: never store a private key).
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        """
+[identity."nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"]
+name = "Oops"
+roles = ["administrator"]
+"""
+    )
+    with pytest.raises(IdentityConfigError, match="nsec"):
+        IdentityStore.load(toml_path)
+
+
 def test_malformed_toml_raises_config_error(tmp_path: Path):
     toml_path = tmp_path / "identity.toml"
     toml_path.write_text("this is not [valid toml")

@@ -377,6 +377,41 @@ async def test_whoami_reports_local_stdio_identity():
         assert "administrator" in data["roles"]
 
 
+@pytest.mark.anyio
+async def test_phase9_tool_response_is_redacted_end_to_end(monkeypatch: pytest.MonkeyPatch):
+    """A secret-shaped field anywhere in a tool's real return value must
+    never reach the MCP client - proves @redact_response actually runs on
+    the full protocol path (structured_content), not just as a unit test
+    of the decorator in isolation."""
+    from yunohost_mcp import server as server_module
+
+    def leaky_server_info():
+        return {
+            "fake": True,
+            "yunohost": {"version": "12.0.0"},
+            "db_password": "s3cr3t-should-not-leak",
+            "settings": {"ldap_password": "also-secret", "domain": "example.com"},
+        }
+
+    monkeypatch.setattr(server_module.adapter, "server_info", leaky_server_info)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("server_info", {})
+        assert result.is_error is not True
+        data = result.structured_content
+        assert data["db_password"] == "[REDACTED]"
+        assert data["settings"]["ldap_password"] == "[REDACTED]"
+        assert data["settings"]["domain"] == "example.com"
+        assert data["yunohost"]["version"] == "12.0.0"
+
+        # Also check the text content mirror the framework generates - a
+        # naive fix that only redacted structured_content and not the text
+        # representation would still leak the secret there.
+        text_blob = " ".join(getattr(c, "text", "") for c in result.content)
+        assert "s3cr3t-should-not-leak" not in text_blob
+        assert "also-secret" not in text_blob
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

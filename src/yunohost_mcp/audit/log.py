@@ -7,9 +7,9 @@ and not implemented yet — PLAN.md's example audit entry also includes
 policy-decision and confirmation-id fields that don't exist until Phase 6/7
 land; this is intentionally a subset, not a preview of the final shape.
 
-Redaction here is a first, narrow pass (key-name matching only) — PLAN.md
-Phase 9 wants central response filtering across every tool's *output* too,
-not just what gets written to this log.
+Redaction here reuses redaction.py's shared pass (Phase 9) - the same
+key-name matching applied to every tool's *response* too
+(server.py's @redact_response on every tool), not a separate policy.
 """
 
 from __future__ import annotations
@@ -21,26 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_REDACT_KEYS = {
-    "password",
-    "secret",
-    "token",
-    "private_key",
-    "api_key",
-    "db_password",
-    "ldap_password",
-    "session",
-    "cookie",
-    "nsec",
-}
-
-
-def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: ("[REDACTED]" if k.lower() in _REDACT_KEYS else _redact(v)) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    return value
+from yunohost_mcp.redaction import redact as _redact
 
 
 @dataclass
