@@ -63,6 +63,12 @@ approve_operation()'d by a *different* identity (Scope.OWNER_APPROVE,
 administrator-only) before the original requester can execute it - two
 independently NIP-98-signed calls, verified the normal way each already
 is, bound together by the confirmation ticket (policy/confirmation.py).
+Phase 14: high-level composite workflows (diagnose_app, validate_server,
+safe_upgrade, repair_app, test_package) built entirely out of the tools
+already in this file - no new yunohost.* call exists anywhere in Phase 14.
+They still run through the same @require_scope/@audited_write/policy-check
+machinery as the primitives they're built from, per PLAN.md's explicit
+"these workflows should still run through the same policy engine".
 """
 
 from __future__ import annotations
@@ -553,6 +559,69 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         "operation_plan": ticket.plan,
         "approved_by": request.pubkey,
     }
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.APPS_READ)
+def diagnose_app(app: str) -> dict[str, Any]:
+    """One-call app diagnostic: app info, the server's current diagnosis,
+    and recent operation log entries mentioning this app. Read-only."""
+    return adapter.diagnose_app(app)
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.SERVER_READ)
+def validate_server() -> dict[str, Any]:
+    """A broad server health snapshot in one call: version info, diagnosis,
+    pending updates, service status, and backup archives. Read-only."""
+    return adapter.validate_server()
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.APPS_UPGRADE)
+@audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
+def safe_upgrade(app: str) -> dict[str, Any]:
+    """PLAN.md Phase 14's flagship workflow: diagnosis -> inspect app ->
+    create a fresh safety backup -> upgrade -> check app/HTTP endpoint ->
+    re-diagnose -> one report. Runs through apps.upgrade's own policy: free
+    space is checked up front (nothing in this workflow can create disk
+    space), and the backup requirement is re-verified after this workflow's
+    own backup step actually happens, not just assumed to have worked.
+    """
+    rule = policy_rules.get("apps.upgrade", PolicyRule())
+    check_free_space(rule)
+    result = adapter.safe_upgrade(app)
+    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
+    return result
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.SERVICES_RESTART)
+@audited_write("services.restart", lock=write_lock, audit_log=audit_log)
+def repair_app(app: str, strategy: str = "conservative") -> dict[str, Any]:
+    """Diagnose an app and attempt bounded remediation. Only "conservative"
+    is implemented: restart services whose name contains this app id, then
+    re-diagnose - no reinstall, upgrade, or forced removal regardless of
+    findings.
+    """
+    return adapter.repair_app(app, strategy=strategy)
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def test_package(source: str, app_id: str | None = None) -> dict[str, Any]:
+    """Alias for package_run_tests() - PLAN.md Phase 14 names this
+    separately from Phase 8's package_run_tests, but it's the same
+    install -> backup -> remove -> restore cycle; see
+    yunohost/adapter.py's package_run_tests for what each step does.
+    """
+    return adapter.package_run_tests(source, app_id=app_id)
 
 
 @mcp.tool()

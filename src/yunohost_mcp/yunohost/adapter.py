@@ -433,13 +433,13 @@ class YunohostAdapter:
         """
         steps: list[dict[str, Any]] = []
 
-        def run_step(name: str, fn, *args, **kwargs) -> bool:
+        def run_step(step_name: str, fn, *args, **kwargs) -> bool:
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the whole run
-                steps.append({"step": name, "passed": False, "error": str(exc)})
+                steps.append({"step": step_name, "passed": False, "error": str(exc)})
                 return False
-            steps.append({"step": name, "passed": True, "result": result})
+            steps.append({"step": step_name, "passed": True, "result": result})
             return True
 
         # Determine the app instance id from the manifest *before*
@@ -470,6 +470,149 @@ class YunohostAdapter:
 
         passed = all(step["passed"] for step in steps)
         return {"fake": self.settings.fake_yunohost, "passed": passed, "steps": steps}
+
+    # -- Phase 14: high-level composite workflows --------------------------
+    #
+    # Every method below is built entirely out of the adapter methods
+    # above - no new yunohost.* call is introduced here. server.py's tools
+    # still run the composites through the same @require_scope /
+    # @audited_write / policy-check machinery as the primitives they're
+    # built from (PLAN.md: "these workflows should still run through the
+    # same policy engine").
+
+    def diagnose_app(self, app: str) -> dict[str, Any]:
+        info = self.app_info(app, full=True)
+        diagnosis = self.health_check()
+        operations = self.operations_list(limit=20)
+        related_operations = [
+            op
+            for op in operations.get("operation", [])
+            if app in str(op.get("name", "")) or app in str(op.get("description", ""))
+        ]
+        return {
+            "fake": info.get("fake", False),
+            "app": app,
+            "app_info": info,
+            "diagnosis": diagnosis,
+            "related_operations": related_operations,
+        }
+
+    def validate_server(self) -> dict[str, Any]:
+        server = self.server_info()
+        return {
+            "fake": server.get("fake", False),
+            "server": server,
+            "diagnosis": self.health_check(),
+            "updates": self.updates_check(),
+            "services": self.services_list(),
+            "backups": self.backups_list(),
+        }
+
+    def test_http_endpoint(self, url: str, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Reachability probe for safe_upgrade's post-upgrade check. Not a
+        yunohost.* call - there's no YunoHost API for "is this URL up" - so
+        this makes (or doesn't) a real outbound HTTP request regardless of
+        fake_yunohost, *except* that fake_yunohost=True short-circuits it
+        entirely: a fake app's fake settings ("domain": "example.com") is a
+        real, unrelated domain a test run must never actually contact.
+        """
+        if self.settings.fake_yunohost:
+            return {"fake": True, "url": url, "reachable": True, "status_code": 200, "error": None}
+
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/safe_upgrade"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured domain, not user input
+                return {"fake": False, "url": url, "reachable": True, "status_code": response.status, "error": None}
+        except urllib.error.HTTPError as exc:
+            # Any HTTP response at all - even 4xx/5xx - means the app is
+            # answering requests; only a connection-level failure is "down".
+            return {"fake": False, "url": url, "reachable": True, "status_code": exc.code, "error": None}
+        except Exception as exc:  # noqa: BLE001 - report as unreachable, don't crash the workflow
+            return {"fake": False, "url": url, "reachable": False, "status_code": None, "error": str(exc)}
+
+    def safe_upgrade(self, app: str) -> dict[str, Any]:
+        """PLAN.md Phase 14's flagship composite: diagnosis -> app
+        inspection -> a fresh safety backup -> upgrade -> post-upgrade
+        checks -> a second diagnosis -> one report. Disk-space and
+        pre-existing-backup policy checks are the calling tool's job
+        (server.py's safe_upgrade wraps this with the same checks
+        app_upgrade's own tool uses) - this method focuses on the workflow
+        itself. Stops at the first failing step; each later step depends on
+        the previous one having actually happened.
+        """
+        steps: list[dict[str, Any]] = []
+
+        def run_step(step_name: str, fn, *args, **kwargs):
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the whole workflow
+                steps.append({"step": step_name, "passed": False, "error": str(exc)})
+                return None
+            steps.append({"step": step_name, "passed": True, "result": result})
+            return result
+
+        run_step("pre_diagnosis", self.health_check)
+
+        if run_step("inspect_app", self.app_info, app, full=True) is None:
+            return {"fake": self.settings.fake_yunohost, "app": app, "passed": False, "steps": steps}
+
+        if (
+            run_step(
+                "backup",
+                self.backup_create,
+                name=f"safe-upgrade-{app}",
+                description=f"Safety backup before upgrading {app}",
+                apps=[app],
+            )
+            is None
+        ):
+            return {"fake": self.settings.fake_yunohost, "app": app, "passed": False, "steps": steps}
+
+        if run_step("upgrade", self.app_upgrade, app=app) is None:
+            return {"fake": self.settings.fake_yunohost, "app": app, "passed": False, "steps": steps}
+
+        post_info = run_step("check_app", self.app_info, app, full=True)
+
+        url = None
+        settings = (post_info or {}).get("settings") or {}
+        domain, path = settings.get("domain"), settings.get("path")
+        if domain and path is not None:
+            url = f"https://{domain}{path}"
+            run_step("test_http_endpoint", self.test_http_endpoint, url)
+
+        run_step("post_diagnosis", self.health_check)
+
+        passed = all(step["passed"] for step in steps)
+        return {"fake": self.settings.fake_yunohost, "app": app, "passed": passed, "url_tested": url, "steps": steps}
+
+    def repair_app(self, app: str, strategy: str = "conservative") -> dict[str, Any]:
+        """Diagnose, then attempt bounded remediation. "conservative" (the
+        only strategy implemented) restarts services whose name contains
+        this app id, then re-diagnoses - nothing more invasive (no
+        reinstall, no upgrade, no forced removal) regardless of findings.
+        """
+        if strategy != "conservative":
+            raise ValueError(f"unknown repair strategy {strategy!r}; only 'conservative' is implemented")
+
+        before = self.diagnose_app(app)
+        services = self.services_list().get("services", {})
+        matching_services = [name for name in services if app in name]
+
+        if matching_services:
+            self.service_restart(matching_services)
+
+        after = self.diagnose_app(app)
+        return {
+            "fake": before.get("fake", False),
+            "app": app,
+            "strategy": strategy,
+            "restarted_services": matching_services,
+            "diagnosis_before": before["diagnosis"],
+            "diagnosis_after": after["diagnosis"],
+        }
 
 
 def _latest_operation_id() -> str | None:

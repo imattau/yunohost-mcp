@@ -38,6 +38,7 @@ PHASE8_TOOLS = {
 PHASE10_TOOLS = {"audit_list", "audit_get"}
 PHASE11_TOOLS = {"server_identity"}
 PHASE13_TOOLS = {"approve_operation"}
+PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app", "test_package"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -100,6 +101,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE10_TOOLS
             | PHASE11_TOOLS
             | PHASE13_TOOLS
+            | PHASE14_TOOLS
         )
         assert expected <= names
 
@@ -316,6 +318,102 @@ async def test_phase13_approved_confirmation_can_still_be_used_for_a_second_call
 
         result = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
         assert result.is_error is not True
+
+
+@pytest.mark.anyio
+async def test_phase14_diagnose_app():
+    async with Client(mcp) as client:
+        result = await client.call_tool("diagnose_app", {"app": "nextcloud"})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert data["app"] == "nextcloud"
+        assert "app_info" in data
+        assert "diagnosis" in data
+
+
+@pytest.mark.anyio
+async def test_phase14_validate_server():
+    async with Client(mcp) as client:
+        result = await client.call_tool("validate_server", {})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert "server" in data and "diagnosis" in data and "services" in data
+
+
+@pytest.mark.anyio
+async def test_phase14_safe_upgrade_runs_full_workflow_and_is_audited():
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    async with Client(mcp) as client:
+        result = await client.call_tool("safe_upgrade", {"app": "nextcloud"})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert data["passed"] is True
+        assert [s["step"] for s in data["steps"]][:4] == ["pre_diagnosis", "inspect_app", "backup", "upgrade"]
+
+    new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["tool"] == "apps.upgrade"
+    assert entry["result"] == "success"
+
+
+@pytest.mark.anyio
+async def test_phase14_safe_upgrade_blocked_by_free_space_policy(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    def huge_minimum(*args, **kwargs):
+        raise server_module.PolicyViolation("not enough free space")
+
+    monkeypatch.setattr(server_module, "check_free_space", huge_minimum)
+    async with Client(mcp) as client:
+        result = await client.call_tool("safe_upgrade", {"app": "nextcloud"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase14_repair_app():
+    async with Client(mcp) as client:
+        result = await client.call_tool("repair_app", {"app": "nextcloud"})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert data["strategy"] == "conservative"
+        assert "diagnosis_before" in data and "diagnosis_after" in data
+
+
+@pytest.mark.anyio
+async def test_phase14_repair_app_rejects_unknown_strategy():
+    async with Client(mcp) as client:
+        result = await client.call_tool("repair_app", {"app": "nextcloud", "strategy": "aggressive"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase14_test_package_matches_package_run_tests():
+    async with Client(mcp) as client:
+        result = await client.call_tool("test_package", {"source": "/tmp/example_ynh"})
+        assert result.is_error is not True, result.content
+        assert result.structured_content["passed"] is True
+
+
+@pytest.mark.anyio
+async def test_phase14_composite_tools_denied_for_identity_without_scope():
+    no_scopes = AuthenticatedRequest(
+        pubkey="deadbeef",
+        event_id="e" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(pubkey="deadbeef", name="no-roles", roles=(), scopes=scopes_for_roles(())),
+    )
+    set_current_request(no_scopes)
+    async with Client(mcp) as client:
+        for tool, args in [
+            ("diagnose_app", {"app": "nextcloud"}),
+            ("validate_server", {}),
+            ("safe_upgrade", {"app": "nextcloud"}),
+            ("repair_app", {"app": "nextcloud"}),
+            ("test_package", {"source": "/tmp/example_ynh"}),
+        ]:
+            result = await client.call_tool(tool, args)
+            assert result.is_error is True, f"{tool} should have been denied"
 
 
 @pytest.mark.anyio
