@@ -605,6 +605,13 @@ async def test_approval_get_denied_for_unrelated_identity():
 
 
 @pytest.mark.anyio
+async def test_approval_get_unknown_id_rejected():
+    async with Client(mcp) as client:
+        result = await client.call_tool("approval_get", {"confirmation_id": "confirm-doesnotexist"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
 async def test_approval_status_reflects_approval_state():
     async with Client(mcp) as client:
         first = await client.call_tool("system_upgrade", {})
@@ -621,6 +628,40 @@ async def test_approval_status_reflects_approval_state():
 
         after = await client.call_tool("approval_status", {"confirmation_id": confirmation_id})
         assert after.structured_content["approved"] is True
+
+
+@pytest.mark.anyio
+async def test_phase13_approve_operation_fails_clearly_when_no_owner_configured(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    monkeypatch.setattr(server_module, "get_owner_pubkey", lambda: None)
+
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        set_current_request(SECOND_ADMIN_REQUEST)
+        try:
+            result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            assert result.is_error is True
+            assert "no owner is configured" in str(result.content)
+        finally:
+            set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_owner_signature_confirmation_gets_the_longer_ttl():
+    # End-to-end (not the unit-level ConfirmationStore test in
+    # test_policy_confirmation.py): confirms server.py actually wires
+    # settings.owner_approval_ttl_seconds into the real confirmation_store
+    # it hands every owner-signature-gated tool.
+    async with Client(mcp) as client:
+        owner_gated = await client.call_tool("system_upgrade", {})
+        ordinary = await client.call_tool("domain_add", {"domain": "ttl-check.example.com"})
+
+    owner_expires = owner_gated.structured_content["expires_at"]
+    ordinary_expires = ordinary.structured_content["expires_at"]
+    assert owner_expires - ordinary_expires >= 1000
 
 
 @pytest.mark.anyio
