@@ -91,6 +91,11 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     "apps.remove": PolicyRule(
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")
     ),
+    # No require_backup here unlike apps.remove - app_change_url() doesn't
+    # delete anything itself (a failed change_url script restores the old
+    # nginx conf and app settings), so a backup isn't the safety net a
+    # confirmation is for domain_add-shaped writes.
+    "apps.change_url": PolicyRule(require_confirmation=True),
     # PLAN.md Phase 13's two highest-risk, already-implemented candidates
     # get owner co-signing by default - "app removal with data" would need
     # argument-conditional policy (require_owner_signature only when

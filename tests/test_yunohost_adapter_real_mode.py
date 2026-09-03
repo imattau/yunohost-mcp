@@ -138,6 +138,8 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     # app_upgrade and backup_create/backup_restore, it now routes through
     # _call_via_system_python (see test_yunohost_adapter_system_python.py),
     # so injecting a fake yunohost.domain submodule wouldn't reach it.
+    # app_change_url is excluded for the same reason - it imports
+    # yunohost.utils.form too.
     yunohost_domain = types.ModuleType("yunohost.domain")
 
     @_is_unit_operation()

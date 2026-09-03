@@ -216,6 +216,36 @@ def test_domain_add_calls_call_via_system_python_with_correct_kwargs_and_always_
     }
 
 
+def test_app_change_url_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # app_change_url() imports yunohost.utils.form (DomainOption,
+    # WebPathOption) to normalize/validate the new domain and path - same
+    # pydantic v1/v2 conflict as app_install/domain_add above.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None  # app_change_url() itself returns None on success
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260903-000000-app_change_url")
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.app_change_url("mangatsu", domain="manga.example.com", path="/")
+
+    assert captured["module_name"] == "yunohost.app"
+    assert captured["attr"] == "app_change_url"
+    assert captured["kwargs"] == {"app": "mangatsu", "domain": "manga.example.com", "path": "/"}
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-app_change_url",
+        "app": "mangatsu",
+        "domain": "manga.example.com",
+        "path": "/",
+    }
+
+
 def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
     # app_manifest() imports yunohost.utils.form (for its "install"
     # questions field) - same pydantic v1/v2 conflict as backup_create/

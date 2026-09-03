@@ -861,6 +861,30 @@ class YunohostAdapter:
         result = app_remove(app, purge=purge)
         return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
 
+    def app_change_url(self, app: str, domain: str, path: str) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-app_change_url",
+                "app": app,
+                "domain": domain,
+                "path": path,
+            }
+        # @is_unit_operation-decorated (yunohost.app), same
+        # no-manual-operation_logger convention as app_remove just above -
+        # but unlike app_remove, it imports yunohost.utils.form
+        # (DomainOption, WebPathOption, to normalize/validate the new
+        # domain and path) - same pydantic v1/v2 conflict as app_install/
+        # domain_add/backup_create, see _call_via_system_python's
+        # docstring. Must go through the system-python subprocess too.
+        # Returns None on success (the app's own settings are updated
+        # in-place, nothing meaningful to hand back beyond the operation
+        # id), unlike app_install/app_remove which return a result dict.
+        _call_via_system_python(
+            "yunohost.app", "app_change_url", {"app": app, "domain": domain, "path": path}, self.settings
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "domain": domain, "path": path}
+
     def backup_restore(
         self,
         name: str,
@@ -886,16 +910,6 @@ class YunohostAdapter:
         tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
         result = tools_upgrade(target="system")
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
-
-    def app_change_url(self, app: str, domain: str, path: str) -> dict[str, Any]:
-        if self.settings.fake_yunohost:
-            return {"fake": True, "operation_id": "20260903-000000-app_change_url", "app": app}
-        # @is_unit_operation-decorated (verified against /tmp/yunohost-src
-        # directly, per the Errata in PHASE0_INVESTIGATION.md) - no
-        # operation_logger passed here either.
-        app_change_url = _import_attr("yunohost.app", "app_change_url")
-        result = app_change_url(app, domain, path)
-        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
 
     # -- Phase 8: package development -------------------------------------
     #

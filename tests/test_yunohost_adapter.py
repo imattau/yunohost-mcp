@@ -226,6 +226,14 @@ def test_app_remove_has_operation_id():
     assert "operation_id" in result
 
 
+def test_app_change_url_has_operation_id():
+    result = make_adapter().app_change_url("nextcloud", domain="new.example.com", path="/cloud")
+    assert result["app"] == "nextcloud"
+    assert result["domain"] == "new.example.com"
+    assert result["path"] == "/cloud"
+    assert "operation_id" in result
+
+
 def test_backup_restore():
     result = make_adapter().backup_restore("20260901-000000", apps=["nextcloud"])
     assert result["name"] == "20260901-000000"

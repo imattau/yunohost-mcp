@@ -41,6 +41,8 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["apps.remove"].require_confirmation is True
     assert DEFAULT_POLICY["apps.remove"].require_backup is True
     assert DEFAULT_POLICY["apps.remove"].max_backup_age_seconds == 86400
+    assert DEFAULT_POLICY["apps.change_url"].require_confirmation is True
+    assert DEFAULT_POLICY["apps.change_url"].require_backup is False
     assert DEFAULT_POLICY["backups.restore"].require_confirmation is True
     assert DEFAULT_POLICY["system.upgrade"].require_confirmation is True
 

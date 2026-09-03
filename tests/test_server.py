@@ -22,6 +22,7 @@ from yunohost_mcp.server import audit_log, mcp
 
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
 PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add"}
+APP_CHANGE_URL_TOOLS = {"app_change_url"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
@@ -101,6 +102,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE4_TOOLS
             | PHASE5_WRITE_TOOLS
             | PHASE6_WRITE_TOOLS
+            | APP_CHANGE_URL_TOOLS
             | PHASE7_TOOLS
             | PHASE8_TOOLS
             | PHASE10_TOOLS
@@ -242,6 +244,28 @@ async def test_domain_add_requires_then_accepts_a_plain_confirmation():
         assert confirmed.is_error is not True, confirmed.content
         assert confirmed.structured_content.get("fake") is True
         assert confirmed.structured_content["domain"] == "new.example.com"
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_app_change_url_requires_then_accepts_a_plain_confirmation():
+    # apps.change_url has require_confirmation but not require_owner_signature
+    # or require_backup - same single-caller confirmation shape as domain_add
+    # above, deliberately lighter than apps.remove (see policy/rules.py).
+    args = {"app": "mangatsu", "domain": "manga.example.com", "path": "/"}
+    async with Client(mcp) as client:
+        first = await client.call_tool("app_change_url", args)
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool("app_change_url", {**args, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert confirmed.structured_content["app"] == "mangatsu"
+        assert confirmed.structured_content["domain"] == "manga.example.com"
         assert "confirmation_required" not in confirmed.structured_content
 
 

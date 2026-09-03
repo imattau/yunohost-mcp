@@ -42,6 +42,7 @@ EXPECTED_TOOLS = frozenset(
         "plan_app_upgrade",
         "execute_plan",
         "app_remove",
+        "app_change_url",
         "backup_restore",
         "system_upgrade",
         "package_inspect",

@@ -797,6 +797,42 @@ def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None
 @mcp.tool()
 @redact_response
 @translate_known_errors
+# Reuses APPS_UPGRADE rather than a new scope: both roles that can already
+# reach for app_remove-and-reinstall as a change_url workaround
+# (app-admin, package-developer) already hold APPS_UPGRADE too, so this
+# closes that gap for both without a role/identity.toml change.
+@require_scope(Scope.APPS_UPGRADE)
+@audited_write("apps.change_url", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "apps.change_url",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda app, domain, path, **_: {
+        "action": "change app url",
+        "app": app,
+        "new_domain": domain,
+        "new_path": path,
+        "warning": "Requires the app's own change_url script; some apps don't ship one "
+        "(app_change_url_no_script) or bake their install path into a built asset that a "
+        "plain change_url won't rebuild - check the package before relying on this.",
+    },
+)
+def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Move an installed YunoHost app to a new domain and/or path, in place.
+
+    Unlike app_remove + app_install, this preserves the app's data and
+    settings - it only reruns the app's own scripts/change_url. Fails
+    with app_change_url_no_script if the app doesn't ship one. Some apps'
+    change_url script only updates the reverse-proxy config and doesn't
+    rebuild app-specific assets that were baked in for the old path - check
+    the package (or ask the user) before assuming this alone is sufficient.
+    """
+    return adapter.app_change_url(app, domain=domain, path=path)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_RESTORE)
 @audited_write("backups.restore", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
