@@ -38,7 +38,7 @@ class YunohostUnavailableError(RuntimeError):
     """Raised when a real YunoHost call is attempted but yunohost.* can't be imported."""
 
 
-_i18n_initialized = False
+_yunohost_runtime_initialized = False
 
 
 class _HeadlessInterface:
@@ -54,33 +54,41 @@ class _HeadlessInterface:
     type = "api"
 
 
-def _ensure_i18n_initialized() -> None:
-    """Initialize moulinette's i18n and interface before any real yunohost.* call.
+def _ensure_yunohost_runtime_initialized() -> None:
+    """Initialize moulinette/yunohost process-global state before any real
+    yunohost.* call.
 
-    Several yunohost.* modules (e.g. yunohost.service, yunohost.diagnosis)
-    reach into moulinette state - m18n.key_exists()/m18n.n() need
-    m18n.translator, and diagnosis.py's message formatting needs
-    Moulinette.interface.type - but both are only set up by
-    moulinette.cli()/moulinette.api(), the normal CLI/API bootstrap this
-    adapter deliberately bypasses by importing yunohost.* directly
-    in-process (see module docstring). Skipping this raises, respectively:
-      AttributeError: 'Moulinette18n' object has no attribute 'translator'
-      AttributeError: 'NoneType' object has no attribute 'type'
-    the first time a call happens to touch either. yunohost.init_i18n() is
-    yunohost's own documented hook for the m18n half of this, for exactly
-    this "in-process, not via moulinette.cli" scenario; there's no
-    equivalent upstream hook for Moulinette.interface, so it's set directly
-    here.
+    Several yunohost.* modules reach into state that's normally set up by
+    moulinette.cli()/moulinette.api() (or yunohost.init(), which wraps
+    them) - the CLI/API bootstrap this adapter deliberately bypasses by
+    importing yunohost.* directly in-process (see module docstring).
+    Skipping each raises, the first time a call happens to touch it:
+      - m18n.translator unset (needed by e.g. yunohost.service):
+        AttributeError: 'Moulinette18n' object has no attribute 'translator'
+      - Moulinette.interface unset (needed by yunohost.diagnosis's message
+        formatting):
+        AttributeError: 'NoneType' object has no attribute 'type'
+      - the custom SUCCESS log level/Logger class unset (needed by e.g.
+        yunohost.service.service_restart's success-path logging):
+        AttributeError: 'Logger' object has no attribute 'success'
+    yunohost.init_i18n() is yunohost's own documented hook for the m18n
+    case, for exactly this "in-process, not via moulinette.cli" scenario.
+    There's no equivalent upstream hook for the other two, so they're
+    reproduced directly here from yunohost.utils.logging.init_logging()'s
+    relevant lines - deliberately *not* calling init_logging() itself,
+    since its dictConfig(..., disable_existing_loggers=True) would
+    reconfigure/silence this server's own loggers (uvicorn's included) as
+    a side effect.
     """
-    global _i18n_initialized
-    if _i18n_initialized:
+    global _yunohost_runtime_initialized
+    if _yunohost_runtime_initialized:
         return
-    _i18n_initialized = True
+    _yunohost_runtime_initialized = True
     # Each import/init below is independent - and best-effort via ImportError
     # - so a missing `moulinette` package (or a `yunohost` one) doesn't skip
-    # the other, and neither blocks the caller's own import of the target
-    # module/attr, which raises YunohostUnavailableError if it's the real
-    # one that's actually missing (e.g. adapter tests inject fake
+    # the others, and none of them block the caller's own import of the
+    # target module/attr, which raises YunohostUnavailableError if it's the
+    # real one that's actually missing (e.g. adapter tests inject fake
     # yunohost.* submodules straight into sys.modules without a real
     # top-level yunohost/moulinette package).
     try:
@@ -89,6 +97,15 @@ def _ensure_i18n_initialized() -> None:
         pass
     else:
         init_i18n()
+    try:
+        from logging import addLevelName, setLoggerClass
+
+        from yunohost.utils.logging import SUCCESS, YunohostLogger
+    except ImportError:
+        pass
+    else:
+        addLevelName(SUCCESS, "SUCCESS")
+        setLoggerClass(YunohostLogger)
     try:
         from moulinette import Moulinette
     except ImportError:
@@ -99,7 +116,7 @@ def _ensure_i18n_initialized() -> None:
 
 def _import_attr(module_name: str, attr: str) -> Any:
     try:
-        _ensure_i18n_initialized()
+        _ensure_yunohost_runtime_initialized()
         module = importlib.import_module(module_name)
         return getattr(module, attr)
     except ImportError as exc:

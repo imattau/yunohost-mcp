@@ -1,23 +1,30 @@
-"""Regression tests: real yunohost.* calls need moulinette bootstrapped.
+"""Regression tests: real yunohost.* calls need moulinette/yunohost runtime state bootstrapped.
 
-Several yunohost.* modules reach into moulinette state that's normally set
-up by moulinette.cli()/moulinette.api() - the CLI/API bootstrap this
-adapter deliberately bypasses by importing yunohost.* directly in-process:
+Several yunohost.* modules reach into state that's normally set up by
+moulinette.cli()/moulinette.api() (or yunohost.init(), which wraps them) -
+the CLI/API bootstrap this adapter deliberately bypasses by importing
+yunohost.* directly in-process:
 
   - yunohost.service (and others) call m18n.key_exists()/m18n.n(), which
     need m18n.translator, unset until yunohost.init_i18n() runs.
   - yunohost.diagnosis's message formatting reads Moulinette.interface.type,
     which is None until a real Cli/Api Interface sets it.
+  - yunohost.service.service_restart's success-path calls logger.success(),
+    which needs the custom SUCCESS log level and YunohostLogger class that
+    yunohost.utils.logging.init_logging() registers.
 
-Skipping either raised, respectively:
+Skipping each raised, respectively:
     AttributeError: 'Moulinette18n' object has no attribute 'translator'
     AttributeError: 'NoneType' object has no attribute 'type'
-against a real YunoHost host (caught after fixing a separate
-venv-isolation packaging bug that had been masking both).
+    AttributeError: 'Logger' object has no attribute 'success'
+against a real YunoHost host (caught one at a time, each surfacing only
+after fixing the last - first a separate venv-isolation packaging bug that
+had been masking all three).
 """
 
 from __future__ import annotations
 
+import logging
 import types
 
 import pytest
@@ -28,10 +35,23 @@ from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
 
 @pytest.fixture(autouse=True)
-def _reset_i18n_init_flag(monkeypatch: pytest.MonkeyPatch):
-    # _ensure_i18n_initialized() only runs its body once per process
-    # (module-level flag) - reset it so each test observes a fresh call.
-    monkeypatch.setattr(adapter_module, "_i18n_initialized", False)
+def _reset_yunohost_runtime_init_flag(monkeypatch: pytest.MonkeyPatch):
+    # _ensure_yunohost_runtime_initialized() only runs its body once per
+    # process (module-level flag) - reset it so each test observes a fresh
+    # call.
+    monkeypatch.setattr(adapter_module, "_yunohost_runtime_initialized", False)
+
+
+@pytest.fixture(autouse=True)
+def _restore_logger_class():
+    # setLoggerClass() is global logging module state, same as production -
+    # restore it after each test so a real fix here can't leak a stub
+    # Logger subclass into unrelated tests.
+    original = logging.getLoggerClass()
+    try:
+        yield
+    finally:
+        logging.setLoggerClass(original)
 
 
 def _install_fake_yunohost_package(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
@@ -64,6 +84,27 @@ def _install_fake_moulinette_package(monkeypatch: pytest.MonkeyPatch):
     moulinette_pkg.Moulinette = FakeMoulinette
     monkeypatch.setitem(__import__("sys").modules, "moulinette", moulinette_pkg)
     return FakeMoulinette
+
+
+def _install_fake_yunohost_logging_module(monkeypatch: pytest.MonkeyPatch):
+    """Reproduces just enough of yunohost.utils.logging for the adapter's
+    addLevelName/setLoggerClass call: a SUCCESS level number and a Logger
+    subclass with a distinguishable marker, importable as
+    `from yunohost.utils.logging import SUCCESS, YunohostLogger` (which
+    needs `yunohost.utils` present in sys.modules too, not just the leaf
+    module)."""
+
+    class FakeYunohostLogger(logging.Logger):
+        is_the_fake_yunohost_logger = True
+
+    yunohost_utils_pkg = types.ModuleType("yunohost.utils")
+    yunohost_utils_logging_mod = types.ModuleType("yunohost.utils.logging")
+    yunohost_utils_logging_mod.SUCCESS = 25
+    yunohost_utils_logging_mod.YunohostLogger = FakeYunohostLogger
+
+    monkeypatch.setitem(__import__("sys").modules, "yunohost.utils", yunohost_utils_pkg)
+    monkeypatch.setitem(__import__("sys").modules, "yunohost.utils.logging", yunohost_utils_logging_mod)
+    return FakeYunohostLogger
 
 
 def test_real_yunohost_call_initializes_i18n_before_use(monkeypatch: pytest.MonkeyPatch):
@@ -124,6 +165,29 @@ def test_does_not_override_an_already_set_moulinette_interface(monkeypatch: pyte
     assert fake_moulinette.interface is real_interface
 
 
+def test_real_yunohost_call_registers_the_success_log_level_and_class(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_yunohost_package(monkeypatch, [])
+    _install_fake_moulinette_package(monkeypatch)
+    fake_logger_class = _install_fake_yunohost_logging_module(monkeypatch)
+    assert logging.getLoggerClass() is not fake_logger_class
+
+    yunohost_service = types.ModuleType("yunohost.service")
+    yunohost_service.service_status = lambda names, **_: {}
+    monkeypatch.setitem(__import__("sys").modules, "yunohost.service", yunohost_service)
+
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+    adapter.service_status(["nginx"])
+
+    # A real yunohost.service.service_restart calls logger.success(...) on
+    # a module-level `logging.getLogger(__name__)` - any logger created
+    # after our init must carry that method (i.e. be an instance of the
+    # registered class).
+    assert logging.getLoggerClass() is fake_logger_class
+    new_logger = logging.getLogger("yunohost_mcp_test_success_logger")
+    assert isinstance(new_logger, fake_logger_class)
+    assert logging.getLevelName(25) == "SUCCESS"
+
+
 def test_i18n_init_runs_only_once_across_multiple_real_calls(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []
     _install_fake_yunohost_package(monkeypatch, calls)
@@ -143,11 +207,13 @@ def test_i18n_init_runs_only_once_across_multiple_real_calls(monkeypatch: pytest
 def test_missing_top_level_yunohost_and_moulinette_packages_does_not_crash(monkeypatch: pytest.MonkeyPatch):
     # Neither "yunohost" nor "moulinette" in sys.modules (matches the other
     # adapter tests' sandbox, which inject fake yunohost.* submodules
-    # directly without real top-level packages) - _ensure_i18n_initialized
-    # must degrade gracefully rather than mis-raising YunohostUnavailableError
-    # for the *wrong* module.
+    # directly without real top-level packages) -
+    # _ensure_yunohost_runtime_initialized must degrade gracefully rather
+    # than mis-raising YunohostUnavailableError for the *wrong* module.
     monkeypatch.delitem(__import__("sys").modules, "yunohost", raising=False)
     monkeypatch.delitem(__import__("sys").modules, "moulinette", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, "yunohost.utils", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, "yunohost.utils.logging", raising=False)
 
     yunohost_service = types.ModuleType("yunohost.service")
     yunohost_service.service_status = lambda names, **_: {n: {"status": "running"} for n in names}
