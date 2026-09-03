@@ -29,3 +29,12 @@ def test_unknown_role_raises():
 
 def test_empty_roles_yields_no_scopes():
     assert scopes_for_roles(()) == frozenset()
+
+
+def test_package_developer_can_publish_a_tested_package_to_the_catalog():
+    # package-developer already has packages.test, catalog.inspect, and
+    # catalog.verify - publishing what it just tested is the natural next
+    # step of that workflow, not a separate elevated capability. Publish
+    # itself still requires confirmation (see policy/rules.py's
+    # PolicyRule for "catalog.publish").
+    assert Scope.CATALOG_PUBLISH in ROLE_SCOPES["package-developer"]

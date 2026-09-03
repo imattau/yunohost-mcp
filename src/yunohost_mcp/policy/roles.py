@@ -46,6 +46,7 @@ _PACKAGE_DEVELOPER: frozenset[Scope] = _READONLY | {
     Scope.APPS_UPGRADE,
     Scope.APPS_REMOVE,
     Scope.BACKUPS_CREATE,
+    Scope.CATALOG_PUBLISH,
 }
 
 _ADMINISTRATOR: frozenset[Scope] = ALL_SCOPES
