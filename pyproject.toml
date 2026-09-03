@@ -9,6 +9,7 @@ dependencies = [
     "anyio>=4.15.0",
     "bech32>=1.2.0",
     "coincurve>=21.0.0",
+    "email-validator>=2.0",
     "httpx2>=2.5.0",
     "mcp[cli]>=2.1.1",
     "pydantic>=2.13.5",
