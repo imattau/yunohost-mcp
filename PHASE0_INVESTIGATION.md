@@ -130,3 +130,28 @@ Reasoning:
 - **`diagnosis_run` and `tools_update` are genuinely slow/networked** — confirms PLAN.md Phase 5's insistence on async operation-id patterns rather than blocking HTTP calls; don't wait on these synchronously in an MCP tool handler.
 - **No native RBAC to lean on** — the MCP's Phase 3 authorization layer is doing 100% of the access-control work; the underlying YunoHost credential the MCP process uses is inherently "full admin." This raises the stakes on Phase 6 (policy engine) and Phase 9 (secret redaction) since a bug there is a bug in the *only* access control that exists.
 - YunoHost's own `OperationLogger` already redacts DB passwords from logs — the MCP's redaction (Phase 9) is an additive second layer, not a replacement; don't assume "no redaction needed because YunoHost logs are already clean."
+
+---
+
+## Errata (found during a Phase 0-7 review, after implementation)
+
+**Conclusion #3 above is wrong about *how* to supply the `operation_logger` argument, and the original adapter implementation (Phase 5/6) followed it and shipped a real bug.**
+
+`app_install`, `app_remove`, `backup_create`, `tools_upgrade`, and `diagnosis_run` do declare `operation_logger` as their first parameter *in the raw function body* — but every one of them is also decorated with `@is_unit_operation(...)` (`src/log.py:444`). That decorator wraps the function, and **the wrapper — not the raw function — is the name `yunohost.app.app_install` (etc.) actually exports**. The wrapper:
+
+1. Constructs its own `OperationLogger` internally.
+2. Prepends it to the positional args before calling the wrapped function.
+3. Calls `.success()` / `.error()` on it itself.
+
+A caller is meant to invoke the *wrapper* with the function's normal arguments only — **never with an `operation_logger` of its own**. `service_restart`, `app_upgrade`, and `backup_restore` (not `@is_unit_operation`-decorated, or decorated but with a bare outward signature) were implemented correctly the whole time; the five functions above were not.
+
+Passing an extra positional `operation_logger` argument does not raise, or even land in the `operation_logger` slot — the decorator's own remapping logic (`src/log.py:472-481`) shifts every real argument over by one position instead, so the *actual* `app` value silently ends up bound to `label`, and the caller's `OperationLogger` object silently ends up bound to `app`. Reproduced directly against the decorator's real logic:
+
+```python
+app_install(FakeOpLogger(), "nextcloud", label="My Cloud", args=None, force=False)
+# wrapper receives: {'label': 'nextcloud', 'args': None, 'force': False, 'app': <OperationLogger obj>}
+```
+
+No exception, no log line pointing at the mistake — it would have silently attempted to install an app named after an `OperationLogger`'s `repr()`, or worse, whatever the first *keyword* argument happened to be, in production. Fixed by not constructing/passing an `OperationLogger` for any of these five, and recovering a best-effort operation id afterward via `log_list(limit=1)` instead of `operation_logger.name` (see `yunohost/adapter.py`'s `_latest_operation_id()`).
+
+**Lesson for future phases**: `grep -n "^@is_unit_operation" -A2 src/<module>.py` before assuming any function's raw parameter list is also its calling convention — the exported name may be a decorated wrapper with a different one.

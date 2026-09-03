@@ -8,8 +8,8 @@ This module is intentionally the *only* place that imports `yunohost.*` or
 falls back to fake data — tools/resources should go through `YunohostAdapter`
 rather than reaching into `yunohost` themselves, so that:
   - the fake/real switch (Settings.fake_yunohost) has one seam
-  - later phases (operation_logger construction, LDAP context init, locking)
-    have one place to get right
+  - later phases (LDAP context init, locking, recovering @is_unit_operation
+    operation ids via _latest_operation_id()) have one place to get right
 
 Phase 4 (v0.1 read-only MVP) implements every read call from PLAN.md's
 "Suggested v0.1 scope", mapped 1:1 to the functions found in
@@ -96,15 +96,16 @@ class YunohostAdapter:
     def diagnosis_run(self, categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "categories_run": categories or ["ip", "dnsrecords", "services"]}
-        # diagnosis_run() takes an OperationLogger as its first argument and
-        # calls .start() on it itself (PHASE0_INVESTIGATION.md) - moulinette's
-        # CLI/API dispatch normally constructs this for you, so an in-process
-        # caller must replicate that.
+        # diagnosis_run's *raw* function takes operation_logger as its first
+        # argument, but the exported name is wrapped by @is_unit_operation
+        # (src/log.py), which constructs and injects its own OperationLogger
+        # internally and does NOT expect the caller to pass one - see the
+        # "Errata" section of PHASE0_INVESTIGATION.md for how this was
+        # originally gotten wrong, and _latest_operation_id()'s docstring for
+        # how the id is recovered without one.
         diagnosis_run = _import_attr("yunohost.diagnosis", "diagnosis_run")
-        operation_logger_cls = _import_attr("yunohost.log", "OperationLogger")
-        operation_logger = operation_logger_cls("diagnosis_run")
-        result = diagnosis_run(operation_logger, categories=categories or [], force=force)
-        return {"fake": False, **(result or {})}
+        result = diagnosis_run(categories=categories or [], force=force)
+        return {"fake": False, "operation_id": _latest_operation_id(), **(result or {})}
 
     def diagnosis_get(self) -> dict[str, Any]:
         # Same aggregated report as health_check(); kept as a separate
@@ -212,14 +213,18 @@ class YunohostAdapter:
             "target_version": match.get("new_version") if match else None,
         }
 
-    # -- Phase 5: writes -------------------------------------------------
+    # -- Phase 5/6: writes -------------------------------------------------
     #
-    # Every write below either returns {"operation_id": ...} (when we
-    # construct the OperationLogger ourselves, per PHASE0_INVESTIGATION.md)
-    # or omits it (when the underlying function manages its own logger
-    # internally, e.g. app_upgrade does one per app) - callers should treat
-    # a missing operation_id as "check operations_list() by time/app instead
-    # of by id", not as an error.
+    # None of these construct or pass an OperationLogger. Several of the
+    # underlying functions (app_install, app_remove, backup_create,
+    # tools_upgrade, diagnosis_run) are decorated with @is_unit_operation
+    # (src/log.py), which constructs its own OperationLogger internally and
+    # prepends it to the call itself - the exported name is the wrapper, not
+    # the raw function, so a caller passing one manually corrupts the
+    # remaining positional arguments (see PHASE0_INVESTIGATION.md's
+    # "Errata" section for exactly how, and why the original version of
+    # this file got it wrong). We recover a best-effort operation id
+    # afterward via _latest_operation_id() instead.
 
     def service_restart(self, names: list[str]) -> dict[str, Any]:
         if self.settings.fake_yunohost:
@@ -242,19 +247,8 @@ class YunohostAdapter:
                 "name": name or "fake-backup",
             }
         backup_create = _import_attr("yunohost.backup", "backup_create")
-        operation_logger = _new_operation_logger("backup_create")
-        try:
-            result = backup_create(
-                operation_logger,
-                name=name,
-                description=description,
-                apps=apps or [],
-                system=system or [],
-            )
-        except Exception as exc:
-            _try_close_with_error(operation_logger, exc)
-            raise
-        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+        result = backup_create(name=name, description=description, apps=apps or [], system=system or [])
+        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
     def app_install(
         self,
@@ -266,38 +260,26 @@ class YunohostAdapter:
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-app_install", "app": app}
         app_install = _import_attr("yunohost.app", "app_install")
-        operation_logger = _new_operation_logger("app_install", related_to=[("app", app)])
-        try:
-            result = app_install(operation_logger, app, label=label, args=args, force=force)
-        except Exception as exc:
-            _try_close_with_error(operation_logger, exc)
-            raise
-        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+        result = app_install(app, label=label, args=args, force=force)
+        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
     def app_upgrade(self, app: str | list[str] | None = None, force: bool = False) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "app": app, "result": "success"}
-        # No operation_logger to construct here: app_upgrade() builds its
-        # own internally, once per app it actually upgrades (PHASE0
-        # finding), so there's no single id to hand back for a multi-app
+        # app_upgrade() is not @is_unit_operation-decorated; it builds its
+        # own OperationLogger internally, once per app it actually
+        # upgrades, so there's no single id to hand back for a multi-app
         # call - the per-app result dict plus operations_list() cover it.
         app_upgrade = _import_attr("yunohost.app", "app_upgrade")
         result = app_upgrade(app=app or [], force=force)
         return {"fake": False, "app": app, "result": result}
 
-    # -- Phase 6: destructive writes, gated by policy/confirmation -------
-
     def app_remove(self, app: str, purge: bool = False) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-app_remove", "app": app, "purged": purge}
         app_remove = _import_attr("yunohost.app", "app_remove")
-        operation_logger = _new_operation_logger("app_remove", related_to=[("app", app)])
-        try:
-            result = app_remove(operation_logger, app, purge=purge)
-        except Exception as exc:
-            _try_close_with_error(operation_logger, exc)
-            raise
-        return {"fake": False, "operation_id": operation_logger.name, "app": app, "result": result}
+        result = app_remove(app, purge=purge)
+        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
 
     def backup_restore(
         self,
@@ -308,10 +290,8 @@ class YunohostAdapter:
     ) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "name": name, "apps": apps or [], "system": system or []}
-        # backup_restore() takes no operation_logger - it isn't in the
-        # signature (unlike backup_create/app_install/app_remove); see
-        # PHASE0-style verification against /tmp/yunohost-src at
-        # implementation time. No operation_id to capture here.
+        # backup_restore() is not @is_unit_operation-decorated either - no
+        # operation id to capture here at all, best-effort or otherwise.
         backup_restore = _import_attr("yunohost.backup", "backup_restore")
         result = backup_restore(name, system=system or [], apps=apps or [], force=force)
         return {"fake": False, "name": name, "result": result}
@@ -320,28 +300,25 @@ class YunohostAdapter:
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-tools_upgrade", "result": "success"}
         tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
-        operation_logger = _new_operation_logger("tools_upgrade")
-        try:
-            result = tools_upgrade(operation_logger, target="system")
-        except Exception as exc:
-            _try_close_with_error(operation_logger, exc)
-            raise
-        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+        result = tools_upgrade(target="system")
+        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
 
-def _new_operation_logger(operation: str, **kwargs: Any) -> Any:
-    operation_logger_cls = _import_attr("yunohost.log", "OperationLogger")
-    return operation_logger_cls(operation, **kwargs)
-
-
-def _try_close_with_error(operation_logger: Any, exc: Exception) -> None:
-    """Best-effort: close the operation log with the error before re-raising.
-
-    Several core functions already do this themselves on handled failure
-    paths; this only matters for exceptions they didn't catch. Never lets a
-    problem here mask the original exception.
+def _latest_operation_id() -> str | None:
+    """Best-effort operation id for an @is_unit_operation-wrapped call that
+    just returned successfully: its OperationLogger is internal to the
+    decorator, never handed back to the caller, so there is no id to
+    capture directly. Falls back to "whatever operation log_list() now
+    reports as newest" - correct as long as this MCP server's own WriteLock
+    (policy/locks.py) is the only thing dispatching writes, since it
+    already guarantees at most one write is in flight through this
+    process; a concurrent `yunohost` CLI/API write from *outside* this
+    server could still race it, making this a best-effort id, not a
+    guaranteed-correct one.
     """
     try:
-        operation_logger.error(str(exc))
-    except Exception:  # noqa: BLE001 - logging the original failure must not be lost
-        pass
+        log_list = _import_attr("yunohost.log", "log_list")
+        operations = log_list(limit=1).get("operation", [])
+        return operations[0]["name"] if operations else None
+    except Exception:  # noqa: BLE001 - never let id-recovery mask the write's own result
+        return None
