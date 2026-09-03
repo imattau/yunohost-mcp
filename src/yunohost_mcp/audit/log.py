@@ -1,11 +1,12 @@
-"""Minimal audit trail for write operations (PLAN.md Phase 5/10, partial).
+"""Audit trail for write operations (PLAN.md Phase 5/10).
 
-This is the write side only: one JSON-lines file, one entry per write tool
-call, with the initiating pubkey, arguments (redacted), and outcome. Reading
-it back (audit_list/audit_get as administrator-only tools) is full Phase 10
-and not implemented yet — PLAN.md's example audit entry also includes
-policy-decision and confirmation-id fields that don't exist until Phase 6/7
-land; this is intentionally a subset, not a preview of the final shape.
+One JSON-lines file, one entry per write tool call, with the initiating
+pubkey, arguments (redacted), and outcome. `list`/`get` (Phase 10) back
+audit_list()/audit_get() in server.py, gated administrator-only via
+Scope.AUDIT_READ - not full parity with PLAN.md's example audit entry
+(no separate policy-decision field; "decision" is always "allowed" since
+a denied call never reaches @audited_write - see its docstring) but the
+same shape `record()` has always written, just read back.
 
 Redaction here reuses redaction.py's shared pass (Phase 9) - the same
 key-name matching applied to every tool's *response* too
@@ -57,3 +58,26 @@ class AuditLog:
         with self.path.open("a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
         return audit_id
+
+    def list(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Newest-first, matching yunohost.log.log_list()'s own convention."""
+        entries = self._read_all()
+        entries.reverse()
+        return entries[:limit] if limit is not None else entries
+
+    def get(self, audit_id: str) -> dict[str, Any] | None:
+        for entry in self._read_all():
+            if entry.get("audit_id") == audit_id:
+                return entry
+        return None
+
+    def _read_all(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        entries = []
+        for line in self.path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entries.append(json.loads(line))
+        return entries

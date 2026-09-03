@@ -52,3 +52,43 @@ def test_creates_parent_directory(tmp_path: Path):
     log = AuditLog(path=tmp_path / "nested" / "dir" / "audit.jsonl")
     log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
     assert log.path.exists()
+
+
+def test_list_returns_newest_first(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    first_id = log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    second_id = log.record(tool="b", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    entries = log.list()
+    assert [e["audit_id"] for e in entries] == [second_id, first_id]
+
+
+def test_list_respects_limit(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    for i in range(5):
+        log.record(tool=f"tool-{i}", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    entries = log.list(limit=2)
+    assert len(entries) == 2
+    assert entries[0]["tool"] == "tool-4"
+    assert entries[1]["tool"] == "tool-3"
+
+
+def test_list_on_missing_file_returns_empty(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "does-not-exist.jsonl")
+    assert log.list() == []
+
+
+def test_get_finds_entry_by_id(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    target_id = log.record(tool="b", arguments={"app": "nextcloud"}, caller_pubkey="x", decision="allowed", result="success")
+    log.record(tool="c", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    entry = log.get(target_id)
+    assert entry is not None
+    assert entry["tool"] == "b"
+    assert entry["arguments"] == {"app": "nextcloud"}
+
+
+def test_get_returns_none_for_unknown_id(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    assert log.get("mcp-does-not-exist") is None

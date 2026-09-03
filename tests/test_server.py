@@ -35,6 +35,7 @@ PHASE8_TOOLS = {
     "package_logs",
     "package_run_tests",
 }
+PHASE10_TOOLS = {"audit_list", "audit_get"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -72,6 +73,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE6_WRITE_TOOLS
             | PHASE7_TOOLS
             | PHASE8_TOOLS
+            | PHASE10_TOOLS
         )
         assert expected <= names
 
@@ -410,6 +412,51 @@ async def test_phase9_tool_response_is_redacted_end_to_end(monkeypatch: pytest.M
         text_blob = " ".join(getattr(c, "text", "") for c in result.content)
         assert "s3cr3t-should-not-leak" not in text_blob
         assert "also-secret" not in text_blob
+
+
+@pytest.mark.anyio
+async def test_phase10_audit_list_and_get_administrator_only():
+    async with Client(mcp) as client:
+        install = await client.call_tool("app_install", {"app": "nextcloud"})
+        assert install.is_error is not True
+
+        listed = await client.call_tool("audit_list", {"limit": 1})
+        assert listed.is_error is not True
+        entries = listed.structured_content["entries"]
+        assert len(entries) == 1
+        assert entries[0]["tool"] == "apps.install"
+        audit_id = entries[0]["audit_id"]
+
+        got = await client.call_tool("audit_get", {"audit_id": audit_id})
+        assert got.is_error is not True
+        assert got.structured_content["audit_id"] == audit_id
+        assert got.structured_content["tool"] == "apps.install"
+
+
+@pytest.mark.anyio
+async def test_phase10_audit_get_unknown_id_errors():
+    async with Client(mcp) as client:
+        result = await client.call_tool("audit_get", {"audit_id": "mcp-does-not-exist"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase10_audit_tools_denied_for_non_administrator_roles():
+    developer = AuthenticatedRequest(
+        pubkey="feedface",
+        event_id="f" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="feedface",
+            name="dev-agent",
+            roles=("package-developer",),
+            scopes=scopes_for_roles(("package-developer",)),
+        ),
+    )
+    set_current_request(developer)
+    async with Client(mcp) as client:
+        result = await client.call_tool("audit_list", {})
+        assert result.is_error is True
 
 
 @pytest.fixture

@@ -42,5 +42,10 @@ class Scope(StrEnum):
     PACKAGES_INSPECT = "packages.inspect"
     PACKAGES_TEST = "packages.test"
 
+    # Not granted by any role except administrator (policy/roles.py) - this
+    # is what makes audit_list()/audit_get() "administrator-only" per
+    # PLAN.md Phase 10, without a role-name check in the tool itself.
+    AUDIT_READ = "audit.read"
+
 
 ALL_SCOPES: frozenset[Scope] = frozenset(Scope)

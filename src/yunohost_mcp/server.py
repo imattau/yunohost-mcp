@@ -40,6 +40,11 @@ layer on top of what YunoHost's own OperationLogger already redacts in its
 own logs, applied to the actual returned data itself rather than just log
 output. identity.toml also now refuses an nsec (private key) outright
 wherever a pubkey is expected - see auth/identity.py's _resolve_key_to_hex.
+Phase 10: adds audit_list/audit_get, reading back what @audited_write has
+been writing since Phase 5. Gated by Scope.AUDIT_READ, which only the
+administrator role grants (policy/roles.py) - "administrator-only" per
+PLAN.md, expressed as a scope no other role includes rather than a
+role-name check in the tool itself.
 """
 
 from __future__ import annotations
@@ -467,6 +472,25 @@ def package_run_tests(source: str, app_id: str | None = None) -> dict[str, Any]:
     what each step does and why this isn't package_check's full CI matrix.
     """
     return adapter.package_run_tests(source, app_id=app_id)
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.AUDIT_READ)
+def audit_list(limit: int | None = None) -> dict[str, Any]:
+    """List audit trail entries, newest first. Administrator-only (Scope.AUDIT_READ)."""
+    return {"entries": audit_log.list(limit=limit)}
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.AUDIT_READ)
+def audit_get(audit_id: str) -> dict[str, Any]:
+    """Return one audit trail entry by id. Administrator-only (Scope.AUDIT_READ)."""
+    entry = audit_log.get(audit_id)
+    if entry is None:
+        raise ValueError(f"no audit entry with id {audit_id!r}")
+    return entry
 
 
 @mcp.tool()
