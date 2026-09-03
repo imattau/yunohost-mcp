@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     # Confirmation tickets (Phase 6) expire after this long if unused.
     confirmation_ttl_seconds: int = 300
 
+    # Owner co-signing (Phase 13; owner-approval-plan.md, v1 `solo` only).
+    # owner_npub: an explicit owner identity (npub or hex pubkey). A
+    # packaged install seeds this from the install-time admin_npub. Left
+    # unset, auth/owner.py falls back to "the one identity.toml entry with
+    # the administrator role" - ambiguous (zero or several) resolves to no
+    # owner, not a guess.
+    owner_npub: str | None = None
+    # owner_approval_ttl_seconds: separate, longer TTL for confirmation
+    # tickets that require owner signature - the requester's original call
+    # and the owner's NIP-46 approval are two independent round trips
+    # separated by a human opening a signer app, which the default
+    # confirmation_ttl_seconds (sized for same-session retries) doesn't
+    # allow enough time for.
+    owner_approval_ttl_seconds: int = 1800
+
     # Path to a local checkout of github.com/YunoHost/package_linter
     # (package_linter.py at its root). package_lint() is unavailable (not
     # faked, not silently skipped) when this is None - linting is optional

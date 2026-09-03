@@ -162,6 +162,30 @@ roles = ["administrator"]
     assert store.lookup(HEX_PUBKEY) is not None
 
 
+def test_pubkeys_with_role_finds_matching_entries(tmp_path: Path):
+    dev_pubkey = "aa" * 32
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Admin"
+roles = ["administrator"]
+
+[identity."{dev_pubkey}"]
+name = "Dev agent"
+roles = ["package-developer"]
+"""
+    )
+    store = IdentityStore.load(toml_path)
+    assert store.pubkeys_with_role("administrator") == [HEX_PUBKEY]
+    assert store.pubkeys_with_role("owner") == []
+
+
+def test_pubkeys_with_role_on_empty_store(tmp_path: Path):
+    store = IdentityStore.load(tmp_path / "does-not-exist.toml")
+    assert store.pubkeys_with_role("administrator") == []
+
+
 def test_static_load_is_unaffected_by_later_file_changes(tmp_path: Path):
     toml_path = tmp_path / "identity.toml"
     toml_path.write_text(

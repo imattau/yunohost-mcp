@@ -56,13 +56,17 @@ slice: auth/server_identity.py) so a delegation can name which server it
 targets - get_server_identity() lazily generates/loads that keypair only
 when something (the server_identity tool, or the http transport) actually
 needs it, not merely on import.
-Phase 13: owner co-signing for the two highest-risk already-implemented
-writes (system_upgrade, backup_restore - policy/rules.py's
-require_owner_signature). A pending confirmation from one identity must be
-approve_operation()'d by a *different* identity (Scope.OWNER_APPROVE,
-administrator-only) before the original requester can execute it - two
-independently NIP-98-signed calls, verified the normal way each already
-is, bound together by the confirmation ticket (policy/confirmation.py).
+Phase 13: owner co-signing for the highest-risk writes (policy/rules.py's
+require_owner_signature). A pending confirmation must be
+approve_operation()'d by the configured owner (auth/owner.py;
+owner-approval-plan.md's `solo` profile for v1 - one owner, resolved from
+an explicit setting or, failing that, a single unambiguous administrator
+identity) before the original requester can execute it - two independently
+NIP-98-signed calls, verified the normal way each already is, bound
+together by the confirmation ticket (policy/confirmation.py). The expected
+flow has the requester authenticate as an agent's own delegated key
+(auth/delegation.py) and the owner approve separately via NIP-46, so their
+signer never touches the automated request path.
 Phase 14: high-level composite workflows (diagnose_app, validate_server,
 safe_upgrade, repair_app, test_package) built entirely out of the tools
 already in this file - no new yunohost.* call exists anywhere in Phase 14.
@@ -93,6 +97,7 @@ from yunohost_mcp.auth.identity import (
     set_current_request,
 )
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
+from yunohost_mcp.auth.owner import resolve_owner_pubkey
 from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
@@ -110,9 +115,27 @@ adapter = YunohostAdapter(settings=settings)
 write_lock = WriteLock()
 audit_log = AuditLog(path=settings.audit_log_path())
 policy_rules = load_policy(settings.policy_file_path())
-confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
+confirmation_store = ConfirmationStore(
+    ttl_seconds=settings.confirmation_ttl_seconds,
+    owner_approval_ttl_seconds=settings.owner_approval_ttl_seconds,
+)
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 catalog_plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
+# Shared with create_http_app() below (not just constructed there) so
+# get_owner_pubkey() can resolve the bootstrap-administrator fallback
+# (auth/owner.py) against the same live-reloaded identity.toml the HTTP
+# transport itself authenticates against, on stdio too (LOCAL_STDIO_REQUEST
+# never has a real npub, but approve_operation is still reachable there).
+identity_store = IdentityStore.live(settings.identity_file_path())
+
+
+def get_owner_pubkey() -> str | None:
+    """Resolve the configured owner (owner-approval-plan.md, v1 `solo`
+    profile) fresh on every call - mirrors identity_store's own
+    live-reload semantics, so editing identity.toml (or restarting with a
+    new YUNOHOST_MCP_OWNER_NPUB) takes effect without a restart, and
+    without this module caching a stale answer."""
+    return resolve_owner_pubkey(owner_npub=settings.owner_npub, identity_store=identity_store)
 
 class AsyncToolMCPServer(MCPServer):
     """Run synchronous tools in asyncio's worker pool.
@@ -1187,18 +1210,30 @@ def audit_get(audit_id: str) -> dict[str, Any]:
 @require_scope(Scope.OWNER_APPROVE)
 @audited_write("owner.approve", lock=write_lock, audit_log=audit_log)
 def approve_operation(confirmation_id: str) -> dict[str, Any]:
-    """Owner co-signature (PLAN.md Phase 13) for a pending high-risk
-    operation (system.upgrade, backups.restore - see policy/rules.py's
+    """Owner co-signature (PLAN.md Phase 13; owner-approval-plan.md's
+    `solo` profile for v1) for a pending high-risk operation (system.
+    upgrade, backups.restore - see policy/rules.py's
     require_owner_signature). Marks the confirmation approved so its
     original requester can then execute it by calling the same tool again
     with this confirmation_id - approving does not execute anything itself.
 
-    The approver must be a different identity than whoever requested the
-    operation; Scope.OWNER_APPROVE is administrator-only.
+    The approver must be the one configured owner (auth/owner.py) - not
+    just any identity with Scope.OWNER_APPROVE (still required as a
+    baseline gate below). The expected flow: the original request comes
+    from an agent's own delegated key, and the owner approves with their
+    own npub through an external NIP-46 signer.
     """
     request = require_current_request()
+    owner_pubkey = get_owner_pubkey()
+    if owner_pubkey is None:
+        raise ConfirmationError(
+            "no owner is configured for this server - set an explicit owner (admin_npub) or "
+            "ensure exactly one administrator identity exists before approving high-risk operations"
+        )
     try:
-        ticket = confirmation_store.approve(confirmation_id, approver_pubkey=request.pubkey)
+        ticket = confirmation_store.approve(
+            confirmation_id, approver_pubkey=request.pubkey, owner_pubkey=owner_pubkey
+        )
     except ConfirmationError as exc:
         raise ConfirmationError(f"cannot approve: {exc}") from exc
     return {
@@ -1206,6 +1241,7 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         "confirmation_id": ticket.confirmation_id,
         "tool": ticket.tool,
         "operation_plan": ticket.plan,
+        "operation_hash": ticket.operation_hash,
         "approved_by": request.pubkey,
     }
 
@@ -1403,7 +1439,6 @@ def create_http_app():
     inner_app = mcp.streamable_http_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
     )
-    identity_store = IdentityStore.live(settings.identity_file_path())
     return NostrAuthMiddleware(
         inner_app,
         identity_store=identity_store,

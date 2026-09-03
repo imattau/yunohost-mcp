@@ -82,10 +82,22 @@ SECOND_ADMIN_REQUEST = AuthenticatedRequest(
 )
 
 
+@pytest.fixture(autouse=True)
+def configured_owner(monkeypatch: pytest.MonkeyPatch):
+    """v1 `solo` profile (owner-approval-plan.md): approve_operation checks
+    the approver against one configured owner. Tests configure SECOND_ADMIN_
+    REQUEST's pubkey as that owner - no on-disk identity.toml/YUNOHOST_MCP_
+    OWNER_NPUB needed - by patching server.get_owner_pubkey() directly,
+    the same seam server.py itself calls through."""
+    from yunohost_mcp import server as server_module
+
+    monkeypatch.setattr(server_module, "get_owner_pubkey", lambda: SECOND_ADMIN_REQUEST.pubkey)
+
+
 async def _approve_as_second_admin(client: Client, confirmation_id: str) -> None:
-    """Owner co-signing (Phase 13) requires a *different* identity than the
-    requester - swap in a second administrator identity for one call, then
-    restore LOCAL_STDIO_REQUEST so the rest of the test proceeds as before."""
+    """Owner co-signing (Phase 13) - swap in the configured owner identity
+    (configured_owner fixture) for one call, then restore LOCAL_STDIO_
+    REQUEST so the rest of the test proceeds as before."""
     set_current_request(SECOND_ADMIN_REQUEST)
     try:
         result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
@@ -403,14 +415,36 @@ async def test_phase13_execute_without_owner_approval_is_denied():
 
 
 @pytest.mark.anyio
-async def test_phase13_self_approval_is_rejected():
+async def test_phase13_non_owner_cannot_approve_even_its_own_request():
     async with Client(mcp) as client:
         first = await client.call_tool("system_upgrade", {})
         confirmation_id = first.structured_content["confirmation_id"]
 
-        # LOCAL_STDIO_REQUEST trying to approve its own request.
+        # LOCAL_STDIO_REQUEST is the requester, and (per configured_owner)
+        # is not the configured owner - approving must fail regardless of
+        # whether it's also the requester.
         result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
         assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase13_owner_may_approve_and_consume_its_own_request():
+    """v1 `solo` profile (owner-approval-plan.md): when the owner is also
+    the requester (no delegated agent in front of them), approval is still
+    a separate signed call, but does not require a different pubkey."""
+    set_current_request(SECOND_ADMIN_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            first = await client.call_tool("system_upgrade", {})
+            confirmation_id = first.structured_content["confirmation_id"]
+
+            approve = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            assert approve.is_error is not True, approve.content
+
+            second = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+            assert second.is_error is not True, second.content
+    finally:
+        set_current_request(LOCAL_STDIO_REQUEST)
 
 
 @pytest.mark.anyio

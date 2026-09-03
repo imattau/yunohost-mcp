@@ -16,12 +16,13 @@ Rule semantics, matching PLAN.md's example config exactly:
     shutil.disk_usage, not a YunoHost API - it's a plain, portable disk
     check available whether or not yunohost.* is importable.
 
-  - require_owner_signature (PLAN.md Phase 13): the pending confirmation
-    must additionally be approved by a *different* identity holding
+  - require_owner_signature (PLAN.md Phase 13; owner-approval-plan.md's
+    `solo` profile for v1): the pending confirmation must additionally be
+    approved by the configured owner (auth/owner.py) holding
     Scope.OWNER_APPROVE (server.py's approve_operation tool) before its
     original requester can execute it - two independently NIP-98-signed
-    calls from two different identities, not one caller confirming its
-    own request twice. Only meaningful alongside require_confirmation.
+    calls, not one caller confirming its own request once. Only
+    meaningful alongside require_confirmation.
 
 Unlike require_confirmation (blockable-but-passable with a confirmation),
 require_backup and minimum_free_space are hard requirements: no

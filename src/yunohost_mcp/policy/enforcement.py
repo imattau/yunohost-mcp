@@ -16,11 +16,12 @@ ticket, so a caller finds out why immediately. `checks`, if given, runs on
 every call (both the "show me the plan" and the confirmed call) and raises
 PolicyViolation for hard requirements (require_backup, minimum_free_space)
 that no confirmation can bypass. When the rule also has
-require_owner_signature=True (Phase 13), a matching but not-yet-approved
-confirmation_id raises rather than executing, telling the caller to route
-it through approve_operation() (a different identity, Scope.OWNER_APPROVE)
-first - the ticket itself is left pending, not consumed, so this is safe
-to retry once approved.
+require_owner_signature=True (Phase 13; owner-approval-plan.md's `solo`
+profile for v1), a matching but not-yet-approved confirmation_id raises
+rather than executing, telling the caller to route it through
+approve_operation() (the configured owner, auth/owner.py, Scope.
+OWNER_APPROVE) first - the ticket itself is left pending, not consumed, so
+this is safe to retry once approved.
 
 @translate_known_errors: converts this module's own known, expected
 exceptions (ScopeError, PolicyViolation, a ConfirmationError that escapes
@@ -62,6 +63,7 @@ from typing import Any, TypeVar
 from mcp.server.mcpserver.exceptions import ToolError
 
 from yunohost_mcp.auth.identity import require_current_request
+from yunohost_mcp.auth.owner import OwnerConfigError
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation
 from yunohost_mcp.policy.scopes import Scope
@@ -125,12 +127,17 @@ def require_confirmation(
                         raise
                     plan = plan_builder(**kwargs) if plan_builder else {"tool": policy_key, "arguments": kwargs}
                     ticket = confirmation_store.create(
-                        pubkey=request.pubkey, tool=policy_key, arguments=kwargs, plan=plan
+                        pubkey=request.pubkey,
+                        tool=policy_key,
+                        arguments=kwargs,
+                        plan=plan,
+                        require_owner_signature=rule.require_owner_signature,
                     )
                     return {
                         "confirmation_required": True,
                         "operation_plan": plan,
                         "confirmation_id": ticket.confirmation_id,
+                        "operation_hash": ticket.operation_hash,
                         "expires_at": ticket.expires_at,
                         "owner_signature_required": rule.require_owner_signature,
                     }
@@ -142,7 +149,14 @@ def require_confirmation(
     return decorator
 
 
-_KNOWN_EXPECTED_ERRORS = (ScopeError, PolicyViolation, ConfirmationError, ToolInputError, YunohostUnavailableError)
+_KNOWN_EXPECTED_ERRORS = (
+    ScopeError,
+    PolicyViolation,
+    ConfirmationError,
+    OwnerConfigError,
+    ToolInputError,
+    YunohostUnavailableError,
+)
 
 
 def translate_known_errors(fn: F) -> F:

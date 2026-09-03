@@ -96,6 +96,13 @@ class IdentityStore:
     def lookup(self, pubkey_hex: str) -> IdentityRecord | None:
         return self._current_records().get(pubkey_hex)
 
+    def pubkeys_with_role(self, role: str) -> list[str]:
+        """All pubkeys whose identity.toml roles include `role`, ignoring
+        per-identity expiry - used for owner bootstrap fallback
+        (auth/owner.py), which is about picking a static default from
+        config, not about authorizing a live request."""
+        return [pubkey for pubkey, record in self._current_records().items() if role in record.roles]
+
     def __len__(self) -> int:
         return len(self._current_records())
 
