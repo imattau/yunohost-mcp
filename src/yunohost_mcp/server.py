@@ -19,6 +19,12 @@ them - app_remove, backup_restore, system_upgrade all require a matching
 confirm-then-execute round trip; app_upgrade additionally gets hard
 policy checks (a recent backup must exist, minimum free space) that no
 confirmation can bypass, per PLAN.md's example policy.toml.
+Phase 7: adds plan_app_upgrade/execute_plan - dry-run first, execute later,
+as two separate calls (PLAN.md's "inspect -> plan -> reason -> execute"
+workflow), reusing the same one-shot ticket primitive as Phase 6's
+confirmations (policy/confirmation.py's ConfirmationStore) but in its own
+namespace (plan_store, not confirmation_store) since a plan_id and a
+confirmation_id serve related but distinct purposes.
 """
 
 from __future__ import annotations
@@ -31,14 +37,20 @@ from mcp.server.mcpserver import MCPServer
 
 from yunohost_mcp.audit.decorator import audited_write
 from yunohost_mcp.audit.log import AuditLog
-from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, IdentityStore, get_current_request, set_current_request
+from yunohost_mcp.auth.identity import (
+    LOCAL_STDIO_REQUEST,
+    IdentityStore,
+    get_current_request,
+    require_current_request,
+    set_current_request,
+)
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.config import load_settings
-from yunohost_mcp.policy.confirmation import ConfirmationStore
+from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
 from yunohost_mcp.policy.enforcement import require_confirmation, require_scope
 from yunohost_mcp.policy.locks import WriteLock
-from yunohost_mcp.policy.rules import PolicyRule, check_free_space, check_recent_backup, load_policy
+from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
@@ -48,6 +60,7 @@ write_lock = WriteLock()
 audit_log = AuditLog(path=settings.audit_log_path())
 policy_rules = load_policy(settings.policy_file_path())
 confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
+plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 
 mcp = MCPServer(settings.server_name)
 
@@ -207,6 +220,48 @@ def app_upgrade(app: str | None = None, force: bool = False, confirmation_id: st
     policy/rules.py's DEFAULT_POLICY["apps.upgrade"].
     """
     return adapter.app_upgrade(app=app, force=force)
+
+
+@mcp.tool()
+@require_scope(Scope.APPS_READ)
+def plan_app_upgrade(app: str) -> dict[str, Any]:
+    """Report what an upgrade of `app` would involve, without doing it:
+    current/target version, and whether apps.upgrade's policy (recent
+    backup, free space) would currently block it and why. Pass the
+    returned plan_id to execute_plan() to actually upgrade - read-only,
+    no lock, no audit entry (nothing in YunoHost changes here).
+    """
+    facts = adapter.plan_app_upgrade(app)
+    rule = policy_rules.get("apps.upgrade", PolicyRule())
+    warnings: list[str] = []
+    blocked = False
+    try:
+        _check_apps_upgrade(rule)
+    except PolicyViolation as exc:
+        warnings.append(str(exc))
+        blocked = True
+
+    plan = {**facts, "warnings": warnings, "blocked": blocked}
+    ticket = plan_store.create(pubkey=require_current_request().pubkey, tool="plan.app_upgrade", arguments={}, plan=plan)
+    return {**plan, "plan_id": ticket.confirmation_id, "expires_at": ticket.expires_at}
+
+
+@mcp.tool()
+@require_scope(Scope.APPS_UPGRADE)
+@audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
+def execute_plan(plan_id: str) -> dict[str, Any]:
+    """Execute a plan previously returned by plan_app_upgrade(). Re-checks
+    apps.upgrade's hard policy at execute time, not just at plan time -
+    state (free space, backup age) may have drifted in between."""
+    request = require_current_request()
+    try:
+        ticket = plan_store.consume(plan_id, pubkey=request.pubkey, tool="plan.app_upgrade", arguments={})
+    except ConfirmationError as exc:
+        raise ConfirmationError(f"invalid plan_id: {exc}") from exc
+
+    rule = policy_rules.get("apps.upgrade", PolicyRule())
+    _check_apps_upgrade(rule)
+    return adapter.app_upgrade(app=ticket.plan["app"])
 
 
 @mcp.tool()

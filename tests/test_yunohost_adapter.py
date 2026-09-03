@@ -75,6 +75,21 @@ def test_updates_check():
     assert isinstance(result["system"], list)
 
 
+def test_plan_app_upgrade_matches_updates_check():
+    result = make_adapter().plan_app_upgrade("nextcloud")
+    assert result["app"] == "nextcloud"
+    assert result["upgradable"] is True
+    assert result["current_version"] == "28.0.1~ynh1"
+    assert result["target_version"] == "28.0.2~ynh1"
+
+
+def test_plan_app_upgrade_for_non_upgradable_app():
+    result = make_adapter().plan_app_upgrade("some-other-app")
+    assert result["upgradable"] is False
+    assert result["current_version"] is None
+    assert result["target_version"] is None
+
+
 def test_service_restart():
     result = make_adapter().service_restart(["nginx", "postgresql"])
     assert result["restarted"] == ["nginx", "postgresql"]

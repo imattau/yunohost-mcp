@@ -196,6 +196,22 @@ class YunohostAdapter:
         tools_update_norefresh = _import_attr("yunohost.tools", "tools_update_norefresh")
         return {"fake": False, **tools_update_norefresh()}
 
+    def plan_app_upgrade(self, app: str) -> dict[str, Any]:
+        """Read-only facts for one app's upgrade (PLAN.md Phase 7) - current
+        vs. target version, whether it's actually upgradable. Policy
+        evaluation (backup/free-space warnings, blocked) is layered on top
+        in server.py's plan_app_upgrade tool, not here - this method only
+        reports what YunoHost itself knows."""
+        updates = self.updates_check()
+        match = next((a for a in updates.get("apps", []) if a.get("id") == app), None)
+        return {
+            "fake": updates.get("fake", False),
+            "app": app,
+            "upgradable": match is not None,
+            "current_version": match.get("current_version") if match else None,
+            "target_version": match.get("new_version") if match else None,
+        }
+
     # -- Phase 5: writes -------------------------------------------------
     #
     # Every write below either returns {"operation_id": ...} (when we

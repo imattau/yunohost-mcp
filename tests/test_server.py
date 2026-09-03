@@ -21,6 +21,8 @@ from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
+PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade"}
+PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -51,7 +53,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
     async with Client(mcp) as client:
         result = await client.list_tools()
         names = {tool.name for tool in result.tools}
-        assert {"server_info", "health_check", "whoami"} | PHASE4_TOOLS | PHASE5_WRITE_TOOLS <= names
+        expected = {"server_info", "health_check", "whoami"} | PHASE4_TOOLS | PHASE5_WRITE_TOOLS | PHASE6_WRITE_TOOLS | PHASE7_TOOLS
+        assert expected <= names
 
 
 @pytest.mark.anyio
@@ -187,6 +190,51 @@ async def test_phase6_app_remove_blocked_by_stale_backup_policy():
     async with Client(mcp) as client:
         result = await client.call_tool("app_remove", {"app": "nextcloud"})
         assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase7_plan_then_execute_upgrades_the_app():
+    async with Client(mcp) as client:
+        plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})
+        assert plan.is_error is not True, plan.content
+        data = plan.structured_content
+        assert data["app"] == "nextcloud"
+        assert data["upgradable"] is True
+        assert data["blocked"] is False
+        plan_id = data["plan_id"]
+
+        executed = await client.call_tool("execute_plan", {"plan_id": plan_id})
+        assert executed.is_error is not True, executed.content
+        assert executed.structured_content["app"] == "nextcloud"
+
+
+@pytest.mark.anyio
+async def test_phase7_plan_app_upgrade_does_not_write_audit_entry():
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    async with Client(mcp) as client:
+        await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})
+    new_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    assert new_lines == existing_lines
+
+
+@pytest.mark.anyio
+async def test_phase7_execute_plan_rejects_unknown_plan_id():
+    async with Client(mcp) as client:
+        result = await client.call_tool("execute_plan", {"plan_id": "plan-does-not-exist"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase7_execute_plan_is_one_shot():
+    async with Client(mcp) as client:
+        plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})
+        plan_id = plan.structured_content["plan_id"]
+
+        first = await client.call_tool("execute_plan", {"plan_id": plan_id})
+        assert first.is_error is not True
+
+        second = await client.call_tool("execute_plan", {"plan_id": plan_id})
+        assert second.is_error is True
 
 
 @pytest.mark.anyio
