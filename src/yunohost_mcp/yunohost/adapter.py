@@ -87,8 +87,15 @@ class YunohostAdapter:
         if self.settings.fake_yunohost:
             info: dict[str, Any] = {"id": app, "name": app, "version": "1.0~ynh1", "upgradable": False}
             if full:
-                info["settings"] = {"domain": "example.com", "path": f"/{app}"}
-                info["permissions"] = {f"{app}.main": {"allowed": ["all_users"]}}
+                # Shape matches the real app_info(full=True): permissions
+                # live nested under settings["_permissions"], not as a
+                # separate top-level key.
+                info["settings"] = {
+                    "domain": "example.com",
+                    "path": f"/{app}",
+                    "_permissions": {f"{app}.main": {"allowed": ["all_users"]}},
+                }
+                info["manifest"] = {"id": app, "version": "1.0~ynh1"}
             return {"fake": True, **info}
         app_info = _import_attr("yunohost.app", "app_info")
         return {"fake": False, **app_info(app, full=full)}
