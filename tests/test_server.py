@@ -23,6 +23,8 @@ from yunohost_mcp.server import audit_log, mcp
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
 PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add"}
 APP_CHANGE_URL_TOOLS = {"app_change_url"}
+MIGRATIONS_TOOLS = {"migrations_list", "migrations_state", "migrations_run"}
+FIREWALL_TOOLS = {"firewall_list", "firewall_is_open", "firewall_open", "firewall_close", "firewall_reload"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
@@ -103,6 +105,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE5_WRITE_TOOLS
             | PHASE6_WRITE_TOOLS
             | APP_CHANGE_URL_TOOLS
+            | MIGRATIONS_TOOLS
+            | FIREWALL_TOOLS
             | PHASE7_TOOLS
             | PHASE8_TOOLS
             | PHASE10_TOOLS
@@ -137,6 +141,10 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("operation_logs", {"name": "20260901-120000-app_install"}),
         ("updates_check", {}),
         ("updates_refresh", {}),
+        ("migrations_list", {}),
+        ("migrations_state", {}),
+        ("firewall_list", {}),
+        ("firewall_is_open", {"port": 443, "protocol": "tcp"}),
     ],
 )
 async def test_phase4_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
@@ -195,6 +203,10 @@ async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
     [
         ("backup_restore", {"name": "20260901-000000"}),
         ("system_upgrade", {}),
+        ("migrations_run", {}),
+        ("firewall_open", {"port": 8080, "protocol": "tcp"}),
+        ("firewall_close", {"port": 8080, "protocol": "tcp"}),
+        ("firewall_reload", {}),
     ],
 )
 async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool: str, args: dict):

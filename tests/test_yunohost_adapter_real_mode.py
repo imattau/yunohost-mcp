@@ -99,9 +99,20 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
         calls["tools_update"] = {"target": target}
         return {"apps": [], "system": []}
 
+    # tools_migrations_run is NOT @is_unit_operation-decorated either (it
+    # builds its own OperationLogger per migration internally, like
+    # app_upgrade) - same "must not receive one" check as service_restart.
+    def tools_migrations_run(targets=None, **_):
+        calls["tools_migrations_run"] = {"targets": targets}
+
+    def tools_migrations_state(**_):
+        return {"migrations": {}}
+
     yunohost_tools = types.ModuleType("yunohost.tools")
     yunohost_tools.tools_upgrade = tools_upgrade
     yunohost_tools.tools_update = tools_update
+    yunohost_tools.tools_migrations_run = tools_migrations_run
+    yunohost_tools.tools_migrations_state = tools_migrations_state
 
     @_is_unit_operation()
     def diagnosis_run(operation_logger, categories=None, force=False, **_):
@@ -133,6 +144,15 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
 
     yunohost_service = types.ModuleType("yunohost.service")
     yunohost_service.service_restart = service_restart
+
+    # None of firewall_{list,is_open,open,close,reload} are
+    # @is_unit_operation-decorated either - same "must not receive an
+    # operation_logger" check as service_restart.
+    def firewall_open(port, protocol, comment, **_):
+        calls["firewall_open"] = {"port": port, "protocol": protocol, "comment": comment}
+
+    yunohost_firewall = types.ModuleType("yunohost.firewall")
+    yunohost_firewall.firewall_open = firewall_open
 
     # domain_add is NOT exercised here either - like app_install/
     # app_upgrade and backup_create/backup_restore, it now routes through
@@ -224,6 +244,7 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
         "yunohost.diagnosis": yunohost_diagnosis,
         "yunohost.log": yunohost_log,
         "yunohost.service": yunohost_service,
+        "yunohost.firewall": yunohost_firewall,
         "yunohost.domain": yunohost_domain,
         "yunohost.certificate": yunohost_certificate,
         "yunohost.user": yunohost_user,
@@ -263,6 +284,20 @@ def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
     # correct.
     real_mode_adapter.service_restart(["nginx"])
     assert real_mode_adapter._test_calls["service_restart"] == {"names": ["nginx"]}
+
+
+def test_migrations_run_unaffected(real_mode_adapter: YunohostAdapter):
+    # tools_migrations_run is NOT @is_unit_operation-decorated - same class
+    # of check as service_restart above, not the argument-remapping bug.
+    real_mode_adapter.migrations_run(targets=["0027_migrate_to_bookworm"])
+    assert real_mode_adapter._test_calls["tools_migrations_run"] == {"targets": ["0027_migrate_to_bookworm"]}
+
+
+def test_firewall_open_unaffected(real_mode_adapter: YunohostAdapter):
+    # firewall_open is NOT @is_unit_operation-decorated - same class of
+    # check as service_restart above, not the argument-remapping bug.
+    real_mode_adapter.firewall_open(8080, "tcp", comment="test")
+    assert real_mode_adapter._test_calls["firewall_open"] == {"port": 8080, "protocol": "tcp", "comment": "test"}
 
 
 def test_user_create_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):

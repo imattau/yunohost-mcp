@@ -41,6 +41,23 @@ class Scope(StrEnum):
     # to be confused with SYSTEM_UPGRADE, which actually installs updates.
     SYSTEM_UPDATE = "system.update"
     SYSTEM_UPGRADE = "system.upgrade"
+    # Actually running/skipping a migration (tools_migrations_run) -
+    # listing/state (migrations_list/migrations_state) sit under
+    # SYSTEM_UPDATE instead, same as pending_migrations already surfacing
+    # passively through validate_server/updates_refresh. Administrator-only,
+    # like SYSTEM_UPGRADE - migrations can carry irreversible OS/schema
+    # changes (e.g. a Debian version bump) in the same risk class.
+    SYSTEM_MIGRATE = "system.migrate"
+
+    # firewall_list/firewall_is_open - read-only, safe for every role that
+    # already gets services.read/domains.read.
+    FIREWALL_READ = "firewall.read"
+    # firewall_open/close/allow/disallow/reload/upnp/stop. Administrator-only
+    # and owner-co-signed (policy/rules.py) - a wrong port/rule can lock the
+    # admin out of their own server with no MCP-level undo, PLAN.md's named
+    # example of exactly the risk class system.upgrade/backups.restore are
+    # already gated at.
+    FIREWALL_WRITE = "firewall.write"
 
     PACKAGES_INSPECT = "packages.inspect"
     PACKAGES_TEST = "packages.test"

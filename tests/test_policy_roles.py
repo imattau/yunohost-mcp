@@ -49,3 +49,21 @@ def test_every_role_can_refresh_update_metadata():
     # why this tool exists.
     for role in ROLE_SCOPES:
         assert Scope.SYSTEM_UPDATE in ROLE_SCOPES[role], role
+
+
+def test_every_role_can_read_firewall_state():
+    # firewall.read (firewall_list/firewall_is_open) is diagnostic, same
+    # tier as services.read/domains.read - sits on _READONLY.
+    for role in ROLE_SCOPES:
+        assert Scope.FIREWALL_READ in ROLE_SCOPES[role], role
+
+
+def test_only_administrator_can_change_firewall_or_run_migrations():
+    # Both carry system-wide/lockout risk beyond what app-admin or
+    # package-developer normally touch - same exclusivity as
+    # system.upgrade (neither role has that one either).
+    for role in ("readonly", "operator", "app-admin", "package-developer"):
+        assert Scope.FIREWALL_WRITE not in ROLE_SCOPES[role], role
+        assert Scope.SYSTEM_MIGRATE not in ROLE_SCOPES[role], role
+    assert Scope.FIREWALL_WRITE in ROLE_SCOPES["administrator"]
+    assert Scope.SYSTEM_MIGRATE in ROLE_SCOPES["administrator"]

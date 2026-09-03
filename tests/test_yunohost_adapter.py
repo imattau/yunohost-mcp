@@ -244,3 +244,48 @@ def test_system_upgrade_has_operation_id():
     result = make_adapter().system_upgrade()
     assert "operation_id" in result
     assert result["result"] == "success"
+
+
+def test_migrations_list():
+    result = make_adapter().migrations_list(pending=True)
+    assert result["migrations"] == []
+
+
+def test_migrations_state():
+    result = make_adapter().migrations_state()
+    assert result["migrations"] == {}
+
+
+def test_migrations_run():
+    result = make_adapter().migrations_run(targets=["0027_migrate_to_bookworm"])
+    assert result["targets"] == ["0027_migrate_to_bookworm"]
+    assert "state" in result
+
+
+def test_firewall_list():
+    result = make_adapter().firewall_list(protocol="tcp")
+    assert result["tcp"] == []
+
+
+def test_firewall_is_open():
+    result = make_adapter().firewall_is_open(443, "tcp")
+    assert result["port"] == 443
+    assert result["protocol"] == "tcp"
+    assert result["open"] is False
+
+
+def test_firewall_open():
+    result = make_adapter().firewall_open(8080, "tcp", comment="test")
+    assert result["port"] == 8080
+    assert result["protocol"] == "tcp"
+
+
+def test_firewall_close():
+    result = make_adapter().firewall_close(8080, "tcp")
+    assert result["port"] == 8080
+    assert result["protocol"] == "tcp"
+
+
+def test_firewall_reload():
+    result = make_adapter().firewall_reload()
+    assert result["reloaded"] is True

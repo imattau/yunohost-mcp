@@ -911,6 +911,115 @@ class YunohostAdapter:
         result = tools_upgrade(target="system")
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
+    # -- Migrations ---------------------------------------------------------
+    #
+    # None of tools_migrations_{list,run,state} are @is_unit_operation-
+    # decorated, and none transitively import yunohost.utils.form - plain
+    # _import_attr calls are fine here, same as service_restart/system_upgrade.
+
+    def migrations_list(self, pending: bool = False, done: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "migrations": []}
+        tools_migrations_list = _import_attr("yunohost.tools", "tools_migrations_list")
+        return {"fake": False, **tools_migrations_list(pending=pending, done=done)}
+
+    def migrations_state(self) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "migrations": {}}
+        tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
+        return {"fake": False, **tools_migrations_state()}
+
+    def migrations_run(
+        self,
+        targets: list[str] | None = None,
+        skip: bool = False,
+        auto: bool = False,
+        force_rerun: bool = False,
+        accept_disclaimer: bool = False,
+        skip_postmigrations: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "targets": targets or [], "state": {}}
+        tools_migrations_run = _import_attr("yunohost.tools", "tools_migrations_run")
+        # tools_migrations_run() returns None - like app_upgrade(), it builds
+        # its own OperationLogger internally, once per migration it actually
+        # runs (not one per call), so there's no single operation id to hand
+        # back either. Fetch migrations_state() afterward instead, so the
+        # caller gets an immediate, no-second-call picture of what changed
+        # rather than having to separately call migrations_state() to find out.
+        tools_migrations_run(
+            targets=targets or [],
+            skip=skip,
+            auto=auto,
+            force_rerun=force_rerun,
+            accept_disclaimer=accept_disclaimer,
+            skip_postmigrations=skip_postmigrations,
+        )
+        tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
+        return {"fake": False, "targets": targets or [], "state": tools_migrations_state()}
+
+    # -- Firewall -------------------------------------------------------------
+    #
+    # firewall_{list,is_open,open,close,reload} are all plain functions - not
+    # @is_unit_operation-decorated, no transitive yunohost.utils.form import -
+    # same in-process _import_attr pattern as service_restart. Wraps the
+    # current (non-"Legacy API") firewall_open/firewall_close rather than the
+    # older firewall_allow/firewall_disallow aliases the yunohost source
+    # itself labels legacy - same effect, current API.
+
+    def firewall_list(
+        self, raw: bool = False, protocol: str = "tcp", forwarded: bool = False
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, protocol: []}
+        firewall_list = _import_attr("yunohost.firewall", "firewall_list")
+        return {"fake": False, **firewall_list(raw=raw, protocol=protocol, forwarded=forwarded)}
+
+    def firewall_is_open(self, port: int | str, protocol: str) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "port": port, "protocol": protocol, "open": False}
+        firewall_is_open = _import_attr("yunohost.firewall", "firewall_is_open")
+        return {
+            "fake": False,
+            "port": port,
+            "protocol": protocol,
+            "open": firewall_is_open(port, protocol),
+        }
+
+    def firewall_open(
+        self,
+        port: int | str,
+        protocol: str,
+        comment: str = "",
+        upnp: bool = False,
+        no_reload: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "port": port, "protocol": protocol}
+        firewall_open = _import_attr("yunohost.firewall", "firewall_open")
+        firewall_open(port, protocol, comment, upnp=upnp, no_reload=no_reload)
+        return {"fake": False, "port": port, "protocol": protocol}
+
+    def firewall_close(
+        self,
+        port: int | str,
+        protocol: str,
+        upnp_only: bool = False,
+        no_reload: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "port": port, "protocol": protocol}
+        firewall_close = _import_attr("yunohost.firewall", "firewall_close")
+        firewall_close(port, protocol, upnp_only=upnp_only, no_reload=no_reload)
+        return {"fake": False, "port": port, "protocol": protocol}
+
+    def firewall_reload(self, skip_upnp: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "reloaded": True}
+        firewall_reload = _import_attr("yunohost.firewall", "firewall_reload")
+        firewall_reload(skip_upnp=skip_upnp)
+        return {"fake": False, "reloaded": True}
+
     # -- Phase 8: package development -------------------------------------
     #
     # `source` throughout is whatever app_manifest()/app_install() already

@@ -880,6 +880,177 @@ def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.SYSTEM_UPDATE)
+def migrations_list(pending: bool = False, done: bool = False) -> dict[str, Any]:
+    """List known migrations. `pending`/`done` filter; the default (neither
+    set) returns all of them. Read-only - same scope as updates_check."""
+    return adapter.migrations_list(pending=pending, done=done)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SYSTEM_UPDATE)
+def migrations_state() -> dict[str, Any]:
+    """Return the recorded state (done/pending/skipped) of every migration
+    that has ever run on this server. Read-only."""
+    return adapter.migrations_state()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SYSTEM_MIGRATE)
+@audited_write("system.migrate", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "system.migrate",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda targets=None, skip=False, auto=False, force_rerun=False, **_: {
+        "action": "run migrations",
+        "targets": targets or [],
+        "skip": skip,
+        "auto": auto,
+        "force_rerun": force_rerun,
+        "warning": "Migrations can make irreversible OS/schema-level changes. Read each target's "
+        "disclaimer (migrations_list) first - a migration with one is skipped unless "
+        "accept_disclaimer=true, and that flag only applies to the first migration in the run.",
+    },
+)
+def migrations_run(
+    targets: list[str] | None = None,
+    skip: bool = False,
+    auto: bool = False,
+    force_rerun: bool = False,
+    accept_disclaimer: bool = False,
+    skip_postmigrations: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Run (or skip, or force-rerun) migrations. Defaults to all pending
+    migrations if `targets` is empty. `skip` and `force_rerun` require
+    explicit `targets` (never applied to "all pending"). Requires
+    confirmation and owner co-signature - same tier as system_upgrade."""
+    return adapter.migrations_run(
+        targets=targets,
+        skip=skip,
+        auto=auto,
+        force_rerun=force_rerun,
+        accept_disclaimer=accept_disclaimer,
+        skip_postmigrations=skip_postmigrations,
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.FIREWALL_READ)
+def firewall_list(raw: bool = False, protocol: str = "tcp", forwarded: bool = False) -> dict[str, Any]:
+    """List firewall rules. `protocol` is "tcp" or "udp" (ignored if `raw`);
+    `forwarded` lists UPnP-forwarded ports instead of open ports. Read-only."""
+    return adapter.firewall_list(raw=raw, protocol=protocol, forwarded=forwarded)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.FIREWALL_READ)
+def firewall_is_open(port: int | str, protocol: str) -> dict[str, Any]:
+    """Return whether a port is open. `protocol` is "tcp" or "udp". Read-only."""
+    return adapter.firewall_is_open(port, protocol)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.FIREWALL_WRITE)
+@audited_write("firewall.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "firewall.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda port, protocol, comment="", upnp=False, **_: {
+        "action": "open firewall port",
+        "port": port,
+        "protocol": protocol,
+        "comment": comment,
+        "warning": "Externally visible and reachable once reloaded. Verify this is actually the "
+        "port intended - opening the wrong one exposes a service that wasn't meant to be public.",
+    },
+)
+def firewall_open(
+    port: int | str,
+    protocol: str,
+    comment: str = "",
+    upnp: bool = False,
+    no_reload: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Open a port. `protocol` is "tcp" or "udp"; `port` may be a
+    dash-separated range. Requires confirmation and owner co-signature -
+    a wrong port/protocol here is externally visible and reachable, same
+    risk tier as system_upgrade/backup_restore."""
+    return adapter.firewall_open(port, protocol, comment=comment, upnp=upnp, no_reload=no_reload)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.FIREWALL_WRITE)
+@audited_write("firewall.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "firewall.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda port, protocol, upnp_only=False, **_: {
+        "action": "close firewall port",
+        "port": port,
+        "protocol": protocol,
+        "upnp_only": upnp_only,
+        "warning": "Closing the wrong port (22/80/443, in particular) can lock the admin out of "
+        "this server with no MCP-level undo. Double-check port and protocol before confirming.",
+    },
+)
+def firewall_close(
+    port: int | str,
+    protocol: str,
+    upnp_only: bool = False,
+    no_reload: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Close a port. `protocol` is "tcp" or "udp"; `port` may be a
+    dash-separated range. Requires confirmation and owner co-signature -
+    see the warning in the confirmation plan before approving this on
+    port 22/80/443."""
+    return adapter.firewall_close(port, protocol, upnp_only=upnp_only, no_reload=no_reload)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.FIREWALL_WRITE)
+@audited_write("firewall.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "firewall.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda skip_upnp=False, **_: {
+        "action": "reload firewall rules",
+        "skip_upnp": skip_upnp,
+        "warning": "Re-applies the full current rule set immediately - if it was left in an "
+        "inconsistent state (e.g. a port closed but not yet reloaded), this is when it takes effect.",
+    },
+)
+def firewall_reload(skip_upnp: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Re-apply the full current firewall rule set. Requires confirmation
+    and owner co-signature, same tier as firewall_open/firewall_close -
+    this is the point at which any pending rule change actually takes
+    effect."""
+    return adapter.firewall_reload(skip_upnp=skip_upnp)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_INSPECT)
 def package_inspect(source: str) -> dict[str, Any]:
     """Return the manifest and declared resources for a candidate package.

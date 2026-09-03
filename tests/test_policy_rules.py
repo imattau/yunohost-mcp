@@ -45,6 +45,10 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["apps.change_url"].require_backup is False
     assert DEFAULT_POLICY["backups.restore"].require_confirmation is True
     assert DEFAULT_POLICY["system.upgrade"].require_confirmation is True
+    assert DEFAULT_POLICY["system.migrate"].require_confirmation is True
+    assert DEFAULT_POLICY["system.migrate"].require_owner_signature is True
+    assert DEFAULT_POLICY["firewall.write"].require_confirmation is True
+    assert DEFAULT_POLICY["firewall.write"].require_owner_signature is True
 
 
 def test_missing_policy_file_yields_defaults(tmp_path: Path):

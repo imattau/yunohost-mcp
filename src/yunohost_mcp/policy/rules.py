@@ -96,18 +96,28 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # nginx conf and app settings), so a backup isn't the safety net a
     # confirmation is for domain_add-shaped writes.
     "apps.change_url": PolicyRule(require_confirmation=True),
-    # PLAN.md Phase 13's two highest-risk, already-implemented candidates
-    # get owner co-signing by default - "app removal with data" would need
-    # argument-conditional policy (require_owner_signature only when
-    # purge=true) this dataclass doesn't support - noted as a real gap, not
-    # silently assumed covered. "domain removal" and "firewall changes" are
-    # still not implemented as tools; "user deletion" and "permission
-    # changes" now are (below), matching what Phase 13 names them as.
+    # PLAN.md Phase 13's highest-risk candidates get owner co-signing by
+    # default - "app removal with data" would need argument-conditional
+    # policy (require_owner_signature only when purge=true) this dataclass
+    # doesn't support - noted as a real gap, not silently assumed covered.
+    # "domain removal" is still not implemented as a tool; "user deletion",
+    # "permission changes", and "firewall changes" now are (below),
+    # matching what Phase 13 names them as.
     "backups.restore": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "system.upgrade": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # Not named in PLAN.md's original Phase 13 list, but the same risk
+    # class as system.upgrade in practice - a migration can carry
+    # irreversible OS/schema changes (e.g. a Debian version bump), and the
+    # two are often run back to back. Revisit if this turns out overly
+    # cautious for the more routine migrations.
+    "system.migrate": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "users.write": PolicyRule(require_confirmation=True),
     "users.delete": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "users.permissions": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # PLAN.md's own example of the risk this tier exists for: a wrong
+    # port/rule can lock the admin out of their own server with no
+    # MCP-level undo.
+    "firewall.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
 }
 
 
