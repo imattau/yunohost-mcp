@@ -178,6 +178,44 @@ def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.Monkey
     }
 
 
+def test_domain_add_calls_call_via_system_python_with_correct_kwargs_and_always_ignores_dyndns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # domain_add() re-parses the same DomainOption/GroupOption manifest
+    # machinery app_install does, hitting the same pydantic v1/v2 conflict.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    def fake_certificate_status(domains):
+        return {"certificates": {d: {"CA_type": "selfsigned"} for d in domains}}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260903-000000-domain_add")
+    monkeypatch.setattr(adapter_module, "_import_attr", lambda module, attr: fake_certificate_status)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.domain_add("new-app.example.nohost.me", install_letsencrypt_cert=True)
+
+    assert captured["module_name"] == "yunohost.domain"
+    assert captured["attr"] == "domain_add"
+    assert captured["kwargs"] == {
+        "domain": "new-app.example.nohost.me",
+        "ignore_dyndns": True,
+        "install_letsencrypt_cert": True,
+    }
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-domain_add",
+        "domain": "new-app.example.nohost.me",
+        "certificate": {"CA_type": "selfsigned"},
+    }
+
+
 def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
     # app_manifest() imports yunohost.utils.form (for its "install"
     # questions field) - same pydantic v1/v2 conflict as backup_create/

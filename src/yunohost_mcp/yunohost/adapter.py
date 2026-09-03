@@ -620,8 +620,18 @@ class YunohostAdapter:
         # subdomain of an already-registered DynDNS domain (the normal
         # case - e.g. new-app.example.nohost.me under an existing
         # example.nohost.me) is unaffected either way.
-        domain_add = _import_attr("yunohost.domain", "domain_add")
-        domain_add(domain=domain, ignore_dyndns=True, install_letsencrypt_cert=install_letsencrypt_cert)
+        #
+        # domain_add() transitively imports yunohost.utils.form (domain
+        # registration re-parses the same DomainOption/GroupOption machinery
+        # app_install does) - same pydantic v1/v2 conflict as app_install/
+        # backup_create/package_inspect, see _call_via_system_python's
+        # docstring. Must go through the system-python subprocess too.
+        _call_via_system_python(
+            "yunohost.domain",
+            "domain_add",
+            {"domain": domain, "ignore_dyndns": True, "install_letsencrypt_cert": install_letsencrypt_cert},
+            self.settings,
+        )
         certificate_status = _import_attr("yunohost.certificate", "certificate_status")
         certificate = certificate_status([domain]).get("certificates", {}).get(domain, {})
         return {
