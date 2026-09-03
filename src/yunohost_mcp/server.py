@@ -342,6 +342,21 @@ def updates_check() -> dict[str, Any]:
     return adapter.updates_check()
 
 
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SYSTEM_UPDATE)
+def updates_refresh(target: str = "apps") -> dict[str, Any]:
+    """Refresh cached update metadata over the network: apt-get update
+    and/or a re-fetch of every registered app catalog source (including
+    a local nostr_catalog feed, if installed), then report what's now
+    upgradable. target is "apps", "system", or "all". Can take real time.
+    Use this after catalog_publish to confirm a package actually shows up
+    in the live catalog - updates_check alone only reads the existing
+    cache and won't see a just-published change."""
+    return adapter.updates_refresh(target=target)
+
+
 # Read-only resource mirrors for MCP clients that prefer stable contextual
 # resources over tool calls. They intentionally reuse the same scope checks
 # and adapter seam as the corresponding tools.

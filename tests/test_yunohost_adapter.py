@@ -7,8 +7,10 @@ signatures and the shape of what comes back - without a real YunoHost.
 
 from __future__ import annotations
 
+import pytest
+
 from yunohost_mcp.config import Settings
-from yunohost_mcp.yunohost.adapter import YunohostAdapter
+from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
 
 
 def make_adapter() -> YunohostAdapter:
@@ -86,6 +88,25 @@ def test_updates_check():
     result = make_adapter().updates_check()
     assert isinstance(result["apps"], list)
     assert isinstance(result["system"], list)
+
+
+def test_updates_refresh_defaults_to_apps_target():
+    result = make_adapter().updates_refresh()
+    assert result["fake"] is True
+    assert result["target"] == "apps"
+    assert isinstance(result["apps"], list)
+    assert isinstance(result["system"], list)
+
+
+def test_updates_refresh_accepts_system_and_all_targets():
+    adapter = make_adapter()
+    assert adapter.updates_refresh(target="system")["target"] == "system"
+    assert adapter.updates_refresh(target="all")["target"] == "all"
+
+
+def test_updates_refresh_rejects_an_unknown_target():
+    with pytest.raises(ToolInputError):
+        make_adapter().updates_refresh(target="bogus")
 
 
 def test_plan_app_upgrade_matches_updates_check():

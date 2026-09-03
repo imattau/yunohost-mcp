@@ -38,3 +38,14 @@ def test_package_developer_can_publish_a_tested_package_to_the_catalog():
     # itself still requires confirmation (see policy/rules.py's
     # PolicyRule for "catalog.publish").
     assert Scope.CATALOG_PUBLISH in ROLE_SCOPES["package-developer"]
+
+
+def test_every_role_can_refresh_update_metadata():
+    # system.update (updates_refresh) only refreshes cached metadata - it
+    # doesn't touch installed apps - so it sits on _READONLY next to
+    # diagnosis.read, meaning every role built on top of readonly gets it
+    # too. Confirms it after the catalog.publish workflow: publishing a
+    # package and then wanting to see it in the live catalog is exactly
+    # why this tool exists.
+    for role in ROLE_SCOPES:
+        assert Scope.SYSTEM_UPDATE in ROLE_SCOPES[role], role

@@ -538,6 +538,37 @@ class YunohostAdapter:
         tools_update_norefresh = _import_attr("yunohost.tools", "tools_update_norefresh")
         return {"fake": False, **tools_update_norefresh()}
 
+    _UPDATES_REFRESH_TARGETS = frozenset({"system", "apps", "all"})
+
+    def updates_refresh(self, target: str = "apps") -> dict[str, Any]:
+        """The real, network-refreshing counterpart to updates_check() -
+        `apt-get update` and/or a re-fetch of every registered app catalog
+        source (including nostr_catalog's local /v3/apps.json feed), then
+        re-reads what's now upgradable. Deliberately deferred out of
+        updates_check() itself in Phase 4 (see its comment) since it
+        mutates on-disk cache state; this is that write, added once there
+        was an actual caller for it (confirming a freshly `catalog_publish`-
+        ed package shows up in the live catalog).
+
+        Not gated behind a write-scope/confirmation like apps.install etc:
+        it only refreshes cached metadata, doesn't touch installed apps,
+        and yunohost.tools.tools_update() is @is_unit_operation-decorated
+        the same way diagnosis_run's underlying call is - see this class's
+        Phase 5/6 comment on why no operation_logger is passed here.
+        """
+        if target not in self._UPDATES_REFRESH_TARGETS:
+            raise ToolInputError(f"target must be one of {sorted(self._UPDATES_REFRESH_TARGETS)}, got {target!r}")
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "target": target,
+                "apps": [{"id": "nextcloud", "current_version": "28.0.1~ynh1", "new_version": "28.0.2~ynh1"}],
+                "system": [],
+            }
+        tools_update = _import_attr("yunohost.tools", "tools_update")
+        result = tools_update(target=target)
+        return {"fake": False, "target": target, **result}
+
     def plan_app_upgrade(self, app: str) -> dict[str, Any]:
         """Read-only facts for one app's upgrade (PLAN.md Phase 7) - current
         vs. target version, whether it's actually upgradable. Policy

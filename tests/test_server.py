@@ -55,6 +55,7 @@ PHASE4_TOOLS = {
     "operation_status",
     "operation_logs",
     "updates_check",
+    "updates_refresh",
 }
 
 
@@ -125,6 +126,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("operation_status", {"name": "20260901-120000-app_install"}),
         ("operation_logs", {"name": "20260901-120000-app_install"}),
         ("updates_check", {}),
+        ("updates_refresh", {}),
     ],
 )
 async def test_phase4_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):

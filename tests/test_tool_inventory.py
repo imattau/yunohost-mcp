@@ -23,6 +23,7 @@ EXPECTED_TOOLS = frozenset(
         "operation_status",
         "operation_logs",
         "updates_check",
+        "updates_refresh",
         "service_restart",
         "backup_create",
         "app_install",

@@ -92,8 +92,16 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
         calls["tools_upgrade"] = {"target": target}
         return None
 
+    @_is_unit_operation()
+    def tools_update(operation_logger, target=None, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert target in ("system", "apps", "all"), f"target corrupted: got {target!r}"
+        calls["tools_update"] = {"target": target}
+        return {"apps": [], "system": []}
+
     yunohost_tools = types.ModuleType("yunohost.tools")
     yunohost_tools.tools_upgrade = tools_upgrade
+    yunohost_tools.tools_update = tools_update
 
     @_is_unit_operation()
     def diagnosis_run(operation_logger, categories=None, force=False, **_):
@@ -153,6 +161,12 @@ def test_system_upgrade_receives_correct_target_not_operation_logger(real_mode_a
 def test_diagnosis_run_receives_correct_categories_not_operation_logger(real_mode_adapter: YunohostAdapter):
     real_mode_adapter.diagnosis_run(categories=["ip"])
     assert real_mode_adapter._test_calls["diagnosis_run"] == {"categories": ["ip"]}
+
+
+def test_updates_refresh_receives_correct_target_not_operation_logger(real_mode_adapter: YunohostAdapter):
+    result = real_mode_adapter.updates_refresh(target="apps")
+    assert real_mode_adapter._test_calls["tools_update"] == {"target": "apps"}
+    assert result == {"fake": False, "target": "apps", "apps": [], "system": []}
 
 
 def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):

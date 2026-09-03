@@ -15,6 +15,7 @@ _READONLY: frozenset[Scope] = frozenset(
     {
         Scope.SERVER_READ,
         Scope.DIAGNOSIS_READ,
+        Scope.SYSTEM_UPDATE,
         Scope.APPS_READ,
         Scope.SERVICES_READ,
         Scope.LOGS_READ,

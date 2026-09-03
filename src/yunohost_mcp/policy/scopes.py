@@ -36,6 +36,9 @@ class Scope(StrEnum):
     DOMAINS_READ = "domains.read"
     DOMAINS_WRITE = "domains.write"
 
+    # Refreshes cached metadata only (apt cache, app catalog sources) -
+    # yunohost_mcp.yunohost.adapter.YunohostAdapter.updates_refresh(). Not
+    # to be confused with SYSTEM_UPGRADE, which actually installs updates.
     SYSTEM_UPDATE = "system.update"
     SYSTEM_UPGRADE = "system.upgrade"
 
