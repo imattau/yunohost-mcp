@@ -24,7 +24,8 @@ to retry once approved.
 
 @translate_known_errors: converts this module's own known, expected
 exceptions (ScopeError, PolicyViolation, a ConfirmationError that escapes
-the "issue a new ticket" branch above) into
+the "issue a new ticket" branch above, plus yunohost/adapter.py's
+ToolInputError and YunohostUnavailableError) into
 mcp.server.mcpserver.exceptions.ToolError, so a caller/model actually sees
 *why* a call was blocked - "'readonly-agent' lacks required scope
 'apps.upgrade'", say - instead of the MCP SDK's generic, message-less
@@ -41,6 +42,15 @@ other decorator *and* the tool body itself - including a check called
 directly in a tool's own body (e.g. execute_plan re-checking apps.upgrade
 policy at execute time) rather than through @require_confirmation's own
 `checks=` mechanism.
+
+Deliberately NOT a bare `except ValueError` even though ToolInputError is
+one: adapter.py's ToolInputError is raised only for validation this
+adapter's own code deliberately performs (a bad catalog source URL, a
+missing required ref, ...) - a caller/model could react to the message
+and retry. A plain ValueError raised accidentally by unrelated code
+(a bug, not a deliberate check) should keep crashing loudly with a
+traceback logged, not silently look identical to a deliberate validation
+error.
 """
 
 from __future__ import annotations
@@ -55,6 +65,7 @@ from yunohost_mcp.auth.identity import require_current_request
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation
 from yunohost_mcp.policy.scopes import Scope
+from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostUnavailableError
 
 F = TypeVar("F", bound=Callable)
 
@@ -131,7 +142,7 @@ def require_confirmation(
     return decorator
 
 
-_KNOWN_EXPECTED_ERRORS = (ScopeError, PolicyViolation, ConfirmationError)
+_KNOWN_EXPECTED_ERRORS = (ScopeError, PolicyViolation, ConfirmationError, ToolInputError, YunohostUnavailableError)
 
 
 def translate_known_errors(fn: F) -> F:

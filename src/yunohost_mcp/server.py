@@ -103,7 +103,7 @@ from yunohost_mcp.policy.locks import WriteLock
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.redaction import redact_response
-from yunohost_mcp.yunohost.adapter import YunohostAdapter
+from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
 
 settings = load_settings()
 adapter = YunohostAdapter(settings=settings)
@@ -650,7 +650,7 @@ def audit_get(audit_id: str) -> dict[str, Any]:
     """Return one audit trail entry by id. Administrator-only (Scope.AUDIT_READ)."""
     entry = audit_log.get(audit_id)
     if entry is None:
-        raise ValueError(f"no audit entry with id {audit_id!r}")
+        raise ToolInputError(f"no audit entry with id {audit_id!r}")
     return entry
 
 

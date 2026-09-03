@@ -38,6 +38,18 @@ class YunohostUnavailableError(RuntimeError):
     """Raised when a real YunoHost call is attempted but yunohost.* can't be imported."""
 
 
+class ToolInputError(ValueError):
+    """Deliberate caller-input validation failures raised by this adapter
+    (a bad catalog source URL, a missing required ref, an unknown repair
+    strategy, ...) - a caller/model could react to the message and retry
+    with different arguments, unlike a plain ValueError raised
+    accidentally somewhere unrelated (which should keep crashing loudly
+    with a traceback, not look identical to a deliberate validation
+    error). See policy/enforcement.py's translate_known_errors, which
+    catches this specific type (not bare ValueError) for exactly that
+    reason."""
+
+
 _yunohost_runtime_initialized = False
 
 
@@ -625,7 +637,7 @@ class YunohostAdapter:
             }
         if ref is not None or source.startswith(("https://", "http://")):
             if not source.startswith("https://"):
-                raise ValueError("remote catalogue package sources must use HTTPS")
+                raise ToolInputError("remote catalogue package sources must use HTTPS")
             args = ["preview"]
             if ref:
                 args += ["--ref", ref]
@@ -680,7 +692,7 @@ class YunohostAdapter:
         self._validate_catalog_source(source, ref)
         relays = self._catalog_relays()
         if not relays:
-            raise ValueError("catalog_relays must contain at least one relay URL")
+            raise ToolInputError("catalog_relays must contain at least one relay URL")
         args = ["publish", "--json", "--private-key-file", str(self.settings.catalog_publisher_key_path), "--relays", ",".join(relays)]
         if ref is not None:
             args += ["--repository-url", source, "--ref", ref]
@@ -712,7 +724,7 @@ class YunohostAdapter:
         try:
             event = json.loads(event_or_naddr)
         except json.JSONDecodeError as exc:
-            raise ValueError("event_or_naddr must be a JSON event or naddr") from exc
+            raise ToolInputError("event_or_naddr must be a JSON event or naddr") from exc
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
             json.dump(event, handle)
             event_path = handle.name
@@ -727,19 +739,19 @@ class YunohostAdapter:
     def _validate_catalog_source(self, source: str, ref: str | None) -> None:
         if ref is not None:
             if not source.startswith("https://"):
-                raise ValueError("a ref may only be used with an HTTPS remote repository")
+                raise ToolInputError("a ref may only be used with an HTTPS remote repository")
             if not ref.strip():
-                raise ValueError("remote repository ref must not be empty")
+                raise ToolInputError("remote repository ref must not be empty")
             return
         if source.startswith(("https://", "http://")):
             if not source.startswith("https://"):
-                raise ValueError("remote catalogue package sources must use HTTPS")
+                raise ToolInputError("remote catalogue package sources must use HTTPS")
             if self.settings.catalog_require_remote_ref:
-                raise ValueError("an explicit ref is required for remote catalogue sources")
+                raise ToolInputError("an explicit ref is required for remote catalogue sources")
             return
         path = Path(source)
         if not path.exists() or not path.is_dir():
-            raise ValueError("local catalogue source must be an existing directory")
+            raise ToolInputError("local catalogue source must be an existing directory")
 
     def _run_catalog_json(self, args: list[str], *, requires_key: bool = False) -> dict[str, Any]:
         cli = self.settings.catalog_cli_path
@@ -976,7 +988,7 @@ class YunohostAdapter:
         reinstall, no upgrade, no forced removal) regardless of findings.
         """
         if strategy != "conservative":
-            raise ValueError(f"unknown repair strategy {strategy!r}; only 'conservative' is implemented")
+            raise ToolInputError(f"unknown repair strategy {strategy!r}; only 'conservative' is implemented")
 
         before = self.diagnose_app(app)
         services = self.services_list().get("services", {})

@@ -480,6 +480,23 @@ async def test_execute_plan_policy_violation_surfaces_its_real_message(monkeypat
 
 
 @pytest.mark.anyio
+async def test_tool_input_error_surfaces_its_real_message_not_a_generic_crash():
+    # Regression: adapter.py's ToolInputError (deliberate caller-input
+    # validation - a bad catalog source, a missing required ref, ...) used
+    # to be a bare ValueError, not one of translate_known_errors's caught
+    # types - "Error executing tool X" with no indication of why, caught
+    # live when catalog_publish_plan was called with a remote source and
+    # no --ref. _validate_catalog_source() runs even in fake mode (before
+    # the fake_yunohost short-circuit), so this needs no adapter mocking.
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "catalog_publish_plan", {"source": "https://github.com/example/example_ynh"}
+        )
+        assert result.is_error is True
+        assert "an explicit ref is required for remote catalogue sources" in str(result.content)
+
+
+@pytest.mark.anyio
 async def test_phase7_plan_then_execute_upgrades_the_app():
     async with Client(mcp) as client:
         plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})
