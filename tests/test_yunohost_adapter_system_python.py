@@ -104,6 +104,55 @@ def test_backup_restore_calls_call_via_system_python_with_correct_kwargs(monkeyp
     assert result == {"fake": False, "name": "20260901-000000", "result": None}
 
 
+def test_app_install_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # app_install() re-parses the target manifest's [install] options,
+    # which for any domain/group question hits the same DomainOption/
+    # GroupOption pydantic v1/v2 conflict as backup_create/backup_restore/
+    # package_inspect above.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"notifications": {}}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260903-000000-app_install")
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.app_install("ditto", label="Ditto")
+
+    assert captured["module_name"] == "yunohost.app"
+    assert captured["attr"] == "app_install"
+    assert captured["kwargs"] == {"app": "ditto", "label": "Ditto", "args": None, "force": False}
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-app_install",
+        "result": {"notifications": {}},
+    }
+
+
+def test_app_upgrade_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"success": ["ditto"]}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.app_upgrade(app="ditto", file="/tmp/ditto-candidate")
+
+    assert captured["module_name"] == "yunohost.app"
+    assert captured["attr"] == "app_upgrade"
+    assert captured["kwargs"] == {"app": "ditto", "force": False, "file": "/tmp/ditto-candidate"}
+    assert result == {"fake": False, "app": "ditto", "result": {"success": ["ditto"]}}
+
+
 def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
     # app_manifest() imports yunohost.utils.form (for its "install"
     # questions field) - same pydantic v1/v2 conflict as backup_create/

@@ -4,9 +4,9 @@ This sandbox has no real `yunohost` package installed, so these build fake
 `yunohost.*` modules under sys.modules whose decorated functions faithfully
 reproduce `@is_unit_operation`'s actual argument-remapping behavior (copied
 from /tmp/yunohost-src's src/log.py at review time) - the same decorator
-that wraps app_install, app_remove, tools_upgrade, and diagnosis_run in
-the real codebase (backup_create/backup_restore now go through
-_call_via_system_python instead - see
+that wraps app_remove, tools_upgrade, and diagnosis_run in the real
+codebase (app_install/app_upgrade and backup_create/backup_restore now go
+through _call_via_system_python instead - see
 test_yunohost_adapter_system_python.py).
 
 Why this matters: the decorator constructs its own OperationLogger
@@ -69,33 +69,21 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     calls: dict[str, dict[str, Any]] = {}
 
     @_is_unit_operation()
-    def app_install(operation_logger, app, label=None, args=None, force=False, **_):
-        assert operation_logger is FAKE_OPERATION_LOGGER
-        assert isinstance(app, str), f"app corrupted: got {app!r}"
-        calls["app_install"] = {"app": app, "label": label}
-        return {"notifications": {}}
-
-    @_is_unit_operation()
     def app_remove(operation_logger, app, purge=False, **_):
         assert operation_logger is FAKE_OPERATION_LOGGER
         assert isinstance(app, str), f"app corrupted: got {app!r}"
         calls["app_remove"] = {"app": app, "purge": purge}
         return None
 
-    def app_upgrade(app=None, force=False, **_):
-        calls["app_upgrade"] = {"app": app}
-        return {"success": [app] if isinstance(app, str) else app}
-
     yunohost_app = types.ModuleType("yunohost.app")
-    yunohost_app.app_install = app_install
     yunohost_app.app_remove = app_remove
-    yunohost_app.app_upgrade = app_upgrade
 
-    # backup_create/backup_restore are NOT exercised here - they no longer
-    # go through _import_attr at all (see test_yunohost_adapter_system_python.py):
-    # both now route through _call_via_system_python, a subprocess call, so
-    # injecting fake yunohost.backup submodules into this process's
-    # sys.modules wouldn't reach them.
+    # app_install/app_upgrade and backup_create/backup_restore are NOT
+    # exercised here - none of them go through _import_attr at all
+    # anymore (see test_yunohost_adapter_system_python.py): all four now
+    # route through _call_via_system_python, a subprocess call, so
+    # injecting fake yunohost.app/yunohost.backup submodules into this
+    # process's sys.modules wouldn't reach them.
 
     @_is_unit_operation()
     def tools_upgrade(operation_logger, target=None, **_):
@@ -152,12 +140,6 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     return adapter
 
 
-def test_app_install_receives_correct_app_name_not_operation_logger(real_mode_adapter: YunohostAdapter):
-    result = real_mode_adapter.app_install("nextcloud", label="My Cloud")
-    assert real_mode_adapter._test_calls["app_install"] == {"app": "nextcloud", "label": "My Cloud"}
-    assert result["operation_id"] == "20260903-000000-fake_op"
-
-
 def test_app_remove_receives_correct_app_name_not_operation_logger(real_mode_adapter: YunohostAdapter):
     real_mode_adapter.app_remove("nextcloud", purge=True)
     assert real_mode_adapter._test_calls["app_remove"] == {"app": "nextcloud", "purge": True}
@@ -173,11 +155,10 @@ def test_diagnosis_run_receives_correct_categories_not_operation_logger(real_mod
     assert real_mode_adapter._test_calls["diagnosis_run"] == {"categories": ["ip"]}
 
 
-def test_app_upgrade_and_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
-    # These are NOT @is_unit_operation-decorated, so they should never have
-    # received a caller-constructed OperationLogger in the first place -
-    # confirming the fix didn't touch what was already correct.
-    real_mode_adapter.app_upgrade(app="nextcloud")
+def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
+    # service_restart is NOT @is_unit_operation-decorated, so it should
+    # never have received a caller-constructed OperationLogger in the
+    # first place - confirming the fix didn't touch what was already
+    # correct.
     real_mode_adapter.service_restart(["nginx"])
-    assert real_mode_adapter._test_calls["app_upgrade"] == {"app": "nextcloud"}
     assert real_mode_adapter._test_calls["service_restart"] == {"names": ["nginx"]}

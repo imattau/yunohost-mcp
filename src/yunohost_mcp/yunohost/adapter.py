@@ -609,8 +609,21 @@ class YunohostAdapter:
     ) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-app_install", "app": app}
-        app_install = _import_attr("yunohost.app", "app_install")
-        result = app_install(app, label=label, args=args, force=force)
+        # app_install() re-parses the target manifest's [install] options
+        # (ask_questions_and_parse_answers -> parse_raw_options ->
+        # OptionsModel) every call, which for any app with a `type =
+        # "domain"`/`"group"` question hits DomainOption/GroupOption's
+        # pydantic v1-style @validator("choices", pre=True, always=True)
+        # (yunohost.utils.form again - same conflict as backup_create/
+        # backup_restore/package_inspect, see _call_via_system_python's
+        # docstring). In-process, that validator silently never runs
+        # under this venv's pydantic v2, so `choices` - meant to be
+        # auto-populated from domain_list()/user_group_list() - looks
+        # like a plain missing required field instead: "While parsing
+        # manifest: ... options.0.domain.choices Field required".
+        result = _call_via_system_python(
+            "yunohost.app", "app_install", {"app": app, "label": label, "args": args, "force": force}, self.settings
+        )
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
     def app_upgrade(
@@ -626,8 +639,13 @@ class YunohostAdapter:
         # uses to upgrade an already-installed app from a candidate source
         # instead of the catalog - app_upgrade() only accepts a single app
         # when file/url is given (PHASE0-style check of the real source).
-        app_upgrade = _import_attr("yunohost.app", "app_upgrade")
-        result = app_upgrade(app=app or [], force=force, file=file)
+        # Routed via _call_via_system_python for the same reason as
+        # app_install() just above - app_upgrade() can re-parse manifest
+        # [install] options too (e.g. an upgrade that adds a new question,
+        # or reconfirms an existing domain/group one).
+        result = _call_via_system_python(
+            "yunohost.app", "app_upgrade", {"app": app or [], "force": force, "file": file}, self.settings
+        )
         return {"fake": False, "app": app, "result": result}
 
     def app_remove(self, app: str, purge: bool = False) -> dict[str, Any]:
