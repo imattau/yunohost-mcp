@@ -58,6 +58,18 @@ def test_domains_list():
     assert result["main"] in result["domains"]
 
 
+def test_domain_add_defaults_to_a_selfsigned_certificate():
+    result = make_adapter().domain_add("new.example.com")
+    assert result["fake"] is True
+    assert result["domain"] == "new.example.com"
+    assert result["certificate"]["CA_type"] == "selfsigned"
+
+
+def test_domain_add_reports_letsencrypt_when_requested():
+    result = make_adapter().domain_add("new.example.com", install_letsencrypt_cert=True)
+    assert result["certificate"]["CA_type"] == "letsencrypt"
+
+
 def test_users_list():
     result = make_adapter().users_list()
     assert "alice" in result["users"]

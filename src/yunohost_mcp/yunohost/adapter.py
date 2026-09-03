@@ -598,6 +598,39 @@ class YunohostAdapter:
     # this file got it wrong). We recover a best-effort operation id
     # afterward via _latest_operation_id() instead.
 
+    def domain_add(self, domain: str, install_letsencrypt_cert: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-domain_add",
+                "domain": domain,
+                "certificate": {"CA_type": "letsencrypt" if install_letsencrypt_cert else "selfsigned"},
+            }
+        # @is_unit_operation-decorated (yunohost.domain), same
+        # no-manual-operation_logger convention as service_restart et al
+        # just below. ignore_dyndns=True is deliberate and not exposed as
+        # a parameter: without it, a bare *.nohost.me/*.noho.st/*.ynh.fr
+        # *top-level* domain name (e.g. "newname.nohost.me", not a
+        # subdomain of one already registered) triggers a real DynDNS
+        # account subscription - and domain_add()'s ToS-acknowledgement
+        # prompt only fires when Moulinette.interface.type == "cli" and
+        # the process has a tty, neither true here, so that consent step
+        # would be silently skipped entirely rather than raising. Always
+        # treating the name as a plain custom domain avoids that; a
+        # subdomain of an already-registered DynDNS domain (the normal
+        # case - e.g. new-app.example.nohost.me under an existing
+        # example.nohost.me) is unaffected either way.
+        domain_add = _import_attr("yunohost.domain", "domain_add")
+        domain_add(domain=domain, ignore_dyndns=True, install_letsencrypt_cert=install_letsencrypt_cert)
+        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+        certificate = certificate_status([domain]).get("certificates", {}).get(domain, {})
+        return {
+            "fake": False,
+            "operation_id": _latest_operation_id(),
+            "domain": domain,
+            "certificate": certificate,
+        }
+
     def service_restart(self, names: list[str]) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "restarted": names}

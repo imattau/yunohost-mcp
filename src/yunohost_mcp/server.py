@@ -288,6 +288,42 @@ def domains_list() -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.DOMAINS_WRITE)
+@audited_write("domains.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "domains.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda domain, install_letsencrypt_cert=False, **_: {
+        "action": "add domain",
+        "domain": domain,
+        "install_letsencrypt_cert": install_letsencrypt_cert,
+        "warning": "This is externally visible (DNS/nginx/mail config) and, with "
+        "install_letsencrypt_cert=true, contacts Let's Encrypt.",
+    },
+)
+def domain_add(domain: str, install_letsencrypt_cert: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Register a new domain or subdomain on this YunoHost server - a
+    prerequisite for app_install's `domain` question, which only accepts
+    already-registered domains. Always adds a plain custom domain, never
+    subscribes to a new top-level DynDNS domain (nohost.me/noho.st/ynh.fr)
+    even if the name would otherwise qualify - a same-host subdomain of
+    an already-registered DynDNS domain (e.g. new-app.example.nohost.me)
+    is unaffected and works normally.
+
+    A self-signed certificate is always installed immediately.
+    install_letsencrypt_cert additionally attempts a real Let's Encrypt
+    certificate - this only reliably works for a subdomain of a domain
+    that already has a wildcard cert, or a domain whose DNS already
+    points here; check the response's `certificate.CA_type` ("letsencrypt"
+    vs "selfsigned") rather than assuming success.
+    """
+    return adapter.domain_add(domain, install_letsencrypt_cert=install_letsencrypt_cert)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.USERS_READ)
 def users_list() -> dict[str, Any]:
     """List YunoHost user accounts."""

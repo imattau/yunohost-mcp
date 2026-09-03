@@ -21,7 +21,7 @@ from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
-PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade"}
+PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
@@ -212,6 +212,28 @@ async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool:
         confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
         assert confirmed.is_error is not True, confirmed.content
         assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_domain_add_requires_then_accepts_a_plain_confirmation():
+    # domains.write has require_confirmation but not require_owner_signature
+    # (unlike backup_restore/system_upgrade above) - a single caller's own
+    # confirmation_id round trip is enough, no second identity needed.
+    async with Client(mcp) as client:
+        first = await client.call_tool("domain_add", {"domain": "new.example.com"})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "domain_add", {"domain": "new.example.com", "confirmation_id": confirmation_id}
+        )
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert confirmed.structured_content["domain"] == "new.example.com"
         assert "confirmation_required" not in confirmed.structured_content
 
 

@@ -24,6 +24,7 @@ EXPECTED_TOOLS = frozenset(
         "operation_logs",
         "updates_check",
         "updates_refresh",
+        "domain_add",
         "service_restart",
         "backup_create",
         "app_install",

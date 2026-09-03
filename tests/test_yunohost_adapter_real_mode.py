@@ -134,12 +134,34 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     yunohost_service = types.ModuleType("yunohost.service")
     yunohost_service.service_restart = service_restart
 
+    @_is_unit_operation()
+    def domain_add(operation_logger, domain, ignore_dyndns=False, install_letsencrypt_cert=False, **_):
+        assert operation_logger is FAKE_OPERATION_LOGGER
+        assert isinstance(domain, str), f"domain corrupted: got {domain!r}"
+        calls["domain_add"] = {
+            "domain": domain,
+            "ignore_dyndns": ignore_dyndns,
+            "install_letsencrypt_cert": install_letsencrypt_cert,
+        }
+        return None
+
+    yunohost_domain = types.ModuleType("yunohost.domain")
+    yunohost_domain.domain_add = domain_add
+
+    def certificate_status(domains, **_):
+        return {"certificates": {d: {"CA_type": "selfsigned"} for d in domains}}
+
+    yunohost_certificate = types.ModuleType("yunohost.certificate")
+    yunohost_certificate.certificate_status = certificate_status
+
     for name, module in {
         "yunohost.app": yunohost_app,
         "yunohost.tools": yunohost_tools,
         "yunohost.diagnosis": yunohost_diagnosis,
         "yunohost.log": yunohost_log,
         "yunohost.service": yunohost_service,
+        "yunohost.domain": yunohost_domain,
+        "yunohost.certificate": yunohost_certificate,
     }.items():
         monkeypatch.setitem(__import__("sys").modules, name, module)
 
@@ -167,6 +189,23 @@ def test_updates_refresh_receives_correct_target_not_operation_logger(real_mode_
     result = real_mode_adapter.updates_refresh(target="apps")
     assert real_mode_adapter._test_calls["tools_update"] == {"target": "apps"}
     assert result == {"fake": False, "target": "apps", "apps": [], "system": []}
+
+
+def test_domain_add_receives_correct_domain_not_operation_logger_and_always_ignores_dyndns(
+    real_mode_adapter: YunohostAdapter,
+):
+    result = real_mode_adapter.domain_add("new-app.example.nohost.me", install_letsencrypt_cert=True)
+    assert real_mode_adapter._test_calls["domain_add"] == {
+        "domain": "new-app.example.nohost.me",
+        "ignore_dyndns": True,
+        "install_letsencrypt_cert": True,
+    }
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-fake_op",
+        "domain": "new-app.example.nohost.me",
+        "certificate": {"CA_type": "selfsigned"},
+    }
 
 
 def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
