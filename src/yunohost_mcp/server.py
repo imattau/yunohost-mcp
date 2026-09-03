@@ -81,6 +81,7 @@ import time
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 
 from yunohost_mcp.audit.decorator import audited_write
 from yunohost_mcp.audit.log import AuditLog
@@ -816,7 +817,16 @@ def create_http_app():
     a one-time snapshot taken here at startup would silently require a
     full service restart for either to take effect.
     """
-    inner_app = mcp.streamable_http_app()
+    # streamable_http_app()'s own DNS-rebinding Host check defaults to
+    # localhost-only (mcp SDK), which rejects every request once nginx
+    # forwards the real public Host header via proxy_set_header Host $host.
+    # NostrAuthMiddleware below already requires a validly signed NIP-98
+    # event - bound to the exact request URL - on every call, which is what
+    # DNS-rebinding protection exists to approximate for unauthenticated
+    # dev servers, so it's redundant (and actively broken) here.
+    inner_app = mcp.streamable_http_app(
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    )
     identity_store = IdentityStore.live(settings.identity_file_path())
     return NostrAuthMiddleware(
         inner_app,
