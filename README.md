@@ -18,14 +18,14 @@ By default `fake_yunohost` is off (real mode) — set `YUNOHOST_MCP_FAKE_YUNOHOS
 Once published, install the Python package with:
 
 ```bash
-python3 -m pip install yunohost-mcp
+python3 -m pip install yunohost-mcp-connect
 ```
 
 This installs `yunohost-mcp`, `yunohost-mcp-connect`, and
 `yunohost-mcp-delegate`. For an isolated command-line installation, use:
 
 ```bash
-uv tool install yunohost-mcp
+uv tool install yunohost-mcp-connect
 ```
 
 ## Connecting a client: yunohost-mcp-connect
