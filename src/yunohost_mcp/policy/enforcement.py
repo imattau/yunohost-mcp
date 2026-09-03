@@ -71,6 +71,30 @@ from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostUnavailableErr
 
 F = TypeVar("F", bound=Callable)
 
+_owner_signature_pending_hook: Callable[[Any], None] | None = None
+
+
+def set_owner_signature_pending_hook(hook: Callable[[Any], None] | None) -> None:
+    """Optional hook for owner-approval-plan.md's "Optional encrypted-DM
+    delivery" (notify.py's notify_owner_best_effort): called once,
+    synchronously, with the freshly-created ConfirmationTicket, right
+    after require_confirmation issues a ticket whose rule has
+    require_owner_signature=True - never for a ticket that already
+    existed (a retried call reusing a pending one is not a new "please
+    notify" event). Not called at all when require_owner_signature is
+    False, regardless of whether a hook is set.
+
+    This module stays deliberately ignorant of what the hook does
+    (relays, owner pubkey, NIP-17/59 - all notify.py's concern, not
+    this one's) - it only calls it, and does not catch anything the hook
+    raises: server.py only ever wires in notify_owner_best_effort, which
+    already guarantees it never raises (see notify.py's own docstring),
+    so a hook that isn't exception-safe should fail loudly here rather
+    than have this module quietly swallow a bug in it.
+    """
+    global _owner_signature_pending_hook
+    _owner_signature_pending_hook = hook
+
 
 class ScopeError(PermissionError):
     """The current identity does not have the scope a tool requires."""
@@ -138,6 +162,8 @@ def require_confirmation(
                         plan=plan,
                         require_owner_signature=rule.require_owner_signature,
                     )
+                    if rule.require_owner_signature and _owner_signature_pending_hook is not None:
+                        _owner_signature_pending_hook(ticket)
                     return {
                         "confirmation_required": True,
                         "operation_plan": plan,

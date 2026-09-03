@@ -405,6 +405,57 @@ async def test_phase6_confirmation_is_one_shot():
 
 
 @pytest.mark.anyio
+async def test_owner_signature_pending_notification_is_a_noop_by_default(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(server_module, "notify_owner_best_effort", lambda **kwargs: calls.append(kwargs))
+    assert server_module.settings.owner_notify_relays == ""
+
+    async with Client(mcp) as client:
+        await client.call_tool("system_upgrade", {})
+
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_owner_signature_pending_notification_fires_when_configured(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(server_module, "notify_owner_best_effort", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(server_module.settings, "owner_notify_relays", "wss://relay.example")
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("system_upgrade", {})
+        confirmation_id = result.structured_content["confirmation_id"]
+
+    assert len(calls) == 1
+    assert calls[0]["confirmation_id"] == confirmation_id
+    assert calls[0]["tool"] == "system.upgrade"
+    assert calls[0]["relays"] == ["wss://relay.example"]
+    assert calls[0]["owner_pubkey_hex"] == SECOND_ADMIN_REQUEST.pubkey
+
+
+@pytest.mark.anyio
+async def test_owner_signature_pending_notification_not_fired_for_plain_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # domains.write requires confirmation but not owner signature - the
+    # notification hook is specifically for require_owner_signature.
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(server_module, "notify_owner_best_effort", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(server_module.settings, "owner_notify_relays", "wss://relay.example")
+
+    async with Client(mcp) as client:
+        await client.call_tool("domain_add", {"domain": "notify-check.example.com"})
+
+    assert calls == []
+
+
+@pytest.mark.anyio
 async def test_phase13_execute_without_owner_approval_is_denied():
     async with Client(mcp) as client:
         first = await client.call_tool("system_upgrade", {})

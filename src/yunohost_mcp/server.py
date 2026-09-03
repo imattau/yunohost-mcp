@@ -109,8 +109,14 @@ from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
+from yunohost_mcp.notify import notify_owner_best_effort, parse_relay_list
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket
-from yunohost_mcp.policy.enforcement import require_confirmation, require_scope, translate_known_errors
+from yunohost_mcp.policy.enforcement import (
+    require_confirmation,
+    require_scope,
+    set_owner_signature_pending_hook,
+    translate_known_errors,
+)
 from yunohost_mcp.policy.locks import WriteLock
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.policy.scopes import Scope
@@ -143,6 +149,33 @@ def get_owner_pubkey() -> str | None:
     new YUNOHOST_MCP_OWNER_NPUB) takes effect without a restart, and
     without this module caching a stale answer."""
     return resolve_owner_pubkey(owner_npub=settings.owner_npub, identity_store=identity_store)
+
+
+def _notify_owner_pending(ticket: ConfirmationTicket) -> None:
+    """Wired into policy/enforcement.py's set_owner_signature_pending_hook
+    below - owner-approval-plan.md's optional, best-effort NIP-17
+    notification (notify.py). A no-op whenever owner_notify_relays is
+    unset (the default) or no owner is configured yet; never raises
+    (notify_owner_best_effort's own contract) and never affects whether
+    the confirmation_required response this fires alongside gets
+    returned - it already has been, by the time this runs."""
+    relays = parse_relay_list(settings.owner_notify_relays)
+    owner_pubkey = get_owner_pubkey()
+    if not relays or owner_pubkey is None:
+        return
+    get_server_identity()  # ensures server_identity_path() exists before reading it below
+    notify_owner_best_effort(
+        server_secret_key_hex=settings.server_identity_path().read_text().strip(),
+        owner_pubkey_hex=owner_pubkey,
+        relays=relays,
+        confirmation_id=ticket.confirmation_id,
+        tool=ticket.tool,
+        expires_at=ticket.expires_at,
+    )
+
+
+set_owner_signature_pending_hook(_notify_owner_pending)
+
 
 class AsyncToolMCPServer(MCPServer):
     """Run synchronous tools in asyncio's worker pool.

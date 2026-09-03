@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # confirmation_ttl_seconds (sized for same-session retries) doesn't
     # allow enough time for.
     owner_approval_ttl_seconds: int = 1800
+    # owner_notify_relays (owner-approval-plan.md's "Optional encrypted-DM
+    # delivery"): comma-separated relay URLs to publish a best-effort,
+    # non-authoritative NIP-17 notification to when a require_owner_
+    # signature confirmation is first created - see notify.py. Empty
+    # (the default) disables this entirely; approval itself never depends
+    # on it (approve_operation is checked independently of whether any
+    # notification was ever sent, delivered, or read).
+    owner_notify_relays: str = ""
 
     # Path to a local checkout of github.com/YunoHost/package_linter
     # (package_linter.py at its root). package_lint() is unavailable (not
