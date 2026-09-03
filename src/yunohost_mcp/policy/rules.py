@@ -147,27 +147,26 @@ def check_free_space(rule: PolicyRule, *, path: str = "/") -> None:
         )
 
 
-def check_recent_backup(rule: PolicyRule, *, archives: list[str], now: float) -> None:
-    """`archives` are YunoHost's own archive names, which start with a
-    YYYYMMDD-HHMMSS timestamp (see PHASE0_INVESTIGATION.md's backup_list())."""
+def check_recent_backup(rule: PolicyRule, *, archive_created_at: dict[str, float], now: float) -> None:
+    """`archive_created_at` maps each archive name to its real creation
+    time (yunohost.backup.backup_list(with_info=True)'s info.json
+    "created_at" field - see YunohostAdapter.backup_created_at_times()).
+
+    Deliberately NOT parsed from the archive *name*: an earlier version
+    of this check assumed every archive name starts with a
+    YYYYMMDD-HHMMSS timestamp (true only for an unnamed backup_create()
+    call), which meant it could never recognize yunohost's own automatic
+    pre-upgrade safety backup - always named
+    "<app>-pre-upgrade1"/"<app>-pre-upgrade2" - as satisfying this check,
+    making apps.upgrade/apps.remove's "recent backup" requirement
+    unsatisfiable via the single most common real-world source of one.
+    """
     if not rule.require_backup:
         return
-    if not archives:
+    if not archive_created_at:
         raise PolicyViolation("policy requires a recent backup, but no backup archives exist")
 
-    import datetime as _dt
-
-    newest: float | None = None
-    for archive in archives:
-        try:
-            ts = _dt.datetime.strptime(archive[:15], "%Y%m%d-%H%M%S").replace(tzinfo=_dt.timezone.utc).timestamp()
-        except ValueError:
-            continue
-        if newest is None or ts > newest:
-            newest = ts
-
-    if newest is None:
-        raise PolicyViolation("policy requires a recent backup, but no archive name could be parsed for its date")
+    newest = max(archive_created_at.values())
 
     if rule.max_backup_age_seconds is not None and (now - newest) > rule.max_backup_age_seconds:
         raise PolicyViolation(

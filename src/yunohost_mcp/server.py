@@ -98,7 +98,7 @@ from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
-from yunohost_mcp.policy.enforcement import require_confirmation, require_scope
+from yunohost_mcp.policy.enforcement import require_confirmation, require_scope, translate_known_errors
 from yunohost_mcp.policy.locks import WriteLock
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.policy.scopes import Scope
@@ -159,15 +159,16 @@ def get_server_identity() -> ServerIdentity:
 
 def _check_apps_upgrade(rule: PolicyRule) -> None:
     check_free_space(rule)
-    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
+    check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
 
 
 def _check_apps_remove(rule: PolicyRule) -> None:
-    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
+    check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
 
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVER_READ)
 def server_info() -> dict[str, Any]:
     """Return YunoHost server/component version information."""
@@ -176,6 +177,7 @@ def server_info() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.DIAGNOSIS_READ)
 def health_check() -> dict[str, Any]:
     """Return a summary YunoHost diagnosis report."""
@@ -184,6 +186,7 @@ def health_check() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def apps_list(full: bool = False) -> dict[str, Any]:
     """List installed YunoHost apps."""
@@ -192,6 +195,7 @@ def apps_list(full: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def app_info(app: str, full: bool = False) -> dict[str, Any]:
     """Return details (manifest, settings, permissions, upgradability) for one installed app."""
@@ -200,6 +204,7 @@ def app_info(app: str, full: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def app_resources(app: str) -> dict[str, Any]:
     """Return the declared YunoHost resources for one installed app."""
@@ -208,6 +213,7 @@ def app_resources(app: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.DIAGNOSIS_READ)
 def diagnosis_run(categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
     """Trigger a fresh YunoHost diagnosis run. Can take real time (network/port checks)."""
@@ -216,6 +222,7 @@ def diagnosis_run(categories: list[str] | None = None, force: bool = False) -> d
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.DIAGNOSIS_READ)
 def diagnosis_get() -> dict[str, Any]:
     """Return the current (cached) aggregated diagnosis report."""
@@ -224,6 +231,7 @@ def diagnosis_get() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVICES_READ)
 def services_list() -> dict[str, Any]:
     """List all YunoHost-managed services and their status."""
@@ -232,6 +240,7 @@ def services_list() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVICES_READ)
 def service_status(names: list[str]) -> dict[str, Any]:
     """Return status for one or more named services."""
@@ -240,6 +249,7 @@ def service_status(names: list[str]) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.DOMAINS_READ)
 def domains_list() -> dict[str, Any]:
     """List domains configured on this YunoHost server."""
@@ -248,6 +258,7 @@ def domains_list() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.USERS_READ)
 def users_list() -> dict[str, Any]:
     """List YunoHost user accounts."""
@@ -256,6 +267,7 @@ def users_list() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_READ)
 def backups_list() -> dict[str, Any]:
     """List available backup archives."""
@@ -264,6 +276,7 @@ def backups_list() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.LOGS_READ)
 def operations_list(limit: int | None = None) -> dict[str, Any]:
     """List recent YunoHost operation log entries."""
@@ -272,6 +285,7 @@ def operations_list(limit: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.LOGS_READ)
 def operation_status(name: str) -> dict[str, Any]:
     """Return success/failure status and metadata for one YunoHost operation."""
@@ -280,6 +294,7 @@ def operation_status(name: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.LOGS_READ)
 def operation_logs(name: str) -> dict[str, Any]:
     """Return the full log content for one YunoHost operation."""
@@ -288,6 +303,7 @@ def operation_logs(name: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def updates_check() -> dict[str, Any]:
     """List apps and system components with pending updates, from cache (no network refresh)."""
@@ -341,6 +357,7 @@ def operations_resource() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVICES_RESTART)
 @audited_write("services.restart", lock=write_lock, audit_log=audit_log)
 def service_restart(names: list[str]) -> dict[str, Any]:
@@ -350,6 +367,7 @@ def service_restart(names: list[str]) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_CREATE)
 @audited_write("backups.create", lock=write_lock, audit_log=audit_log)
 def backup_create(
@@ -364,6 +382,7 @@ def backup_create(
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_INSTALL)
 @audited_write("apps.install", lock=write_lock, audit_log=audit_log)
 def app_install(app: str, label: str | None = None, args: str | None = None, force: bool = False) -> dict[str, Any]:
@@ -373,6 +392,7 @@ def app_install(app: str, label: str | None = None, args: str | None = None, for
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
 @require_confirmation("apps.upgrade", policy=policy_rules, confirmation_store=confirmation_store, checks=_check_apps_upgrade)
@@ -388,6 +408,7 @@ def app_upgrade(app: str | None = None, force: bool = False, confirmation_id: st
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def plan_app_upgrade(app: str) -> dict[str, Any]:
     """Report what an upgrade of `app` would involve, without doing it:
@@ -413,6 +434,7 @@ def plan_app_upgrade(app: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
 def execute_plan(plan_id: str) -> dict[str, Any]:
@@ -432,6 +454,7 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_REMOVE)
 @audited_write("apps.remove", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
@@ -454,6 +477,7 @@ def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_RESTORE)
 @audited_write("backups.restore", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
@@ -481,6 +505,7 @@ def backup_restore(
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SYSTEM_UPGRADE)
 @audited_write("system.upgrade", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
@@ -499,6 +524,7 @@ def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_INSPECT)
 def package_inspect(source: str) -> dict[str, Any]:
     """Return the manifest and declared resources for a candidate package.
@@ -511,6 +537,7 @@ def package_inspect(source: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_INSPECT)
 def package_lint(source: str) -> dict[str, Any]:
     """Run the upstream package_linter against a local package path.
@@ -524,6 +551,7 @@ def package_lint(source: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_install_test(source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
@@ -533,6 +561,7 @@ def package_install_test(source: str, label: str | None = None, args: str | None
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_upgrade_test(app: str, source: str) -> dict[str, Any]:
@@ -542,6 +571,7 @@ def package_upgrade_test(app: str, source: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_backup_test(app: str) -> dict[str, Any]:
@@ -551,6 +581,7 @@ def package_backup_test(app: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_restore_test(app: str, archive_name: str) -> dict[str, Any]:
@@ -560,6 +591,7 @@ def package_restore_test(app: str, archive_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_change_url_test(app: str, domain: str, path: str) -> dict[str, Any]:
@@ -569,6 +601,7 @@ def package_change_url_test(app: str, domain: str, path: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_remove_test(app: str, purge: bool = True) -> dict[str, Any]:
@@ -578,6 +611,7 @@ def package_remove_test(app: str, purge: bool = True) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_INSPECT)
 def package_logs(operation: str) -> dict[str, Any]:
     """Return the full log for one operation - an alias over operation_logs()
@@ -587,6 +621,7 @@ def package_logs(operation: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def package_run_tests(source: str, app_id: str | None = None) -> dict[str, Any]:
@@ -600,6 +635,7 @@ def package_run_tests(source: str, app_id: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.AUDIT_READ)
 def audit_list(limit: int | None = None) -> dict[str, Any]:
     """List audit trail entries, newest first. Administrator-only (Scope.AUDIT_READ)."""
@@ -608,6 +644,7 @@ def audit_list(limit: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.AUDIT_READ)
 def audit_get(audit_id: str) -> dict[str, Any]:
     """Return one audit trail entry by id. Administrator-only (Scope.AUDIT_READ)."""
@@ -619,6 +656,7 @@ def audit_get(audit_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.OWNER_APPROVE)
 @audited_write("owner.approve", lock=write_lock, audit_log=audit_log)
 def approve_operation(confirmation_id: str) -> dict[str, Any]:
@@ -647,6 +685,7 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_READ)
 def diagnose_app(app: str) -> dict[str, Any]:
     """One-call app diagnostic: app info, the server's current diagnosis,
@@ -656,6 +695,7 @@ def diagnose_app(app: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVER_READ)
 def validate_server() -> dict[str, Any]:
     """A broad server health snapshot in one call: version info, diagnosis,
@@ -665,6 +705,7 @@ def validate_server() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
 def safe_upgrade(app: str) -> dict[str, Any]:
@@ -678,12 +719,13 @@ def safe_upgrade(app: str) -> dict[str, Any]:
     rule = policy_rules.get("apps.upgrade", PolicyRule())
     check_free_space(rule)
     result = adapter.safe_upgrade(app)
-    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
+    check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
     return result
 
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.SERVICES_RESTART)
 @audited_write("services.restart", lock=write_lock, audit_log=audit_log)
 def repair_app(app: str, strategy: str = "conservative") -> dict[str, Any]:
@@ -697,6 +739,7 @@ def repair_app(app: str, strategy: str = "conservative") -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 def test_package(source: str, app_id: str | None = None) -> dict[str, Any]:
@@ -710,6 +753,7 @@ def test_package(source: str, app_id: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.CATALOG_INSPECT)
 def catalog_package_inspect(source: str, ref: str | None = None) -> dict[str, Any]:
     """Inspect a local or remote YunoHost package for catalogue publication."""
@@ -718,6 +762,7 @@ def catalog_package_inspect(source: str, ref: str | None = None) -> dict[str, An
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.CATALOG_INSPECT)
 def catalog_publish_plan(source: str, ref: str | None = None) -> dict[str, Any]:
     """Build a signed catalogue declaration without contacting any relay."""
@@ -733,6 +778,7 @@ def catalog_publish_plan(source: str, ref: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.CATALOG_VERIFY)
 def catalog_verify(event_or_naddr: str) -> dict[str, Any]:
     """Verify a signed declaration event or fetch and verify an naddr."""
@@ -741,6 +787,7 @@ def catalog_verify(event_or_naddr: str) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 @require_scope(Scope.CATALOG_PUBLISH)
 @audited_write("catalog.publish", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
@@ -775,6 +822,7 @@ def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[st
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 def whoami() -> dict[str, Any]:
     """Return the caller's resolved Nostr identity: pubkey, name, roles, and scopes.
 
@@ -797,6 +845,7 @@ def whoami() -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@translate_known_errors
 def server_identity() -> dict[str, Any]:
     """Return this server's own Nostr identity (Phase 12): its npub and hex
     pubkey. A delegation (Phase 11) must name this exact pubkey in its

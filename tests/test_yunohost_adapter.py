@@ -66,6 +66,12 @@ def test_backups_list():
     assert isinstance(result["archives"], list)
 
 
+def test_backup_created_at_times():
+    result = make_adapter().backup_created_at_times()
+    assert isinstance(result, dict)
+    assert all(isinstance(v, float) for v in result.values())
+
+
 def test_operations_list_status_logs():
     adapter = make_adapter()
     ops = adapter.operations_list()

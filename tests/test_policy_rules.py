@@ -104,28 +104,48 @@ def test_check_free_space_passes_when_sufficient(tmp_path: Path):
 
 
 def test_check_recent_backup_skips_when_not_required():
-    check_recent_backup(PolicyRule(require_backup=False), archives=[], now=0)
+    check_recent_backup(PolicyRule(require_backup=False), archive_created_at={}, now=0)
 
 
 def test_check_recent_backup_raises_when_no_archives():
     with pytest.raises(PolicyViolation):
-        check_recent_backup(PolicyRule(require_backup=True), archives=[], now=1_700_000_000)
+        check_recent_backup(PolicyRule(require_backup=True), archive_created_at={}, now=1_700_000_000)
 
 
 def test_check_recent_backup_passes_within_max_age():
     now = 1_700_100_000
-    import datetime as dt
-
-    fresh = dt.datetime.fromtimestamp(now - 3600, tz=dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     rule = PolicyRule(require_backup=True, max_backup_age_seconds=86400)
-    check_recent_backup(rule, archives=[fresh], now=now)
+    check_recent_backup(rule, archive_created_at={"20260901-000000": now - 3600}, now=now)
 
 
 def test_check_recent_backup_raises_when_too_old():
     now = 1_700_100_000
-    import datetime as dt
-
-    stale = dt.datetime.fromtimestamp(now - 2 * 86400, tz=dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     rule = PolicyRule(require_backup=True, max_backup_age_seconds=86400)
     with pytest.raises(PolicyViolation):
-        check_recent_backup(rule, archives=[stale], now=now)
+        check_recent_backup(rule, archive_created_at={"20260801-000000": now - 2 * 86400}, now=now)
+
+
+def test_check_recent_backup_passes_for_a_pre_upgrade_named_archive():
+    # Regression: yunohost's own automatic pre-upgrade safety backup is
+    # always named "<app>-pre-upgrade1"/"<app>-pre-upgrade2" - never a
+    # YYYYMMDD-HHMMSS timestamp. An earlier version of this check parsed
+    # dates from archive *names* and could never recognize this as
+    # "recent", making apps.upgrade's own safety backup insufficient to
+    # satisfy its own policy. archive_created_at (real info.json
+    # metadata, not the name) must not have that blind spot.
+    now = 1_700_100_000
+    rule = PolicyRule(require_backup=True, max_backup_age_seconds=86400)
+    check_recent_backup(rule, archive_created_at={"nextcloud-pre-upgrade2": now - 60}, now=now)
+
+
+def test_check_recent_backup_uses_the_newest_of_several_archives():
+    now = 1_700_100_000
+    rule = PolicyRule(require_backup=True, max_backup_age_seconds=86400)
+    check_recent_backup(
+        rule,
+        archive_created_at={
+            "nextcloud-pre-upgrade1": now - 30 * 86400,  # stale
+            "mcp-test-backup": now - 60,  # recent
+        },
+        now=now,
+    )

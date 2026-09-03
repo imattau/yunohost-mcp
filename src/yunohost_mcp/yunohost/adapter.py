@@ -330,6 +330,34 @@ class YunohostAdapter:
         backup_list = _import_attr("yunohost.backup", "backup_list")
         return {"fake": False, **backup_list()}
 
+    def backup_created_at_times(self) -> dict[str, float]:
+        """Real per-archive creation time (unix timestamp), keyed by
+        archive name - for policy/rules.py's check_recent_backup.
+
+        Deliberately NOT derived from the archive *name*: only an
+        unnamed backup_create() call produces a YYYYMMDD-HHMMSS name
+        (yunohost.backup.BackupManager._define_backup_name()) - a custom
+        `name` (this adapter's own backup_create() accepts one) doesn't,
+        and critically, neither does yunohost's own automatic pre-upgrade
+        safety backup, always named "<app>-pre-upgrade1"/
+        "<app>-pre-upgrade2" (see yunohost/app.py's app_upgrade()) -
+        making name-based date parsing unable to recognize the single
+        most common kind of "recent backup" this check exists to verify.
+        backup_list(with_info=True)'s "created_at" (read from each
+        archive's info.json, independent of naming) is correct instead.
+        """
+        import datetime as _dt
+
+        if self.settings.fake_yunohost:
+            return {"20260901-000000": _dt.datetime(2026, 9, 1, tzinfo=_dt.timezone.utc).timestamp()}
+        backup_list = _import_attr("yunohost.backup", "backup_list")
+        archives = backup_list(with_info=True).get("archives", {})
+        return {
+            name: meta["created_at"].replace(tzinfo=_dt.timezone.utc).timestamp()
+            for name, meta in archives.items()
+            if isinstance(meta, dict) and "created_at" in meta
+        }
+
     def operations_list(self, limit: int | None = None) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {

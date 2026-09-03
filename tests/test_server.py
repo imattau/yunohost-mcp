@@ -430,6 +430,56 @@ async def test_phase6_app_remove_blocked_by_stale_backup_policy():
 
 
 @pytest.mark.anyio
+async def test_policy_violation_surfaces_its_real_message_not_a_generic_crash():
+    # Regression: PolicyViolation (and ScopeError, ConfirmationError) used
+    # to propagate as a raw, unrecognized exception - the MCP SDK then
+    # reported only a generic "Error executing tool X" with no indication
+    # of *why*, indistinguishable from a genuine server crash, diagnosable
+    # only by reading this server's own systemd journal. See
+    # policy/enforcement.py's translate_known_errors.
+    async with Client(mcp) as client:
+        result = await client.call_tool("app_remove", {"app": "nextcloud"})
+        assert result.is_error is True
+        assert "policy requires one within" in str(result.content)
+
+
+@pytest.mark.anyio
+async def test_scope_denial_surfaces_its_real_message_not_a_generic_crash():
+    no_scopes = AuthenticatedRequest(
+        pubkey="deadbeef",
+        event_id="e" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(pubkey="deadbeef", name="no-roles", roles=(), scopes=scopes_for_roles(())),
+    )
+    set_current_request(no_scopes)
+    async with Client(mcp) as client:
+        result = await client.call_tool("apps_list", {})
+        assert result.is_error is True
+        assert "lacks required scope" in str(result.content)
+
+
+@pytest.mark.anyio
+async def test_execute_plan_policy_violation_surfaces_its_real_message(monkeypatch: pytest.MonkeyPatch):
+    # execute_plan re-checks apps.upgrade policy directly in its own body
+    # (state may have drifted since plan_app_upgrade), not through
+    # @require_confirmation's own `checks=` mechanism - translate_known_errors
+    # must still catch it, since it wraps the whole tool body.
+    from yunohost_mcp import server as server_module
+
+    async with Client(mcp) as client:
+        plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})
+        plan_id = plan.structured_content["plan_id"]
+
+        def now_blocked(*args, **kwargs):
+            raise server_module.PolicyViolation("newest backup is too old")
+
+        monkeypatch.setattr(server_module, "check_recent_backup", now_blocked)
+        result = await client.call_tool("execute_plan", {"plan_id": plan_id})
+        assert result.is_error is True
+        assert "newest backup is too old" in str(result.content)
+
+
+@pytest.mark.anyio
 async def test_phase7_plan_then_execute_upgrades_the_app():
     async with Client(mcp) as client:
         plan = await client.call_tool("plan_app_upgrade", {"app": "nextcloud"})

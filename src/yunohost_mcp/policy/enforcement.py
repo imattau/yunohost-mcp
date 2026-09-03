@@ -21,6 +21,26 @@ confirmation_id raises rather than executing, telling the caller to route
 it through approve_operation() (a different identity, Scope.OWNER_APPROVE)
 first - the ticket itself is left pending, not consumed, so this is safe
 to retry once approved.
+
+@translate_known_errors: converts this module's own known, expected
+exceptions (ScopeError, PolicyViolation, a ConfirmationError that escapes
+the "issue a new ticket" branch above) into
+mcp.server.mcpserver.exceptions.ToolError, so a caller/model actually sees
+*why* a call was blocked - "'readonly-agent' lacks required scope
+'apps.upgrade'", say - instead of the MCP SDK's generic, message-less
+"Error executing tool X" it falls back to for any exception type it
+doesn't recognize as ToolError/MCPError (see upstream
+docs/servers/handling-errors.md: raise anything else and "the model
+learns only that the call failed, and your log gets the traceback").
+Without this, every one of these expected conditions was indistinguishable
+from a genuine server crash to callers, diagnosable only by reading this
+server's own systemd journal. Apply it directly alongside
+@redact_response (see that decorator's own docstring for why it must stay
+immediately under @mcp.tool()) so it sees whatever bubbles up from every
+other decorator *and* the tool body itself - including a check called
+directly in a tool's own body (e.g. execute_plan re-checking apps.upgrade
+policy at execute time) rather than through @require_confirmation's own
+`checks=` mechanism.
 """
 
 from __future__ import annotations
@@ -29,9 +49,11 @@ import functools
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 from yunohost_mcp.auth.identity import require_current_request
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
-from yunohost_mcp.policy.rules import PolicyRule
+from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation
 from yunohost_mcp.policy.scopes import Scope
 
 F = TypeVar("F", bound=Callable)
@@ -107,3 +129,21 @@ def require_confirmation(
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+_KNOWN_EXPECTED_ERRORS = (ScopeError, PolicyViolation, ConfirmationError)
+
+
+def translate_known_errors(fn: F) -> F:
+    """See this module's docstring. Convert ScopeError/PolicyViolation/
+    ConfirmationError into ToolError so the caller sees why, not just that,
+    a call failed."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except _KNOWN_EXPECTED_ERRORS as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper  # type: ignore[return-value]
