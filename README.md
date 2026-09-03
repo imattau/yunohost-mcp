@@ -88,4 +88,5 @@ uv run pytest -q
 Maintainers can run the GitHub Actions **Tag release** workflow manually from
 the branch or commit to release, providing a version without the `v` prefix
 (for example, `0.1.1`). It validates the version, refuses to overwrite an
-existing tag, and pushes an annotated `v<version>` tag.
+existing tag, runs the full CI checks on Python 3.11 and 3.12, and only then
+pushes an annotated `v<version>` tag.

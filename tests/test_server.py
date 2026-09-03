@@ -43,6 +43,7 @@ PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app"
 PHASE4_TOOLS = {
     "apps_list",
     "app_info",
+    "app_resources",
     "diagnosis_run",
     "diagnosis_get",
     "services_list",
@@ -112,6 +113,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
     [
         ("apps_list", {}),
         ("app_info", {"app": "nextcloud"}),
+        ("app_resources", {"app": "nextcloud"}),
         ("diagnosis_run", {}),
         ("diagnosis_get", {}),
         ("services_list", {}),

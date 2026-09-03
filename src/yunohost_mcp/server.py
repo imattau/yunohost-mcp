@@ -199,6 +199,14 @@ def app_info(app: str, full: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @redact_response
+@require_scope(Scope.APPS_READ)
+def app_resources(app: str) -> dict[str, Any]:
+    """Return the declared YunoHost resources for one installed app."""
+    return adapter.app_resources(app)
+
+
+@mcp.tool()
+@redact_response
 @require_scope(Scope.DIAGNOSIS_READ)
 def diagnosis_run(categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
     """Trigger a fresh YunoHost diagnosis run. Can take real time (network/port checks)."""

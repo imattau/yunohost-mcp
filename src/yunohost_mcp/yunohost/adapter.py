@@ -105,6 +105,15 @@ class YunohostAdapter:
         app_info = _import_attr("yunohost.app", "app_info")
         return {"fake": False, **app_info(app, full=full)}
 
+    def app_resources(self, app: str) -> dict[str, Any]:
+        """Return the resource declarations exposed by an app manifest."""
+        info = self.app_info(app, full=True)
+        manifest = info.get("manifest") or {}
+        resources = manifest.get("resources")
+        if resources is None:
+            resources = info.get("resources", {})
+        return {"fake": self.settings.fake_yunohost, "app": app, "resources": resources}
+
     def diagnosis_run(self, categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "categories_run": categories or ["ip", "dnsrecords", "services"]}

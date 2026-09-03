@@ -29,6 +29,13 @@ def test_app_info_full_adds_settings():
     assert "settings" in full
 
 
+def test_app_resources_returns_declared_resources():
+    result = make_adapter().app_resources("nextcloud")
+    assert result["fake"] is True
+    assert result["app"] == "nextcloud"
+    assert isinstance(result["resources"], dict)
+
+
 def test_diagnosis_run_and_get():
     adapter = make_adapter()
     run_result = adapter.diagnosis_run(categories=["ip"])
