@@ -48,6 +48,7 @@ _PACKAGE_DEVELOPER: frozenset[Scope] = _READONLY | {
     Scope.APPS_REMOVE,
     Scope.BACKUPS_CREATE,
     Scope.CATALOG_PUBLISH,
+    Scope.DOMAINS_WRITE,
 }
 
 _ADMINISTRATOR: frozenset[Scope] = ALL_SCOPES
