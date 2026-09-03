@@ -661,6 +661,8 @@ Potential candidates:
 
 This could later work with a Nostr remote signer rather than requiring the owner's private key on the AI machine.
 
+**Status (v1, `solo` profile):** implemented. A single configured owner (`auth/owner.py`) approves via a NIP-98-signed `approve_operation` call, checked against `ConfirmationStore`'s `operation_hash`-bound ticket (`policy/confirmation.py`); `approval_get`/`approval_status` (server.py) expose the authoritative pending record; `yunohost-mcp-approve` (`approve.py`) is the NIP-46 remote-signer client - the owner's private key never touches this AI machine or the MCP server, only the paired remote signer app. An optional, non-authoritative NIP-17 notification (`notify.py`) can nudge the owner when one is pending. `household`/`team`/`strict` multi-owner profiles are deliberately deferred past v1 - see the packaging repo's `docs/owner-approval-plan.md` for the full design and what's still out of scope.
+
 ---
 
 ## Phase 14: high-level agent workflows

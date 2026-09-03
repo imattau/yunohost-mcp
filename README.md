@@ -21,8 +21,8 @@ Once published, install the Python package with:
 python3 -m pip install yunohost-mcp-connect
 ```
 
-This installs `yunohost-mcp`, `yunohost-mcp-connect`, and
-`yunohost-mcp-delegate`. For an isolated command-line installation, use:
+This installs `yunohost-mcp`, `yunohost-mcp-connect`, `yunohost-mcp-delegate`,
+and `yunohost-mcp-approve`. For an isolated command-line installation, use:
 
 ```bash
 uv tool install yunohost-mcp-connect
@@ -102,6 +102,26 @@ yunohost-mcp-delegate --key-file ~/.config/yunohost-mcp/key \
 - `--scope`/`--role` (repeatable, combinable) choose what to grant; `--ttl` (e.g. `24h`, `7d`) how long — the server rejects anything over 30 days.
 - The output is a signed delegation event: a bearer credential once issued. Hand the file to the agent to use with `yunohost-mcp-connect --delegation-file agent-delegation.json`, over a channel you trust (the same as you'd hand over an API key).
 - To take a delegation back before it expires, add its `id` (printed after signing) to `revoked_delegations.toml` — this is independent of, and finer-grained than, removing the delegator's own `identity.toml` entry (which revokes every delegation they've ever issued).
+
+## Approving high-risk operations: yunohost-mcp-approve
+
+Some operations (`system_upgrade`, `backup_restore`, `system_migrate`, `user_delete`, permission changes, firewall changes) require owner co-signature on top of the requester's own confirmation (PLAN.md Phase 13, `solo` profile - see `docs/owner-approval-plan.md` in the packaging repo for the full design). The requester's call pauses with a `confirmation_id`; the configured owner reviews and approves it with `yunohost-mcp-approve`, signing through their own [NIP-46](https://nips.nostr.com/46) remote signer app (Amber, nsec.app, ...) - their private key never touches this server or the requesting agent's machine.
+
+One-time setup, on whatever device the owner keeps their signer app on:
+
+```
+yunohost-mcp-approve pair
+```
+
+Prints a `nostrconnect://` URI (and a QR code, if the optional `qrcode` package is installed - `pip install 'yunohost-mcp-connect[approve-qr]'`) to open in the signer app. This persists a reconnectable session locally so later approvals don't need to re-pair.
+
+To review and approve a specific pending operation:
+
+```
+yunohost-mcp-approve approve --server https://your-yunohost-domain/mcp --confirmation-id confirm-...
+```
+
+This fetches the authoritative pending-operation record from the server (never trusts a locally-supplied plan), displays the exact tool, arguments, and `operation_hash`, and requires typing `yes` before submitting the signed approval. Once approved, the original requester can retry its call.
 
 ## Development
 
