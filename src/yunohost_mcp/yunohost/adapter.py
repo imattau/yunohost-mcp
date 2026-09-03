@@ -255,7 +255,12 @@ class YunohostAdapter:
             }
         backup_create = _import_attr("yunohost.backup", "backup_create")
         result = backup_create(name=name, description=description, apps=apps or [], system=system or [])
-        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+        # backup_create()'s own return is {"name": ..., "size": ..., "results": ...}
+        # (real archive name, possibly auto-generated if `name` was None) -
+        # surfaced at the top level here too so callers (package_run_tests
+        # included) get a consistent "name" field regardless of fake/real mode.
+        archive_name = result.get("name", name) if isinstance(result, dict) else name
+        return {"fake": False, "operation_id": _latest_operation_id(), "name": archive_name, "result": result}
 
     def app_install(
         self,
@@ -270,15 +275,21 @@ class YunohostAdapter:
         result = app_install(app, label=label, args=args, force=force)
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
-    def app_upgrade(self, app: str | list[str] | None = None, force: bool = False) -> dict[str, Any]:
+    def app_upgrade(
+        self, app: str | list[str] | None = None, force: bool = False, file: str | None = None
+    ) -> dict[str, Any]:
         if self.settings.fake_yunohost:
-            return {"fake": True, "app": app, "result": "success"}
+            return {"fake": True, "app": app, "file": file, "result": "success"}
         # app_upgrade() is not @is_unit_operation-decorated; it builds its
         # own OperationLogger internally, once per app it actually
         # upgrades, so there's no single id to hand back for a multi-app
         # call - the per-app result dict plus operations_list() cover it.
+        # `file` (a local folder or tarball) is what package_upgrade_test
+        # uses to upgrade an already-installed app from a candidate source
+        # instead of the catalog - app_upgrade() only accepts a single app
+        # when file/url is given (PHASE0-style check of the real source).
         app_upgrade = _import_attr("yunohost.app", "app_upgrade")
-        result = app_upgrade(app=app or [], force=force)
+        result = app_upgrade(app=app or [], force=force, file=file)
         return {"fake": False, "app": app, "result": result}
 
     def app_remove(self, app: str, purge: bool = False) -> dict[str, Any]:
@@ -309,6 +320,156 @@ class YunohostAdapter:
         tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
         result = tools_upgrade(target="system")
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+
+    def app_change_url(self, app: str, domain: str, path: str) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-app_change_url", "app": app}
+        # @is_unit_operation-decorated (verified against /tmp/yunohost-src
+        # directly, per the Errata in PHASE0_INVESTIGATION.md) - no
+        # operation_logger passed here either.
+        app_change_url = _import_attr("yunohost.app", "app_change_url")
+        result = app_change_url(app, domain, path)
+        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
+
+    # -- Phase 8: package development -------------------------------------
+    #
+    # `source` throughout is whatever app_manifest()/app_install() already
+    # accept natively - an app id (catalog), a local path, or a git URL
+    # (PHASE0's "Name, local path or git URL of the app" from app_install's
+    # own docstring) - there is no separate "candidate package" concept to
+    # invent here, matching PLAN.md's "do not duplicate YunoHost's own
+    # package/resource management where its API already provides it".
+
+    def package_inspect(self, source: str) -> dict[str, Any]:
+        """Manifest + declared resources for a candidate package, without
+        installing it - app_manifest() already does exactly this (accepts a
+        local path or git URL, not just a catalog id), so no separate
+        parsing of manifest.toml is needed here."""
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "id": "example",
+                "packaging_format": 2,
+                "resources": {"system_user": {}, "install_dir": {}, "permissions": {}},
+                "unknown_resource_types": [],
+            }
+        app_manifest = _import_attr("yunohost.app", "app_manifest")
+        manifest = app_manifest(source)
+        resources = manifest.get("resources", {})
+        try:
+            known_types = set(_import_attr("yunohost.utils.resources", "AppResourceClassesByType").keys())
+            unknown = sorted(set(resources.keys()) - known_types)
+        except YunohostUnavailableError:
+            unknown = []
+        return {"fake": False, **manifest, "unknown_resource_types": unknown}
+
+    def package_lint(self, source: str) -> dict[str, Any]:
+        """Run github.com/YunoHost/package_linter against `source` (a local
+        path). Separate upstream tool, not part of yunohost core - see
+        Settings.package_linter_path. Returns unavailable=True (not fake
+        data, not an error) when it isn't configured, since there's no
+        in-process equivalent to fall back to."""
+        if self.settings.fake_yunohost:
+            return {"fake": True, "passed": True, "success": [], "info": [], "warning": [], "error": [], "critical": []}
+        if self.settings.package_linter_path is None:
+            return {"fake": False, "unavailable": True, "reason": "package_linter_path not configured"}
+
+        import json
+        import subprocess
+
+        linter_script = self.settings.package_linter_path / "package_linter.py"
+        proc = subprocess.run(
+            [self.settings.package_linter_python, str(linter_script), source, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=self.settings.package_linter_timeout_seconds,
+            cwd=self.settings.package_linter_path,
+        )
+        try:
+            report = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise YunohostUnavailableError(
+                f"package_linter produced non-JSON output (exit {proc.returncode}): {proc.stderr[-2000:]}"
+            ) from exc
+        passed = not report.get("error") and not report.get("critical")
+        return {"fake": False, "passed": passed, **report}
+
+    def package_install_test(self, source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
+        """app_install() already accepts a local path/git URL as `source` -
+        force=True so an experimental/low-quality-flagged candidate package
+        doesn't get stuck on the confirmation prompt real install would show
+        interactively; that prompt exists for end users installing from the
+        catalog, not for a developer iterating on their own package."""
+        return self.app_install(source, label=label, args=args, force=True)
+
+    def package_upgrade_test(self, app: str, source: str) -> dict[str, Any]:
+        """Upgrade an already-installed `app` from a candidate `source`
+        (local path/tarball) instead of the catalog."""
+        return self.app_upgrade(app=app, file=source, force=True)
+
+    def package_backup_test(self, app: str) -> dict[str, Any]:
+        return self.backup_create(name=f"package-test-{app}", apps=[app])
+
+    def package_restore_test(self, app: str, archive_name: str) -> dict[str, Any]:
+        return self.backup_restore(archive_name, apps=[app], force=True)
+
+    def package_change_url_test(self, app: str, domain: str, path: str) -> dict[str, Any]:
+        return self.app_change_url(app, domain, path)
+
+    def package_remove_test(self, app: str, purge: bool = True) -> dict[str, Any]:
+        return self.app_remove(app, purge=purge)
+
+    def package_run_tests(self, source: str, app_id: str | None = None) -> dict[str, Any]:
+        """Run the standard install -> backup -> remove -> restore -> remove
+        cycle against `source` in one call (PLAN.md Phase 8's "removes the
+        human copy/paste loop"). This is deliberately lighter than
+        github.com/YunoHost/package_check's full test matrix (multiple
+        Debian versions, LXC isolation, etc.) - that tool exists for CI
+        against the whole app catalog; this runs once, directly against the
+        live YunoHost this MCP server manages, for a developer's fast local
+        iteration loop. Stops at the first failing step (each subsequent
+        step depends on the previous one having actually happened) and
+        always attempts a final cleanup removal if install succeeded.
+        """
+        steps: list[dict[str, Any]] = []
+
+        def run_step(name: str, fn, *args, **kwargs) -> bool:
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the whole run
+                steps.append({"step": name, "passed": False, "error": str(exc)})
+                return False
+            steps.append({"step": name, "passed": True, "result": result})
+            return True
+
+        # Determine the app instance id from the manifest *before*
+        # installing - app_install()'s own return value doesn't reliably
+        # carry it back (real-mode app_install() has no "app" key at all;
+        # see its adapter method above), and `source` itself is a path/URL,
+        # not the id YunoHost will register the app under.
+        installed_app_id = app_id or self.package_inspect(source).get("id") or source
+        if isinstance(installed_app_id, list):
+            installed_app_id = installed_app_id[0]
+
+        if not run_step("install", self.package_install_test, source):
+            return {"fake": self.settings.fake_yunohost, "passed": False, "steps": steps}
+
+        backup_ok = run_step("backup", self.package_backup_test, installed_app_id)
+        archive_name = steps[-1]["result"].get("name") if backup_ok else None
+
+        remove_ok = run_step("remove", self.package_remove_test, installed_app_id, True)
+
+        restore_ok = False
+        if backup_ok and remove_ok and archive_name:
+            restore_ok = run_step("restore", self.package_restore_test, installed_app_id, archive_name)
+
+        # Final cleanup: if restore re-installed the app, remove it again so
+        # this doesn't leave test apps behind on the server either way.
+        if restore_ok:
+            run_step("cleanup_remove", self.package_remove_test, installed_app_id, True)
+
+        passed = all(step["passed"] for step in steps)
+        return {"fake": self.settings.fake_yunohost, "passed": passed, "steps": steps}
 
 
 def _latest_operation_id() -> str | None:

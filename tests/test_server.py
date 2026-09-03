@@ -23,6 +23,18 @@ from yunohost_mcp.server import audit_log, mcp
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
 PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
+PHASE8_TOOLS = {
+    "package_inspect",
+    "package_lint",
+    "package_install_test",
+    "package_upgrade_test",
+    "package_backup_test",
+    "package_restore_test",
+    "package_change_url_test",
+    "package_remove_test",
+    "package_logs",
+    "package_run_tests",
+}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -53,7 +65,14 @@ async def test_list_tools_exposes_all_v01_read_tools():
     async with Client(mcp) as client:
         result = await client.list_tools()
         names = {tool.name for tool in result.tools}
-        expected = {"server_info", "health_check", "whoami"} | PHASE4_TOOLS | PHASE5_WRITE_TOOLS | PHASE6_WRITE_TOOLS | PHASE7_TOOLS
+        expected = (
+            {"server_info", "health_check", "whoami"}
+            | PHASE4_TOOLS
+            | PHASE5_WRITE_TOOLS
+            | PHASE6_WRITE_TOOLS
+            | PHASE7_TOOLS
+            | PHASE8_TOOLS
+        )
         assert expected <= names
 
 
@@ -249,6 +268,79 @@ async def test_phase6_write_tool_denied_for_identity_without_scope():
     async with Client(mcp) as client:
         result = await client.call_tool("system_upgrade", {})
         assert result.is_error is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("package_inspect", {"source": "/tmp/example_ynh"}),
+        ("package_lint", {"source": "/tmp/example_ynh"}),
+        ("package_install_test", {"source": "/tmp/example_ynh"}),
+        ("package_upgrade_test", {"app": "example", "source": "/tmp/example_ynh"}),
+        ("package_backup_test", {"app": "example"}),
+        ("package_restore_test", {"app": "example", "archive_name": "package-test-example"}),
+        ("package_change_url_test", {"app": "example", "domain": "new.example.com", "path": "/"}),
+        ("package_remove_test", {"app": "example"}),
+        ("package_logs", {"operation": "20260901-120000-app_install"}),
+        ("package_run_tests", {"source": "/tmp/example_ynh"}),
+    ],
+)
+async def test_phase8_package_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
+    async with Client(mcp) as client:
+        result = await client.call_tool(tool, args)
+        assert result.is_error is not True, result.content
+        assert result.structured_content is not None
+        assert result.structured_content.get("fake") is True
+
+
+@pytest.mark.anyio
+async def test_phase8_package_run_tests_writes_one_audit_entry_for_the_whole_cycle():
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    async with Client(mcp) as client:
+        result = await client.call_tool("package_run_tests", {"source": "/tmp/example_ynh"})
+        assert result.is_error is not True
+        assert result.structured_content["passed"] is True
+
+    new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["tool"] == "packages.test"
+    assert entry["result"] == "success"
+
+
+@pytest.mark.anyio
+async def test_phase8_package_test_tool_denied_for_identity_without_scope():
+    no_scopes = AuthenticatedRequest(
+        pubkey="deadbeef",
+        event_id="e" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(pubkey="deadbeef", name="no-roles", roles=(), scopes=scopes_for_roles(())),
+    )
+    set_current_request(no_scopes)
+    async with Client(mcp) as client:
+        result = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase8_package_developer_role_can_test_but_not_administer():
+    developer = AuthenticatedRequest(
+        pubkey="feedface",
+        event_id="f" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="feedface", name="dev-agent", roles=("package-developer",), scopes=scopes_for_roles(("package-developer",))
+        ),
+    )
+    set_current_request(developer)
+    async with Client(mcp) as client:
+        install = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh"})
+        assert install.is_error is not True, install.content
+
+        # package-developer does not grant system.upgrade.
+        denied = await client.call_tool("system_upgrade", {})
+        assert denied.is_error is True
 
 
 @pytest.mark.anyio

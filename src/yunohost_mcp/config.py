@@ -36,6 +36,20 @@ class Settings(BaseSettings):
     # Confirmation tickets (Phase 6) expire after this long if unused.
     confirmation_ttl_seconds: int = 300
 
+    # Path to a local checkout of github.com/YunoHost/package_linter
+    # (package_linter.py at its root). package_lint() is unavailable (not
+    # faked, not silently skipped) when this is None - linting is optional
+    # tooling, not part of yunohost core, so there's no in-process fallback
+    # to reach for the way fake_yunohost covers yunohost.* itself.
+    package_linter_path: Path | None = None
+    package_linter_timeout_seconds: int = 120
+    # An interpreter with package_linter's own deps (jsonschema, toml,
+    # packaging, pyparsing) installed - its own venv, typically, not
+    # whatever "python3" happens to resolve to on this process's PATH
+    # (which, run via `uv run`, is yunohost-mcp's own isolated venv and
+    # does NOT have them). An absolute path avoids PATH ambiguity entirely.
+    package_linter_python: str = "python3"
+
     def identity_file_path(self) -> Path:
         """pubkey -> role mapping (Phase 3). A missing file means an empty
         store: deny-by-default, not fail-open."""

@@ -25,6 +25,15 @@ workflow), reusing the same one-shot ticket primitive as Phase 6's
 confirmations (policy/confirmation.py's ConfirmationStore) but in its own
 namespace (plan_store, not confirmation_store) since a plan_id and a
 confirmation_id serve related but distinct purposes.
+Phase 8: package-development tools (v0.3) - package_inspect/package_lint
+(read-only, packages.read... packages.inspect) and package_install_test/
+package_upgrade_test/package_backup_test/package_restore_test/
+package_change_url_test/package_remove_test/package_run_tests (writes,
+packages.test), all operating on a local path/git URL rather than the app
+catalog. No confirmation step: this scope exists specifically for a fast
+dev-iteration loop, so friction is scope (who may call these at all, i.e.
+the package-developer role) rather than a per-call confirmation - see
+yunohost/adapter.py's Phase 8 section for why.
 """
 
 from __future__ import annotations
@@ -326,6 +335,97 @@ def backup_restore(
 def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
     """Upgrade system (OS-level) packages. Requires confirmation."""
     return adapter.system_upgrade()
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_INSPECT)
+def package_inspect(source: str) -> dict[str, Any]:
+    """Return the manifest and declared resources for a candidate package.
+
+    `source` is a local path or git URL (not the app catalog) - does not
+    install anything.
+    """
+    return adapter.package_inspect(source)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_INSPECT)
+def package_lint(source: str) -> dict[str, Any]:
+    """Run the upstream package_linter against a local package path.
+
+    Returns {"unavailable": true} rather than an error if no
+    package_linter checkout is configured (YUNOHOST_MCP_PACKAGE_LINTER_PATH)
+    - it's optional tooling, not part of yunohost core.
+    """
+    return adapter.package_lint(source)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_install_test(source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
+    """Install a candidate package from a local path/git URL, for testing."""
+    return adapter.package_install_test(source, label=label, args=args)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_upgrade_test(app: str, source: str) -> dict[str, Any]:
+    """Upgrade an already-installed `app` from a candidate local path/tarball, for testing."""
+    return adapter.package_upgrade_test(app, source)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_backup_test(app: str) -> dict[str, Any]:
+    """Create a backup of an installed test app, to verify its backup script works."""
+    return adapter.package_backup_test(app)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_restore_test(app: str, archive_name: str) -> dict[str, Any]:
+    """Restore a test app from a backup archive, to verify its restore script works."""
+    return adapter.package_restore_test(app, archive_name)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_change_url_test(app: str, domain: str, path: str) -> dict[str, Any]:
+    """Move a test app to a new domain/path, to verify its change_url script works."""
+    return adapter.package_change_url_test(app, domain, path)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_remove_test(app: str, purge: bool = True) -> dict[str, Any]:
+    """Remove a test app, to verify its remove script works. Purges data by default."""
+    return adapter.package_remove_test(app, purge=purge)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_INSPECT)
+def package_logs(operation: str) -> dict[str, Any]:
+    """Return the full log for one operation - an alias over operation_logs()
+    for the package-development workflow (PLAN.md Phase 8)."""
+    return adapter.operation_logs(operation)
+
+
+@mcp.tool()
+@require_scope(Scope.PACKAGES_TEST)
+@audited_write("packages.test", lock=write_lock, audit_log=audit_log)
+def package_run_tests(source: str, app_id: str | None = None) -> dict[str, Any]:
+    """Run the standard install -> backup -> remove -> restore -> remove
+    cycle against a candidate package in one call. Stops at the first
+    failing step; see yunohost/adapter.py's package_run_tests for exactly
+    what each step does and why this isn't package_check's full CI matrix.
+    """
+    return adapter.package_run_tests(source, app_id=app_id)
 
 
 @mcp.tool()
