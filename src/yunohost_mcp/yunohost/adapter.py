@@ -41,33 +41,60 @@ class YunohostUnavailableError(RuntimeError):
 _i18n_initialized = False
 
 
-def _ensure_i18n_initialized() -> None:
-    """Initialize moulinette's i18n before any real yunohost.* call.
+class _HeadlessInterface:
+    """Stand-in for a real moulinette Interface (Cli/Api).
 
-    Several yunohost.* modules (e.g. yunohost.service) call into
-    m18n.key_exists()/m18n.n(), but m18n.translator is only set up by
-    moulinette.cli()/moulinette.api() - the normal CLI/API bootstrap this
+    Only `.type` is used by yunohost.* outside of an actual request/response
+    cycle (e.g. diagnosis.py's m18n_ formatter branches on
+    `Moulinette.interface.type` to decide whether to strip CLI-oriented HTML
+    tags from messages) - "api" keeps that HTML intact, which is more useful
+    to an MCP client than CLI-stripped text.
+    """
+
+    type = "api"
+
+
+def _ensure_i18n_initialized() -> None:
+    """Initialize moulinette's i18n and interface before any real yunohost.* call.
+
+    Several yunohost.* modules (e.g. yunohost.service, yunohost.diagnosis)
+    reach into moulinette state - m18n.key_exists()/m18n.n() need
+    m18n.translator, and diagnosis.py's message formatting needs
+    Moulinette.interface.type - but both are only set up by
+    moulinette.cli()/moulinette.api(), the normal CLI/API bootstrap this
     adapter deliberately bypasses by importing yunohost.* directly
-    in-process (see module docstring). Skipping this raises
-    AttributeError: 'Moulinette18n' object has no attribute 'translator'
-    the first time a call happens to touch m18n. yunohost.init_i18n() is
-    yunohost's own documented hook for exactly this "in-process, not via
-    moulinette.cli" scenario.
+    in-process (see module docstring). Skipping this raises, respectively:
+      AttributeError: 'Moulinette18n' object has no attribute 'translator'
+      AttributeError: 'NoneType' object has no attribute 'type'
+    the first time a call happens to touch either. yunohost.init_i18n() is
+    yunohost's own documented hook for the m18n half of this, for exactly
+    this "in-process, not via moulinette.cli" scenario; there's no
+    equivalent upstream hook for Moulinette.interface, so it's set directly
+    here.
     """
     global _i18n_initialized
     if _i18n_initialized:
         return
     _i18n_initialized = True
+    # Each import/init below is independent - and best-effort via ImportError
+    # - so a missing `moulinette` package (or a `yunohost` one) doesn't skip
+    # the other, and neither blocks the caller's own import of the target
+    # module/attr, which raises YunohostUnavailableError if it's the real
+    # one that's actually missing (e.g. adapter tests inject fake
+    # yunohost.* submodules straight into sys.modules without a real
+    # top-level yunohost/moulinette package).
     try:
         from yunohost import init_i18n
     except ImportError:
-        # No real top-level `yunohost` package (e.g. adapter tests inject
-        # fake yunohost.* submodules straight into sys.modules without one)
-        # - nothing to initialize. Let the caller's own import of the
-        # target module/attr raise YunohostUnavailableError if it's the
-        # real one that's actually missing.
+        pass
+    else:
+        init_i18n()
+    try:
+        from moulinette import Moulinette
+    except ImportError:
         return
-    init_i18n()
+    if Moulinette.interface is None:
+        Moulinette._interface = _HeadlessInterface()
 
 
 def _import_attr(module_name: str, attr: str) -> Any:
