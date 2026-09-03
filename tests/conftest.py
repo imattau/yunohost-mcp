@@ -10,3 +10,6 @@ import os
 import tempfile
 
 os.environ.setdefault("YUNOHOST_MCP_CONFIG_DIR", tempfile.mkdtemp(prefix="yunohost-mcp-test-"))
+# Tests run on hosts without YunoHost installed; fake mode is an explicit
+# test fixture now that production correctly defaults to real mode.
+os.environ.setdefault("YUNOHOST_MCP_FAKE_YUNOHOST", "true")
