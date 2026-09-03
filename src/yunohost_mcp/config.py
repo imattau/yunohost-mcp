@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     nip98_clock_skew_seconds: int = 60
     nip98_replay_ttl_seconds: int = 300
 
+    # Confirmation tickets (Phase 6) expire after this long if unused.
+    confirmation_ttl_seconds: int = 300
+
     def identity_file_path(self) -> Path:
         """pubkey -> role mapping (Phase 3). A missing file means an empty
         store: deny-by-default, not fail-open."""
@@ -41,6 +44,12 @@ class Settings(BaseSettings):
     def audit_log_path(self) -> Path:
         """JSON-lines audit trail for write tools (Phase 5/10). Created on first write."""
         return self.config_dir / "audit.jsonl"
+
+    def policy_file_path(self) -> Path:
+        """Safeguard overrides (Phase 6). A missing file means the built-in
+        defaults in policy/rules.py apply unmodified - a safety floor, not
+        an opt-in feature."""
+        return self.config_dir / "policy.toml"
 
 
 def load_settings() -> Settings:

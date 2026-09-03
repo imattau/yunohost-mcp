@@ -54,13 +54,22 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
                 )
                 raise
 
-            operation_id = result.get("operation_id") if isinstance(result, dict) else None
+            if isinstance(result, dict) and result.get("confirmation_required"):
+                # A plan was issued, nothing in YunoHost changed - distinct
+                # from "success" so the audit trail doesn't imply a write
+                # happened when it didn't (PLAN.md Phase 6's confirmation
+                # model; policy/enforcement.py's require_confirmation).
+                outcome, operation_id = "confirmation_pending", None
+            else:
+                outcome = "success"
+                operation_id = result.get("operation_id") if isinstance(result, dict) else None
+
             audit_log.record(
                 tool=tool_name,
                 arguments=kwargs,
                 caller_pubkey=caller,
                 decision="allowed",
-                result="success",
+                result=outcome,
                 yunohost_operation=operation_id,
             )
             return result

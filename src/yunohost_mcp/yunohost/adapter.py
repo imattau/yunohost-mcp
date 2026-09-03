@@ -269,6 +269,49 @@ class YunohostAdapter:
         result = app_upgrade(app=app or [], force=force)
         return {"fake": False, "app": app, "result": result}
 
+    # -- Phase 6: destructive writes, gated by policy/confirmation -------
+
+    def app_remove(self, app: str, purge: bool = False) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-app_remove", "app": app, "purged": purge}
+        app_remove = _import_attr("yunohost.app", "app_remove")
+        operation_logger = _new_operation_logger("app_remove", related_to=[("app", app)])
+        try:
+            result = app_remove(operation_logger, app, purge=purge)
+        except Exception as exc:
+            _try_close_with_error(operation_logger, exc)
+            raise
+        return {"fake": False, "operation_id": operation_logger.name, "app": app, "result": result}
+
+    def backup_restore(
+        self,
+        name: str,
+        apps: list[str] | None = None,
+        system: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "name": name, "apps": apps or [], "system": system or []}
+        # backup_restore() takes no operation_logger - it isn't in the
+        # signature (unlike backup_create/app_install/app_remove); see
+        # PHASE0-style verification against /tmp/yunohost-src at
+        # implementation time. No operation_id to capture here.
+        backup_restore = _import_attr("yunohost.backup", "backup_restore")
+        result = backup_restore(name, system=system or [], apps=apps or [], force=force)
+        return {"fake": False, "name": name, "result": result}
+
+    def system_upgrade(self) -> dict[str, Any]:
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-tools_upgrade", "result": "success"}
+        tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
+        operation_logger = _new_operation_logger("tools_upgrade")
+        try:
+            result = tools_upgrade(operation_logger, target="system")
+        except Exception as exc:
+            _try_close_with_error(operation_logger, exc)
+            raise
+        return {"fake": False, "operation_id": operation_logger.name, "result": result}
+
 
 def _new_operation_logger(operation: str, **kwargs: Any) -> Any:
     operation_logger_cls = _import_attr("yunohost.log", "OperationLogger")

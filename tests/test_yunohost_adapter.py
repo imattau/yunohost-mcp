@@ -96,3 +96,22 @@ def test_app_upgrade():
     result = make_adapter().app_upgrade("nextcloud")
     assert result["app"] == "nextcloud"
     assert result["result"] == "success"
+
+
+def test_app_remove_has_operation_id():
+    result = make_adapter().app_remove("nextcloud", purge=True)
+    assert result["app"] == "nextcloud"
+    assert result["purged"] is True
+    assert "operation_id" in result
+
+
+def test_backup_restore():
+    result = make_adapter().backup_restore("20260901-000000", apps=["nextcloud"])
+    assert result["name"] == "20260901-000000"
+    assert result["apps"] == ["nextcloud"]
+
+
+def test_system_upgrade_has_operation_id():
+    result = make_adapter().system_upgrade()
+    assert "operation_id" in result
+    assert result["result"] == "success"

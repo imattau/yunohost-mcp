@@ -9,18 +9,22 @@ an expired one) is rejected before it ever reaches a tool; a request from a
 known identity can only call tools whose required scope its roles grant.
 Phase 4: fills out PLAN.md's v0.1 read-only tool list.
 Phase 5: adds the first writes (service_restart, backup_create,
-app_install, app_upgrade). Every write tool is wrapped in both
-@require_scope (authorization) and @audited_write (a global write lock so
-at most one is ever in flight, plus a JSON-lines audit entry per call -
-audit/log.py, policy/locks.py). There is no confirmation step yet
-(PLAN.md Phase 6) and no dry-run/planning (Phase 7) - these four were
-chosen as PLAN.md's "low-risk" writes for exactly that reason; riskier
-writes (app removal, backup restore, system upgrade) wait for Phase 6.
+app_install, app_upgrade), PLAN.md's "low-risk" set - @require_scope
+(authorization) plus @audited_write (a global write lock so at most one
+write is ever in flight, plus a JSON-lines audit entry per call -
+audit/log.py, policy/locks.py).
+Phase 6: adds the safety policy engine and confirmation model
+(policy/rules.py, policy/confirmation.py) and the riskier writes that need
+them - app_remove, backup_restore, system_upgrade all require a matching
+confirm-then-execute round trip; app_upgrade additionally gets hard
+policy checks (a recent backup must exist, minimum free space) that no
+confirmation can bypass, per PLAN.md's example policy.toml.
 """
 
 from __future__ import annotations
 
 import argparse
+import time
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -31,8 +35,10 @@ from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, IdentityStore, get_c
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.config import load_settings
-from yunohost_mcp.policy.enforcement import require_scope
+from yunohost_mcp.policy.confirmation import ConfirmationStore
+from yunohost_mcp.policy.enforcement import require_confirmation, require_scope
 from yunohost_mcp.policy.locks import WriteLock
+from yunohost_mcp.policy.rules import PolicyRule, check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
@@ -40,8 +46,19 @@ settings = load_settings()
 adapter = YunohostAdapter(settings=settings)
 write_lock = WriteLock()
 audit_log = AuditLog(path=settings.audit_log_path())
+policy_rules = load_policy(settings.policy_file_path())
+confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 
 mcp = MCPServer(settings.server_name)
+
+
+def _check_apps_upgrade(rule: PolicyRule) -> None:
+    check_free_space(rule)
+    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
+
+
+def _check_apps_remove(rule: PolicyRule) -> None:
+    check_recent_backup(rule, archives=adapter.backups_list().get("archives", []), now=time.time())
 
 
 @mcp.tool()
@@ -181,9 +198,79 @@ def app_install(app: str, label: str | None = None, args: str | None = None, for
 @mcp.tool()
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
-def app_upgrade(app: str | None = None, force: bool = False) -> dict[str, Any]:
-    """Upgrade one installed YunoHost app, or all upgradable apps if none is specified."""
+@require_confirmation("apps.upgrade", policy=policy_rules, confirmation_store=confirmation_store, checks=_check_apps_upgrade)
+def app_upgrade(app: str | None = None, force: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Upgrade one installed YunoHost app, or all upgradable apps if none is specified.
+
+    Blocked (PolicyViolation, not confirmable) unless a recent backup
+    exists and there is enough free disk space - see policy.toml /
+    policy/rules.py's DEFAULT_POLICY["apps.upgrade"].
+    """
     return adapter.app_upgrade(app=app, force=force)
+
+
+@mcp.tool()
+@require_scope(Scope.APPS_REMOVE)
+@audited_write("apps.remove", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "apps.remove",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    checks=_check_apps_remove,
+    plan_builder=lambda app, purge=False, **_: {
+        "action": "remove app",
+        "app": app,
+        "purge_data": purge,
+        "warning": "This removes the app" + (" and all its data" if purge else "; data may remain unless purge=true")
+        + ". This cannot be undone by yunohost-mcp.",
+    },
+)
+def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Remove an installed YunoHost app. Requires confirmation and a recent backup archive."""
+    return adapter.app_remove(app, purge=purge)
+
+
+@mcp.tool()
+@require_scope(Scope.BACKUPS_RESTORE)
+@audited_write("backups.restore", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "backups.restore",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda name, apps=None, system=None, force=False, **_: {
+        "action": "restore backup",
+        "name": name,
+        "apps": apps or [],
+        "system": system or [],
+        "warning": "This overwrites current state with the archive's contents.",
+    },
+)
+def backup_restore(
+    name: str,
+    apps: list[str] | None = None,
+    system: list[str] | None = None,
+    force: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Restore from a local backup archive. Requires confirmation."""
+    return adapter.backup_restore(name, apps=apps, system=system, force=force)
+
+
+@mcp.tool()
+@require_scope(Scope.SYSTEM_UPGRADE)
+@audited_write("system.upgrade", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "system.upgrade",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda **_: {
+        "action": "upgrade system packages",
+        "warning": "This upgrades OS-level packages and may restart services.",
+    },
+)
+def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
+    """Upgrade system (OS-level) packages. Requires confirmation."""
+    return adapter.system_upgrade()
 
 
 @mcp.tool()

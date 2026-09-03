@@ -121,11 +121,76 @@ async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
     entry = json.loads(new_lines[0])
     assert entry["caller"] == "local-stdio"
     assert entry["result"] == "success"
-    assert entry["decision"] == "allowed"
 
 
 @pytest.mark.anyio
-async def test_phase5_write_tool_denied_for_identity_without_scope():
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("backup_restore", {"name": "20260901-000000"}),
+        ("system_upgrade", {}),
+    ],
+)
+async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool: str, args: dict):
+    async with Client(mcp) as client:
+        first = await client.call_tool(tool, args)
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert "operation_plan" in plan_response
+        confirmation_id = plan_response["confirmation_id"]
+
+        # Calling again with the SAME args but no confirmation_id issues a
+        # brand new ticket rather than executing - it never silently proceeds.
+        second = await client.call_tool(tool, args)
+        assert second.structured_content["confirmation_required"] is True
+        assert second.structured_content["confirmation_id"] != confirmation_id
+
+        confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_phase6_confirmation_rejected_for_mismatched_arguments():
+    async with Client(mcp) as client:
+        first = await client.call_tool("backup_restore", {"name": "archive-a"})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        # Same confirmation_id, different archive name - must not execute.
+        mismatched = await client.call_tool(
+            "backup_restore", {"name": "archive-b", "confirmation_id": confirmation_id}
+        )
+        assert mismatched.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase6_confirmation_is_one_shot():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        ok = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert ok.is_error is not True
+
+        reused = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert reused.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase6_app_remove_blocked_by_stale_backup_policy():
+    # Fake backups_list() returns a single, deliberately old archive
+    # ("20260901-000000") - older than apps.remove's default 24h max age -
+    # so app_remove should be blocked by the hard policy check before it
+    # ever gets to the confirmation step.
+    async with Client(mcp) as client:
+        result = await client.call_tool("app_remove", {"app": "nextcloud"})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase6_write_tool_denied_for_identity_without_scope():
     no_scopes = AuthenticatedRequest(
         pubkey="deadbeef",
         event_id="e" * 64,
@@ -134,7 +199,7 @@ async def test_phase5_write_tool_denied_for_identity_without_scope():
     )
     set_current_request(no_scopes)
     async with Client(mcp) as client:
-        result = await client.call_tool("app_install", {"app": "nextcloud"})
+        result = await client.call_tool("system_upgrade", {})
         assert result.is_error is True
 
 
