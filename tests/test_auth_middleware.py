@@ -1,4 +1,5 @@
-"""Integration test: NostrAuthMiddleware wrapping a trivial ASGI app.
+"""Integration test: NostrAuthMiddleware (NIP-98 authn + identity.toml authz)
+wrapping a trivial ASGI app.
 
 Drives the ASGI interface directly (scope/receive/send) rather than pulling
 in an HTTP client library, to keep this test self-contained and fast.
@@ -7,19 +8,28 @@ in an HTTP client library, to keep this test self-contained and fast.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tests.auth_helpers import make_nip98_authorization_header, new_keypair
-from yunohost_mcp.auth.identity import get_current_identity
+from yunohost_mcp.auth.identity import IdentityRecord, IdentityStore, get_current_request
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
+from yunohost_mcp.policy.roles import scopes_for_roles
 
 URL = "http://testserver/mcp"
 
 
+def _store_with(pubkey: str, *, roles: tuple[str, ...] = ("readonly",), expires=None) -> IdentityStore:
+    record = IdentityRecord(
+        pubkey=pubkey, name="test-agent", roles=roles, scopes=scopes_for_roles(roles), expires=expires
+    )
+    return IdentityStore({pubkey: record})
+
+
 async def echo_identity_app(scope, receive, send):
-    """Downstream app: reads the body, echoes back whether an identity was set."""
+    """Downstream app: reads the body, echoes back the resolved identity."""
     body = b""
     more_body = True
     while more_body:
@@ -27,12 +37,13 @@ async def echo_identity_app(scope, receive, send):
         body += message.get("body", b"")
         more_body = message.get("more_body", False)
 
-    identity = get_current_identity()
+    request = get_current_request()
     payload = json.dumps(
         {
             "seen_body": body.decode() if body else None,
-            "authenticated": identity is not None,
-            "pubkey": identity.pubkey if identity else None,
+            "authenticated": request is not None,
+            "pubkey": request.pubkey if request else None,
+            "scopes": sorted(s.value for s in request.scopes) if request else [],
         }
     ).encode()
     await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -53,7 +64,6 @@ def _make_scope(*, method: str, path: str, headers: dict[str, str]) -> dict:
 
 
 async def _call(app, scope, body: bytes = b"") -> tuple[int, dict]:
-    sent = []
     body_delivered = False
 
     async def receive():
@@ -62,6 +72,8 @@ async def _call(app, scope, body: bytes = b"") -> tuple[int, dict]:
             body_delivered = True
             return {"type": "http.request", "body": body, "more_body": False}
         return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent = []
 
     async def send(message):
         sent.append(message)
@@ -76,28 +88,53 @@ async def _call(app, scope, body: bytes = b"") -> tuple[int, dict]:
 
 @pytest.mark.anyio
 async def test_missing_auth_header_rejected_with_401():
-    app = NostrAuthMiddleware(echo_identity_app)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=IdentityStore({}))
     scope = _make_scope(method="GET", path="/mcp", headers={"host": "testserver"})
     status, _ = await _call(app, scope)
     assert status == 401
 
 
 @pytest.mark.anyio
-async def test_valid_signed_get_request_passes_through():
+async def test_valid_signature_but_unmapped_pubkey_rejected_with_403():
     sk, pubkey = new_keypair()
-    app = NostrAuthMiddleware(echo_identity_app)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=IdentityStore({}))
+    header = make_nip98_authorization_header(sk, pubkey, method="GET", url=URL)
+    scope = _make_scope(method="GET", path="/mcp", headers={"host": "testserver", "authorization": header})
+    status, _ = await _call(app, scope)
+    assert status == 403
+
+
+@pytest.mark.anyio
+async def test_expired_identity_rejected_with_403():
+    sk, pubkey = new_keypair()
+    expired = datetime.now(timezone.utc) - timedelta(days=1)
+    store = _store_with(pubkey, expires=expired)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=store)
+    header = make_nip98_authorization_header(sk, pubkey, method="GET", url=URL)
+    scope = _make_scope(method="GET", path="/mcp", headers={"host": "testserver", "authorization": header})
+    status, _ = await _call(app, scope)
+    assert status == 403
+
+
+@pytest.mark.anyio
+async def test_valid_signed_get_request_from_known_identity_passes_through():
+    sk, pubkey = new_keypair()
+    store = _store_with(pubkey)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=store)
     header = make_nip98_authorization_header(sk, pubkey, method="GET", url=URL)
     scope = _make_scope(method="GET", path="/mcp", headers={"host": "testserver", "authorization": header})
     status, data = await _call(app, scope)
     assert status == 200
     assert data["authenticated"] is True
     assert data["pubkey"] == pubkey
+    assert "server.read" in data["scopes"]
 
 
 @pytest.mark.anyio
 async def test_valid_signed_post_with_body_passes_body_through_unchanged():
     sk, pubkey = new_keypair()
-    app = NostrAuthMiddleware(echo_identity_app)
+    store = _store_with(pubkey)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=store)
     body = b'{"hello":"world"}'
     header = make_nip98_authorization_header(sk, pubkey, method="POST", url=URL, body=body)
     scope = _make_scope(method="POST", path="/mcp", headers={"host": "testserver", "authorization": header})
@@ -110,8 +147,9 @@ async def test_valid_signed_post_with_body_passes_body_through_unchanged():
 @pytest.mark.anyio
 async def test_replayed_request_rejected_on_second_call():
     sk, pubkey = new_keypair()
+    store = _store_with(pubkey)
     replay_cache = ReplayCache()
-    app = NostrAuthMiddleware(echo_identity_app, replay_cache=replay_cache)
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=store, replay_cache=replay_cache)
     header = make_nip98_authorization_header(sk, pubkey, method="GET", url=URL)
 
     scope1 = _make_scope(method="GET", path="/mcp", headers={"host": "testserver", "authorization": header})
@@ -125,7 +163,7 @@ async def test_replayed_request_rejected_on_second_call():
 
 @pytest.mark.anyio
 async def test_exempt_path_bypasses_auth():
-    app = NostrAuthMiddleware(echo_identity_app, exempt_paths=frozenset({"/healthz"}))
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=IdentityStore({}), exempt_paths=frozenset({"/healthz"}))
     scope = _make_scope(method="GET", path="/healthz", headers={"host": "testserver"})
     status, data = await _call(app, scope)
     assert status == 200

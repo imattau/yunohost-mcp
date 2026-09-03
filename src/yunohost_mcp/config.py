@@ -1,8 +1,7 @@
 """Configuration loading for yunohost-mcp.
 
-Phase 1 scope: just enough to run the server locally over stdio. Auth
-(identity.toml, Phase 3) and policy (policy.toml, Phase 6) config get their
-own loaders as those phases land.
+Policy config (policy.toml) gets its own loader once Phase 6 lands.
+identity.toml (Phase 3) is resolved here via identity_file_path().
 """
 
 from __future__ import annotations
@@ -33,6 +32,11 @@ class Settings(BaseSettings):
     # NIP-98 auth (Phase 2), only relevant for the http transport.
     nip98_clock_skew_seconds: int = 60
     nip98_replay_ttl_seconds: int = 300
+
+    def identity_file_path(self) -> Path:
+        """pubkey -> role mapping (Phase 3). A missing file means an empty
+        store: deny-by-default, not fail-open."""
+        return self.config_dir / "identity.toml"
 
 
 def load_settings() -> Settings:

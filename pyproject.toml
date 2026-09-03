@@ -5,6 +5,7 @@ description = "MCP server for secure, Nostr-authenticated YunoHost administratio
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "bech32>=1.2.0",
     "coincurve>=21.0.0",
     "mcp[cli]>=2.1.1",
     "pydantic>=2.13.5",

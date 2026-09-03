@@ -1,0 +1,20 @@
+# Example identity.toml (Phase 3 authorization).
+#
+# Not loaded by default. The real file lives at
+# ${YUNOHOST_MCP_CONFIG_DIR:-/etc/yunohost-mcp}/identity.toml. A pubkey with
+# no entry here — or an entry with roles that don't parse, or that has
+# expired — gets zero access: this file is deny-by-default, not an allowlist
+# you can skip.
+#
+# Keys may be an npub (bech32, NIP-19) or a raw 64-char hex pubkey.
+# See PLAN.md Phase 3 for the role -> scope mapping
+# (src/yunohost_mcp/policy/roles.py is the source of truth).
+
+[identity."npub1sn0wdenkukak0d9dfczzeacvhkrgz92ak56egt7vdgzn8pv2wfqqhrjdv9"]
+name = "Codex development agent"
+roles = ["package-developer"]
+expires = "2026-12-31T00:00:00+00:00"
+
+[identity."84dee6e676e5bb67b4ad4e042cf70cbd8681155db535942fcc6a0533858a7240"]
+name = "Human administrator"
+roles = ["administrator"]

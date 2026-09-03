@@ -1,15 +1,24 @@
-"""ASGI middleware enforcing NIP-98 authentication on every HTTP request.
+"""ASGI middleware enforcing NIP-98 authentication AND identity.toml
+authorization on every HTTP request, before it reaches the MCP session.
 
 This is deliberately a raw ASGI middleware (not Starlette's BaseHTTPMiddleware)
 so it works regardless of what web framework the wrapped app ("mcp"'s
 streamable-http Starlette app) uses internally, and so it can read the exact
 raw request body bytes NIP-98 signs over before anything else touches them.
 
-Scope note: this authenticates the *transport* (every HTTP request reaching
-the MCP endpoint must carry a validly-signed, fresh, non-replayed NIP-98
-event). It does not authorize anything — Phase 3 maps the resulting pubkey
-to roles/scopes; until that lands, any validly-signed request is accepted
-(identity established, no fine-grained authorization yet).
+Two independent stages, per PLAN.md's architecture:
+  1. Authentication (NIP-98): proves a request was signed, fresh, and not
+     replayed, by the holder of `pubkey`'s private key. Failure -> 401.
+  2. Authorization (identity.toml): resolves `pubkey` to an IdentityRecord
+     with roles/scopes. No record, an expired record, or an unknown role ->
+     zero scopes -> the request is rejected here too, with 403 (identity
+     proven, but not authorized for anything). A signature alone never
+     grants access.
+
+Individual tool handlers still check the specific scope they need via
+auth/identity.py's AuthenticatedRequest.has_scope() — this middleware only
+guarantees that whatever reaches a tool handler has *some* non-expired,
+role-mapped identity attached.
 """
 
 from __future__ import annotations
@@ -17,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 
-from yunohost_mcp.auth.identity import set_current_identity
+from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityStore, set_current_request
 from yunohost_mcp.auth.nip98 import Nip98Error, verify_nip98_request
 from yunohost_mcp.auth.replay import ReplayCache
 
@@ -25,17 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 class NostrAuthMiddleware:
-    """ASGI middleware: verify NIP-98 auth on http requests; pass through everything else unchanged."""
+    """ASGI middleware: NIP-98 authentication + identity.toml authorization on http requests."""
 
     def __init__(
         self,
         app,
         *,
+        identity_store: IdentityStore,
         replay_cache: ReplayCache | None = None,
         clock_skew_seconds: int = 60,
         exempt_paths: frozenset[str] = frozenset(),
     ) -> None:
         self.app = app
+        self.identity_store = identity_store
         self.replay_cache = replay_cache or ReplayCache()
         self.clock_skew_seconds = clock_skew_seconds
         self.exempt_paths = exempt_paths
@@ -53,7 +64,7 @@ class NostrAuthMiddleware:
         authorization = headers.get("authorization")
 
         try:
-            identity = verify_nip98_request(
+            nip98_identity = verify_nip98_request(
                 authorization_header=authorization,
                 method=method,
                 url=url,
@@ -63,14 +74,30 @@ class NostrAuthMiddleware:
             )
         except Nip98Error as exc:
             logger.info("NIP-98 auth rejected for %s %s: %s", method, url, exc)
-            await _send_401(send, str(exc))
+            await _send_error(send, 401, str(exc), www_authenticate=True)
             return
 
-        set_current_identity(identity)
+        record = self.identity_store.lookup(nip98_identity.pubkey)
+        if record is None:
+            logger.info("Unknown pubkey %s rejected for %s %s", nip98_identity.pubkey, method, url)
+            await _send_error(send, 403, "pubkey is not in identity.toml: no roles granted")
+            return
+        if record.is_expired():
+            logger.info("Expired identity %s (%s) rejected for %s %s", record.name, nip98_identity.pubkey, method, url)
+            await _send_error(send, 403, f"identity {record.name!r} expired at {record.expires}")
+            return
+
+        request = AuthenticatedRequest(
+            pubkey=nip98_identity.pubkey,
+            event_id=nip98_identity.event_id,
+            event_created_at=nip98_identity.created_at,
+            identity=record,
+        )
+        set_current_request(request)
         try:
             await self.app(scope, receive, send)
         finally:
-            set_current_identity(None)
+            set_current_request(None)
 
 
 async def _buffer_body(receive):
@@ -117,16 +144,10 @@ def _reconstruct_url(scope) -> str:
     return url
 
 
-async def _send_401(send, reason: str) -> None:
-    body = json.dumps({"error": "unauthorized", "reason": reason}).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"www-authenticate", b'Nostr realm="yunohost-mcp"'),
-            ],
-        }
-    )
+async def _send_error(send, status: int, reason: str, *, www_authenticate: bool = False) -> None:
+    body = json.dumps({"error": "unauthorized" if status == 401 else "forbidden", "reason": reason}).encode()
+    headers = [(b"content-type", b"application/json")]
+    if www_authenticate:
+        headers.append((b"www-authenticate", b'Nostr realm="yunohost-mcp"'))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": body})

@@ -1,0 +1,31 @@
+from __future__ import annotations
+
+import pytest
+
+from yunohost_mcp.policy.roles import ROLE_SCOPES, UnknownRoleError, scopes_for_roles
+from yunohost_mcp.policy.scopes import ALL_SCOPES, Scope
+
+
+def test_readonly_has_no_write_scopes():
+    scopes = ROLE_SCOPES["readonly"]
+    for scope in scopes:
+        assert not scope.value.split(".")[-1] in {"install", "upgrade", "remove", "restart", "create", "restore", "write", "delete"}
+
+
+def test_administrator_has_every_scope():
+    assert ROLE_SCOPES["administrator"] == ALL_SCOPES
+
+
+def test_scopes_for_multiple_roles_is_union():
+    scopes = scopes_for_roles(("readonly", "operator"))
+    assert Scope.SERVER_READ in scopes
+    assert Scope.SERVICES_RESTART in scopes
+
+
+def test_unknown_role_raises():
+    with pytest.raises(UnknownRoleError):
+        scopes_for_roles(("superuser",))
+
+
+def test_empty_roles_yields_no_scopes():
+    assert scopes_for_roles(()) == frozenset()
