@@ -37,6 +37,7 @@ PHASE8_TOOLS = {
 }
 PHASE10_TOOLS = {"audit_list", "audit_get"}
 PHASE11_TOOLS = {"server_identity"}
+PHASE13_TOOLS = {"approve_operation"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -62,6 +63,28 @@ def local_stdio_identity():
     set_current_request(None)
 
 
+SECOND_ADMIN_REQUEST = AuthenticatedRequest(
+    pubkey="second-admin",
+    event_id="a" * 64,
+    event_created_at=0,
+    identity=IdentityRecord(
+        pubkey="second-admin", name="second admin", roles=("administrator",), scopes=scopes_for_roles(("administrator",))
+    ),
+)
+
+
+async def _approve_as_second_admin(client: Client, confirmation_id: str) -> None:
+    """Owner co-signing (Phase 13) requires a *different* identity than the
+    requester - swap in a second administrator identity for one call, then
+    restore LOCAL_STDIO_REQUEST so the rest of the test proceeds as before."""
+    set_current_request(SECOND_ADMIN_REQUEST)
+    try:
+        result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+        assert result.is_error is not True, result.content
+    finally:
+        set_current_request(LOCAL_STDIO_REQUEST)
+
+
 @pytest.mark.anyio
 async def test_list_tools_exposes_all_v01_read_tools():
     async with Client(mcp) as client:
@@ -76,6 +99,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE8_TOOLS
             | PHASE10_TOOLS
             | PHASE11_TOOLS
+            | PHASE13_TOOLS
         )
         assert expected <= names
 
@@ -164,6 +188,7 @@ async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool:
         plan_response = first.structured_content
         assert plan_response["confirmation_required"] is True
         assert "operation_plan" in plan_response
+        assert plan_response["owner_signature_required"] is True  # both tools default to Phase 13 co-signing
         confirmation_id = plan_response["confirmation_id"]
 
         # Calling again with the SAME args but no confirmation_id issues a
@@ -171,6 +196,12 @@ async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool:
         second = await client.call_tool(tool, args)
         assert second.structured_content["confirmation_required"] is True
         assert second.structured_content["confirmation_id"] != confirmation_id
+
+        # Not yet owner-approved: the original ticket must still refuse to execute.
+        not_yet_approved = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert not_yet_approved.is_error is True
+
+        await _approve_as_second_admin(client, confirmation_id)
 
         confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
         assert confirmed.is_error is not True, confirmed.content
@@ -196,12 +227,95 @@ async def test_phase6_confirmation_is_one_shot():
     async with Client(mcp) as client:
         first = await client.call_tool("system_upgrade", {})
         confirmation_id = first.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
 
         ok = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
         assert ok.is_error is not True
 
         reused = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
         assert reused.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase13_execute_without_owner_approval_is_denied():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        result = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase13_self_approval_is_rejected():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        # LOCAL_STDIO_REQUEST trying to approve its own request.
+        result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+        assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_phase13_approve_operation_denied_for_non_administrator():
+    package_developer = AuthenticatedRequest(
+        pubkey="dev-pubkey",
+        event_id="d" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="dev-pubkey",
+            name="dev-agent",
+            roles=("package-developer",),
+            scopes=scopes_for_roles(("package-developer",)),
+        ),
+    )
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        set_current_request(package_developer)
+        try:
+            result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            assert result.is_error is True
+        finally:
+            set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_phase13_approve_operation_is_audited():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+        await _approve_as_second_admin(client, confirmation_id)
+        new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["tool"] == "owner.approve"
+    assert entry["caller"] == "second-admin"
+    assert entry["result"] == "success"
+
+
+@pytest.mark.anyio
+async def test_phase13_approved_confirmation_can_still_be_used_for_a_second_call_attempt():
+    # Approving doesn't consume the ticket - the agent may need more than
+    # one attempt (e.g. a transient failure) before it actually executes,
+    # as long as it's still the same confirmation_id/arguments.
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
+
+        # Re-approving an already-approved ticket is fine (idempotent from
+        # the store's perspective - it's still "different identity than
+        # requester", just re-stamping the same approval).
+        await _approve_as_second_admin(client, confirmation_id)
+
+        result = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert result.is_error is not True
 
 
 @pytest.mark.anyio

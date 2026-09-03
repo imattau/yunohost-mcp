@@ -56,6 +56,13 @@ slice: auth/server_identity.py) so a delegation can name which server it
 targets - get_server_identity() lazily generates/loads that keypair only
 when something (the server_identity tool, or the http transport) actually
 needs it, not merely on import.
+Phase 13: owner co-signing for the two highest-risk already-implemented
+writes (system_upgrade, backup_restore - policy/rules.py's
+require_owner_signature). A pending confirmation from one identity must be
+approve_operation()'d by a *different* identity (Scope.OWNER_APPROVE,
+administrator-only) before the original requester can execute it - two
+independently NIP-98-signed calls, verified the normal way each already
+is, bound together by the confirmation ticket (policy/confirmation.py).
 """
 
 from __future__ import annotations
@@ -518,6 +525,34 @@ def audit_get(audit_id: str) -> dict[str, Any]:
     if entry is None:
         raise ValueError(f"no audit entry with id {audit_id!r}")
     return entry
+
+
+@mcp.tool()
+@redact_response
+@require_scope(Scope.OWNER_APPROVE)
+@audited_write("owner.approve", lock=write_lock, audit_log=audit_log)
+def approve_operation(confirmation_id: str) -> dict[str, Any]:
+    """Owner co-signature (PLAN.md Phase 13) for a pending high-risk
+    operation (system.upgrade, backups.restore - see policy/rules.py's
+    require_owner_signature). Marks the confirmation approved so its
+    original requester can then execute it by calling the same tool again
+    with this confirmation_id - approving does not execute anything itself.
+
+    The approver must be a different identity than whoever requested the
+    operation; Scope.OWNER_APPROVE is administrator-only.
+    """
+    request = require_current_request()
+    try:
+        ticket = confirmation_store.approve(confirmation_id, approver_pubkey=request.pubkey)
+    except ConfirmationError as exc:
+        raise ConfirmationError(f"cannot approve: {exc}") from exc
+    return {
+        "approved": True,
+        "confirmation_id": ticket.confirmation_id,
+        "tool": ticket.tool,
+        "operation_plan": ticket.plan,
+        "approved_by": request.pubkey,
+    }
 
 
 @mcp.tool()

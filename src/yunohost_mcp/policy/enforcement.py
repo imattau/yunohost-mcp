@@ -15,7 +15,12 @@ call presenting an *invalid* one raises rather than silently issuing a new
 ticket, so a caller finds out why immediately. `checks`, if given, runs on
 every call (both the "show me the plan" and the confirmed call) and raises
 PolicyViolation for hard requirements (require_backup, minimum_free_space)
-that no confirmation can bypass.
+that no confirmation can bypass. When the rule also has
+require_owner_signature=True (Phase 13), a matching but not-yet-approved
+confirmation_id raises rather than executing, telling the caller to route
+it through approve_operation() (a different identity, Scope.OWNER_APPROVE)
+first - the ticket itself is left pending, not consumed, so this is safe
+to retry once approved.
 """
 
 from __future__ import annotations
@@ -76,7 +81,11 @@ def require_confirmation(
             if rule.require_confirmation:
                 try:
                     confirmation_store.consume(
-                        confirmation_id or "", pubkey=request.pubkey, tool=policy_key, arguments=kwargs
+                        confirmation_id or "",
+                        pubkey=request.pubkey,
+                        tool=policy_key,
+                        arguments=kwargs,
+                        require_owner_approval=rule.require_owner_signature,
                     )
                 except ConfirmationError:
                     if confirmation_id:
@@ -90,6 +99,7 @@ def require_confirmation(
                         "operation_plan": plan,
                         "confirmation_id": ticket.confirmation_id,
                         "expires_at": ticket.expires_at,
+                        "owner_signature_required": rule.require_owner_signature,
                     }
 
             return fn(*args, **kwargs)

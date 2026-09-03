@@ -16,6 +16,13 @@ Rule semantics, matching PLAN.md's example config exactly:
     shutil.disk_usage, not a YunoHost API - it's a plain, portable disk
     check available whether or not yunohost.* is importable.
 
+  - require_owner_signature (PLAN.md Phase 13): the pending confirmation
+    must additionally be approved by a *different* identity holding
+    Scope.OWNER_APPROVE (server.py's approve_operation tool) before its
+    original requester can execute it - two independently NIP-98-signed
+    calls from two different identities, not one caller confirming its
+    own request twice. Only meaningful alongside require_confirmation.
+
 Unlike require_confirmation (blockable-but-passable with a confirmation),
 require_backup and minimum_free_space are hard requirements: no
 confirmation can bypass them. PolicyViolation means "this cannot proceed
@@ -45,6 +52,7 @@ class PolicyRule:
     require_backup: bool = False
     minimum_free_space_bytes: int | None = None
     max_backup_age_seconds: int | None = None
+    require_owner_signature: bool = False
 
 
 _SIZE_UNITS = {"": 1, "B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
@@ -81,8 +89,14 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     "apps.remove": PolicyRule(
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")
     ),
-    "backups.restore": PolicyRule(require_confirmation=True),
-    "system.upgrade": PolicyRule(require_confirmation=True),
+    # PLAN.md Phase 13's two highest-risk, already-implemented candidates
+    # get owner co-signing by default - the others it names (user deletion,
+    # domain removal, firewall/permission changes) aren't implemented as
+    # tools yet, and "app removal with data" would need argument-conditional
+    # policy (require_owner_signature only when purge=true) this dataclass
+    # doesn't support - noted as a real gap, not silently assumed covered.
+    "backups.restore": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    "system.upgrade": PolicyRule(require_confirmation=True, require_owner_signature=True),
 }
 
 
@@ -110,11 +124,14 @@ def load_policy(path: Path) -> dict[str, PolicyRule]:
             overrides["minimum_free_space_bytes"] = _parse_size(str(entry["minimum_free_space"]))
         if "max_backup_age" in entry:
             overrides["max_backup_age_seconds"] = _parse_duration(str(entry["max_backup_age"]))
+        if "require_owner_signature" in entry:
+            overrides["require_owner_signature"] = bool(entry["require_owner_signature"])
         rules[key] = PolicyRule(
             require_confirmation=overrides.get("require_confirmation", base.require_confirmation),
             require_backup=overrides.get("require_backup", base.require_backup),
             minimum_free_space_bytes=overrides.get("minimum_free_space_bytes", base.minimum_free_space_bytes),
             max_backup_age_seconds=overrides.get("max_backup_age_seconds", base.max_backup_age_seconds),
+            require_owner_signature=overrides.get("require_owner_signature", base.require_owner_signature),
         )
     return rules
 

@@ -47,5 +47,10 @@ class Scope(StrEnum):
     # PLAN.md Phase 10, without a role-name check in the tool itself.
     AUDIT_READ = "audit.read"
 
+    # Same pattern, for Phase 13's owner co-signing: only administrator may
+    # call approve_operation() to co-sign another identity's pending
+    # high-risk confirmation (policy/rules.py's require_owner_signature).
+    OWNER_APPROVE = "owner.approve"
+
 
 ALL_SCOPES: frozenset[Scope] = frozenset(Scope)

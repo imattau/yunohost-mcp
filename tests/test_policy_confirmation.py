@@ -55,3 +55,75 @@ def test_expired_ticket_rejected():
     time.sleep(1.1)
     with pytest.raises(ConfirmationError, match="expired"):
         store.consume(ticket.confirmation_id, pubkey="abc", tool="apps.remove", arguments={})
+
+
+# -- Phase 13: owner co-signing --------------------------------------------
+
+
+def test_consume_without_owner_approval_required_ignores_approval_state():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="abc", tool="apps.remove", arguments={"app": "x"}, plan={})
+    consumed = store.consume(
+        ticket.confirmation_id, pubkey="abc", tool="apps.remove", arguments={"app": "x"}, require_owner_approval=False
+    )
+    assert consumed.owner_approved_by is None
+
+
+def test_consume_requiring_owner_approval_fails_when_unapproved():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="abc", tool="system.upgrade", arguments={}, plan={})
+    with pytest.raises(ConfirmationError, match="owner co-signature"):
+        store.consume(ticket.confirmation_id, pubkey="abc", tool="system.upgrade", arguments={}, require_owner_approval=True)
+
+
+def test_ticket_survives_a_failed_owner_approval_check_and_can_be_retried():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="abc", tool="system.upgrade", arguments={}, plan={})
+    with pytest.raises(ConfirmationError):
+        store.consume(ticket.confirmation_id, pubkey="abc", tool="system.upgrade", arguments={}, require_owner_approval=True)
+    # Unlike every other failure mode, this one must NOT have consumed the
+    # ticket - it's still there, waiting to be approved.
+    assert len(store) == 1
+    store.approve(ticket.confirmation_id, approver_pubkey="owner")
+    consumed = store.consume(
+        ticket.confirmation_id, pubkey="abc", tool="system.upgrade", arguments={}, require_owner_approval=True
+    )
+    assert consumed.owner_approved_by == "owner"
+
+
+def test_approve_then_consume_succeeds():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="agent", tool="backups.restore", arguments={"name": "x"}, plan={})
+    store.approve(ticket.confirmation_id, approver_pubkey="owner")
+    consumed = store.consume(
+        ticket.confirmation_id, pubkey="agent", tool="backups.restore", arguments={"name": "x"}, require_owner_approval=True
+    )
+    assert consumed.owner_approved_by == "owner"
+
+
+def test_approve_rejects_self_approval():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    with pytest.raises(ConfirmationError, match="different identity"):
+        store.approve(ticket.confirmation_id, approver_pubkey="agent")
+
+
+def test_approve_unknown_id_rejected():
+    store = ConfirmationStore()
+    with pytest.raises(ConfirmationError):
+        store.approve("confirm-doesnotexist", approver_pubkey="owner")
+
+
+def test_approve_expired_ticket_rejected():
+    store = ConfirmationStore(ttl_seconds=1)
+    ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    time.sleep(1.1)
+    with pytest.raises(ConfirmationError, match="expired"):
+        store.approve(ticket.confirmation_id, approver_pubkey="owner")
+
+
+def test_approve_does_not_consume_the_ticket():
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    store.approve(ticket.confirmation_id, approver_pubkey="owner")
+    assert len(store) == 1  # still pending, waiting for the agent's own consume()
