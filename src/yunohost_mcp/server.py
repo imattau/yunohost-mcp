@@ -74,6 +74,9 @@ machinery as the primitives they're built from, per PLAN.md's explicit
 from __future__ import annotations
 
 import argparse
+import asyncio
+import functools
+import inspect
 import time
 from typing import Any
 
@@ -109,7 +112,33 @@ policy_rules = load_policy(settings.policy_file_path())
 confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 
-mcp = MCPServer(settings.server_name)
+class AsyncToolMCPServer(MCPServer):
+    """Run synchronous tools in asyncio's worker pool.
+
+    The MCP SDK routes sync tools through AnyIO's worker backend. That
+    backend can stall indefinitely on some runtimes, leaving tools/call
+    requests without a response. YunoHost calls remain off the event loop,
+    but use the standard-library executor instead.
+    """
+
+    def add_tool(self, fn, **kwargs):
+        if not inspect.iscoroutinefunction(fn):
+            original = fn
+
+            @functools.wraps(original)
+            async def run_in_worker(*args, **call_kwargs):
+                # Fake mode is deterministic and non-blocking; keeping it on
+                # the event-loop thread also makes in-process protocol tests
+                # independent of executor behavior in the host runtime.
+                if settings.fake_yunohost:
+                    return original(*args, **call_kwargs)
+                return await asyncio.to_thread(original, *args, **call_kwargs)
+
+            fn = run_in_worker
+        return super().add_tool(fn, **kwargs)
+
+
+mcp = AsyncToolMCPServer(settings.server_name)
 
 _server_identity: ServerIdentity | None = None
 
