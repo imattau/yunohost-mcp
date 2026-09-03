@@ -31,6 +31,33 @@ def test_catalog_remote_source_requires_explicit_ref():
         raise AssertionError("remote source without ref was accepted")
 
 
+def test_catalog_relays_falls_back_to_nostr_catalog_ynh_env_file(tmp_path: Path):
+    # yunohost-mcp deliberately has no relay setting of its own (it
+    # already piggybacks on nostr_catalog_ynh's CLI binary and publisher
+    # key) - it should pick up that app's NOSTR_YNH_RELAYS instead of
+    # requiring a second, separately-maintained relay list.
+    env_path = tmp_path / "nostr-catalogd.env"
+    env_path.write_text("NOSTR_YNH_RELAYS=wss://relay.damus.io,wss://nos.lol\nNOSTR_YNH_TRUSTED_PUBLISHERS=\n")
+    adapter = YunohostAdapter(Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=env_path))
+    assert adapter._catalog_relays() == ["wss://relay.damus.io", "wss://nos.lol"]
+
+
+def test_catalog_relays_explicit_override_wins_over_nostr_catalog_ynh_env_file(tmp_path: Path):
+    env_path = tmp_path / "nostr-catalogd.env"
+    env_path.write_text("NOSTR_YNH_RELAYS=wss://relay.damus.io\n")
+    adapter = YunohostAdapter(
+        Settings(fake_yunohost=False, catalog_relays="wss://relay.override", catalog_relays_env_path=env_path)
+    )
+    assert adapter._catalog_relays() == ["wss://relay.override"]
+
+
+def test_catalog_relays_is_empty_when_env_file_is_missing(tmp_path: Path):
+    adapter = YunohostAdapter(
+        Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=tmp_path / "does-not-exist.env")
+    )
+    assert adapter._catalog_relays() == []
+
+
 def test_catalog_verify_fake_mode_never_needs_publisher_key():
     adapter = YunohostAdapter(Settings(fake_yunohost=True))
     result = adapter.catalog_verify("naddr1qqxyz")

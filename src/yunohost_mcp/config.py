@@ -89,10 +89,19 @@ class Settings(BaseSettings):
     # yunohost.log.log_show() bug this must stay compatible with).
     operation_logs_default_tail_lines: int = 200
 
-    # Same-host Nostr YunoHost catalogue publisher integration.
+    # Same-host Nostr YunoHost catalogue publisher integration. This
+    # deliberately piggybacks on nostr_catalog_ynh rather than duplicating
+    # its config: the CLI binary and publisher key already come from that
+    # app's install dir, so the relay list should too (single source of
+    # truth, editable from nostr_catalog_ynh's own config panel) instead
+    # of yunohost-mcp maintaining its own separate, easily-out-of-sync
+    # relay setting.
     catalog_cli_path: Path = Path("/var/lib/nostr-catalogd/nostr-ynh")
     catalog_publisher_key_path: Path = Path("/etc/nostr-catalogd/publisher.key")
+    # Explicit override; leave empty to fall back to nostr_catalog_ynh's
+    # own NOSTR_YNH_RELAYS (see catalog_relays_env_path below).
     catalog_relays: str = ""
+    catalog_relays_env_path: Path = Path("/etc/nostr-catalogd/nostr-catalogd.env")
     catalog_cli_timeout_seconds: int = 120
     catalog_require_remote_ref: bool = True
 

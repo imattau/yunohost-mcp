@@ -872,7 +872,27 @@ class YunohostAdapter:
             Path(event_path).unlink(missing_ok=True)
 
     def _catalog_relays(self) -> list[str]:
-        return [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
+        relays = [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
+        if relays:
+            return relays
+        return self._catalog_relays_from_nostr_catalog_ynh()
+
+    def _catalog_relays_from_nostr_catalog_ynh(self) -> list[str]:
+        # Falls back to nostr_catalog_ynh's own NOSTR_YNH_RELAYS (written
+        # by its render_daemon_env, see scripts/_common.sh) so this app
+        # doesn't need a second, separately-maintained relay list - see
+        # config.py's catalog_relays_env_path docstring.
+        env_path = self.settings.catalog_relays_env_path
+        try:
+            content = env_path.read_text()
+        except OSError:
+            return []
+        for line in content.splitlines():
+            if not line.startswith("NOSTR_YNH_RELAYS="):
+                continue
+            value = line[len("NOSTR_YNH_RELAYS=") :].strip()
+            return [relay.strip() for relay in value.split(",") if relay.strip()]
+        return []
 
     def _validate_catalog_source(self, source: str, ref: str | None) -> None:
         if ref is not None:
