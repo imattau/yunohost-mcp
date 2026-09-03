@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -74,6 +75,39 @@ def load_identity(args: argparse.Namespace) -> ClientIdentity:
         return ClientIdentity.from_key_string(key)
     except KeyLoadError as exc:
         raise BridgeConfigError(str(exc)) from exc
+
+
+def generate_key(path: Path) -> ClientIdentity:
+    """Write a fresh private key to `path` (0600, refuses to overwrite an
+    existing file) and return the resulting identity.
+
+    Exists because the path of least resistance without it - copying a
+    key file that already works for a different client into a new one's
+    config - produces no error, no warning: whichever key signs a
+    request determines its identity and permissions on the server, and
+    that's ALL it determines, so a copied key file just quietly grants
+    the second client the first one's exact access. Generating a
+    dedicated key per client is the fix; this makes doing that no harder
+    than reusing one.
+    """
+    if path.exists():
+        raise BridgeConfigError(f"refusing to overwrite an existing key file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A uniformly random 32-byte value is virtually certain to already be
+    # a valid secp256k1 private key (invalid only for the ~1-in-2^128
+    # values outside [1, n-1]) - retrying on the practically-unreachable
+    # KeyLoadError case is simpler and just as correct as reproducing
+    # coincurve's own validity check here.
+    while True:
+        hex_key = secrets.token_bytes(32).hex()
+        try:
+            identity = ClientIdentity.from_key_string(hex_key)
+        except KeyLoadError:
+            continue
+        break
+    path.write_text(hex_key + "\n")
+    path.chmod(0o600)
+    return identity
 
 
 def _load_delegation_header(args: argparse.Namespace) -> str | None:
@@ -145,12 +179,32 @@ def main() -> None:
         "--key-file", help="path to a file containing a hex or nsec1... private key (see $YUNOHOST_MCP_CLIENT_KEY_FILE)"
     )
     parser.add_argument(
+        "--generate-key",
+        metavar="PATH",
+        help="write a fresh private key to PATH (0600; refuses to overwrite an existing file), print its "
+        "npub, and exit without connecting anywhere - use a distinct PATH per client (Claude Desktop, "
+        "Codex, ...): whichever key signs a request is that request's entire identity on the server, so "
+        "reusing one client's key file for another silently gives it that client's exact permissions",
+    )
+    parser.add_argument(
         "--delegation-file",
         help="path to a JSON delegation event to present alongside this identity's own signature "
         "(see $YUNOHOST_MCP_CLIENT_DELEGATION_FILE; PLAN.md Phase 11)",
     )
     parser.add_argument("--name", default="yunohost-mcp-bridge", help="name this local MCP server advertises")
     args = parser.parse_args()
+
+    if args.generate_key:
+        path = Path(args.generate_key).expanduser()
+        identity = generate_key(path)
+        print(f"yunohost-mcp-connect: generated a new key at {path}", file=sys.stderr)
+        print(f"yunohost-mcp-connect: its npub is {identity.npub}", file=sys.stderr)
+        print(
+            "Grant this npub whatever role is appropriate for this client in identity.toml - "
+            "not the role you already gave a different client.",
+            file=sys.stderr,
+        )
+        return
 
     if not args.remote_url:
         raise BridgeConfigError("no --remote-url given, and $YUNOHOST_MCP_CLIENT_REMOTE_URL is not set")

@@ -37,12 +37,22 @@ yunohost-mcp-connect --remote-url https://your-yunohost-domain/mcp --key-file ~/
 ```
 
 - `--key-file` (or `$YUNOHOST_MCP_CLIENT_KEY_FILE`) points at a file holding a hex or `nsec1...` private key — preferred over `--key`/`$YUNOHOST_MCP_CLIENT_KEY`, which put the key in argv/environment where other processes on the same machine can read it.
+- `--generate-key PATH` writes a fresh private key to `PATH` (0600; refuses to overwrite an existing file), prints its npub, and exits without connecting anywhere — the way to get a `--key-file` in the first place. Use a distinct `PATH` per client; see "Give each client its own key file" below.
 - `--delegation-file` (or `$YUNOHOST_MCP_CLIENT_DELEGATION_FILE`) presents a delegation event (PLAN.md Phase 11) alongside your own signature, for a disposable agent identity an owner granted a subset of their access to.
 - Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are all forwarded verbatim; every other MCP feature and all authorization/policy/audit still happens exactly as it would if you'd signed the request yourself, because you did.
 
 ## Connecting Claude Desktop or Codex
 
 Both point at `yunohost-mcp-connect`, not at the server directly — the bridge is what signs each request with your Nostr key. Use the full path to `yunohost-mcp-connect` in whatever environment you installed `yunohost-mcp` into (e.g. `~/.local/pipx/venvs/yunohost-mcp/bin/yunohost-mcp-connect`, or a venv's `bin/` directory — `which yunohost-mcp-connect` after activating it will tell you).
+
+**Give each client its own key file.** `YUNOHOST_MCP_CLIENT_KEY_FILE` *is* the identity — whichever key signs a request determines its role and scopes on the server, nothing else. Point two different clients (or two different config files for the same client — a project-local `.codex/config.toml` shadows `~/.codex/config.toml`) at the same key file and the second one silently authenticates as the first, with its exact permissions - no error, nothing to notice. Generate a fresh key per client rather than copying one that already works:
+
+```
+yunohost-mcp-connect --generate-key ~/.config/yunohost-mcp/claude-desktop.key
+yunohost-mcp-connect --generate-key ~/.config/yunohost-mcp/codex.key
+```
+
+Each prints the new key's npub - grant it whatever role is appropriate for that specific client (see "Granting a disposable agent identity access" below, or `identity.toml` directly), not the role you already gave a different one. `--generate-key` refuses to overwrite a file that already exists.
 
 **Claude Desktop** (`claude_desktop_config.json` — Settings → Developer → Edit Config):
 
@@ -53,7 +63,7 @@ Both point at `yunohost-mcp-connect`, not at the server directly — the bridge 
       "command": "/full/path/to/yunohost-mcp-connect",
       "env": {
         "YUNOHOST_MCP_CLIENT_REMOTE_URL": "https://your-yunohost-domain/mcp",
-        "YUNOHOST_MCP_CLIENT_KEY_FILE": "/home/you/.config/yunohost-mcp/key"
+        "YUNOHOST_MCP_CLIENT_KEY_FILE": "/home/you/.config/yunohost-mcp/claude-desktop.key"
       }
     }
   }
@@ -68,8 +78,10 @@ command = "/full/path/to/yunohost-mcp-connect"
 
 [mcp_servers.yunohost-mcp.env]
 YUNOHOST_MCP_CLIENT_REMOTE_URL = "https://your-yunohost-domain/mcp"
-YUNOHOST_MCP_CLIENT_KEY_FILE = "/home/you/.config/yunohost-mcp/key"
+YUNOHOST_MCP_CLIENT_KEY_FILE = "/home/you/.config/yunohost-mcp/codex.key"
 ```
+
+Run `yunohost-mcp-connect --key-file <path>` once per new key to see its npub (`yunohost-mcp-connect: signing as npub1...`), then grant that npub whatever role is actually appropriate for that client in `identity.toml` - not the role you already gave a different one.
 
 For a delegated (disposable) identity instead of your own key, add `YUNOHOST_MCP_CLIENT_DELEGATION_FILE` pointing at the file `yunohost-mcp-delegate` produced (see below). Restart the client after editing its config — both read this file once, at startup.
 
