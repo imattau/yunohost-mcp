@@ -108,6 +108,27 @@ def test_service_logs_normalizes_entries(tmp_path):
     assert entries[1]["message"] == "hi"  # [104, 105] decoded as bytes
 
 
+def test_service_logs_redacts_secret_shaped_content_in_messages(tmp_path):
+    argv_file = tmp_path / "argv.json"
+    stub = _write_stub_journalctl(
+        tmp_path,
+        argv_file=argv_file,
+        entries=[
+            {
+                "__REALTIME_TIMESTAMP": "1788430200000000",
+                "_SYSTEMD_UNIT": "yunohost_mcp.service",
+                "PRIORITY": "3",
+                "MESSAGE": "startup failed: api_key=sk-abc123xyz is invalid",
+            }
+        ],
+    )
+    adapter = _make_adapter(tmp_path, stub)
+
+    result = adapter.service_logs("yunohost_mcp")
+
+    assert result["entries"][0]["message"] == "startup failed: api_key=[REDACTED] is invalid"
+
+
 def test_service_logs_passes_filters_through_to_journalctl_argv(tmp_path):
     argv_file = tmp_path / "argv.json"
     stub = _write_stub_journalctl(tmp_path, argv_file=argv_file)

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from yunohost_mcp.config import Settings
+from yunohost_mcp.redaction import redact_text
 
 
 class YunohostUnavailableError(RuntimeError):
@@ -488,16 +489,25 @@ class YunohostAdapter:
 
     def operation_logs(self, name: str, tail_lines: int | None = None) -> dict[str, Any]:
         """`tail_lines` caps how many of the most recent log lines are
-        returned (None means "all"). Always passed through explicitly -
-        never omitted - because of a real bug in yunohost.log.log_show()
-        itself: when called with no `number` at all, it takes a different
-        internal branch (`read_file()` returning the whole log as one
-        string) than when a number is given (`_tail()`, returning a real
-        list of lines), and then unconditionally does `list(logs)` on
-        whichever it got - exploding the no-number case's plain string
-        into a list of *individual characters* instead of lines. Always
-        supplying a number (a large one when the caller wants "all")
-        keeps this on the correct, line-based code path.
+        returned - defaults to Settings.operation_logs_default_tail_lines
+        (a real install/upgrade log can run to thousands of lines of raw
+        shell trace output; callers that genuinely need the full log can
+        still ask via a larger tail_lines). Regardless of size, `number`
+        is always passed through explicitly to log_show() - never
+        omitted - because of a real bug in yunohost.log.log_show() itself:
+        called with no `number` at all, it takes a different internal
+        branch (`read_file()` returning the whole log as one string) than
+        when a number is given (`_tail()`, returning a real list of
+        lines), then unconditionally does `list(logs)` on whichever it
+        got - exploding the no-number case's plain string into a list of
+        *individual characters* instead of lines.
+
+        Each returned line also passes through redact_text() - a shell
+        trace routinely contains KEY=VALUE-shaped secrets (an app's own
+        install/upgrade script setting a password, an API token in an
+        env var, ...) that redact_response's key-based redaction can
+        never reach, since the *line*'s own "key" is just "logs", not
+        anything sensitive-sounding.
         """
         if self.settings.fake_yunohost:
             return {
@@ -508,7 +518,12 @@ class YunohostAdapter:
                 "log": "fake log content for " + name,
             }
         log_show = _import_attr("yunohost.log", "log_show")
-        return {"fake": False, **log_show(name, number=tail_lines if tail_lines is not None else 1_000_000)}
+        effective_tail = tail_lines if tail_lines is not None else self.settings.operation_logs_default_tail_lines
+        result = log_show(name, number=effective_tail)
+        logs = result.get("logs")
+        if isinstance(logs, list):
+            result = {**result, "logs": [redact_text(line) if isinstance(line, str) else line for line in logs]}
+        return {"fake": False, **result}
 
     def updates_check(self) -> dict[str, Any]:
         # Deliberately the no-refresh, cache-only variant: a real network
@@ -1130,7 +1145,12 @@ def _normalize_journal_entry(raw: dict[str, Any], *, default_service: str) -> di
     message}. __REALTIME_TIMESTAMP is microseconds since the epoch, as a
     decimal string; PRIORITY is a syslog priority number 0-7, also a
     string; MESSAGE is normally a string but journalctl encodes a
-    non-UTF8 one as a JSON array of byte values instead - handle both."""
+    non-UTF8 one as a JSON array of byte values instead - handle both.
+
+    `message` passes through redact_text() - a service's own journal
+    output can carry KEY=VALUE-shaped secrets the same way an operation
+    log's shell trace can (see operation_logs()'s docstring for why
+    redact_response's key-based redaction can't reach this either)."""
     import datetime as _dt
 
     timestamp = raw.get("__REALTIME_TIMESTAMP")
@@ -1143,6 +1163,8 @@ def _normalize_journal_entry(raw: dict[str, Any], *, default_service: str) -> di
     message = raw.get("MESSAGE", "")
     if isinstance(message, list):
         message = bytes(message).decode("utf-8", errors="replace")
+    if isinstance(message, str):
+        message = redact_text(message)
 
     return {
         "timestamp": timestamp,

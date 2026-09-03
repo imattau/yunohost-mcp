@@ -16,6 +16,7 @@ problem than a missed one.
 from __future__ import annotations
 
 import functools
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -33,6 +34,7 @@ SENSITIVE_KEY_MARKERS: frozenset[str] = frozenset(
         "apikey",
         "session",
         "cookie",
+        "authorization",
     }
 )
 
@@ -50,6 +52,41 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(v) for v in value]
     return value
+
+
+_SENSITIVE_KV_PATTERN = re.compile(
+    r"\b(?P<key>[\w.-]*(?:" + "|".join(re.escape(m) for m in SENSITIVE_KEY_MARKERS) + r")[\w.-]*)"
+    # "Bearer <token>" is a single value split by whitespace (an HTTP
+    # Authorization header's own shape) - swallow that leading scheme
+    # word too, or only "Bearer" itself would get redacted, leaving the
+    # actual token in plain sight right after it.
+    r"(?P<sep>\s*[:=]\s*)(?P<value>(?:[Bb]earer\s+)?\S+)",
+    re.IGNORECASE,
+)
+_NSEC_PATTERN = re.compile(r"\bnsec1[a-z0-9]{20,}\b", re.IGNORECASE)
+
+
+def redact_text(text: str) -> str:
+    """Best-effort redaction of secret-*shaped* content inside free text
+    (a log line, a shell trace, ...).
+
+    Unlike redact(), which only ever inspects structured dict/list KEY
+    names, this scans the text itself for KEY=VALUE / KEY: VALUE pairs
+    whose key looks sensitive (SENSITIVE_KEY_MARKERS, same substring
+    match as is_sensitive_key) plus bare nsec1... private keys,
+    redacting just the value (or the whole key+value for a bare nsec).
+    Meant for specific known-freeform fields (operation/service log
+    content) that redact()'s key-based pass can never reach - a log
+    line's key is "message" or "logs", not "password" - not applied
+    universally: scanning arbitrary text for value-shaped patterns risks
+    false positives that make a line actively misleading rather than
+    merely missing detail, so this stays intentionally narrow (an exact
+    KEY=VALUE shape, plus one high-confidence secret format) rather than
+    guessing at anything that merely looks sensitive.
+    """
+    text = _SENSITIVE_KV_PATTERN.sub(lambda m: f"{m['key']}{m['sep']}{REDACTED}", text)
+    text = _NSEC_PATTERN.sub(REDACTED, text)
+    return text
 
 
 F = TypeVar("F", bound=Callable[..., Any])

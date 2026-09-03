@@ -79,6 +79,16 @@ class Settings(BaseSettings):
     service_logs_timeout_seconds: int = 30
     service_logs_max_lines: int = 2000
 
+    # operation_logs()/package_logs(): a real install/upgrade operation's
+    # log can run to thousands of lines (full shell traces from every
+    # script hook) - returning that by default is a lot of low-signal
+    # content for a caller to pay token cost on, on every call, even one
+    # that only wanted "did this succeed". Callers that genuinely need the
+    # full log still can (operation_logs' tail_lines param, or set this
+    # higher/None for "unbounded" - see its docstring for the unrelated
+    # yunohost.log.log_show() bug this must stay compatible with).
+    operation_logs_default_tail_lines: int = 200
+
     # Same-host Nostr YunoHost catalogue publisher integration.
     catalog_cli_path: Path = Path("/var/lib/nostr-catalogd/nostr-ynh")
     catalog_publisher_key_path: Path = Path("/etc/nostr-catalogd/publisher.key")

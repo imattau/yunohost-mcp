@@ -269,7 +269,9 @@ def service_logs(
     "err..emerg") - e.g. priority="err..emerg" for error-level entries
     only. `grep` filters by a text/regex pattern. `lines` caps how many
     of the most recent matching entries come back (server-enforced
-    maximum applies regardless of what's requested).
+    maximum applies regardless of what's requested). Secret-shaped
+    content (a password/token/api_key/... assignment) in each entry's
+    message is redacted.
     """
     return adapter.service_logs(service, since=since, until=until, priority=priority, grep=grep, lines=lines)
 
@@ -324,8 +326,10 @@ def operation_status(name: str) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.LOGS_READ)
 def operation_logs(name: str, tail_lines: int | None = None) -> dict[str, Any]:
-    """Return the log content for one YunoHost operation, most recent
-    `tail_lines` lines only (default: all)."""
+    """Return the log content for one YunoHost operation - most recent
+    `tail_lines` lines only (default: a bounded tail, not the whole log;
+    pass a larger tail_lines for more). Secret-shaped content (a
+    password/token/api_key/... assignment) in the log text is redacted."""
     return adapter.operation_logs(name, tail_lines=tail_lines)
 
 
@@ -641,10 +645,11 @@ def package_remove_test(app: str, purge: bool = True) -> dict[str, Any]:
 @redact_response
 @translate_known_errors
 @require_scope(Scope.PACKAGES_INSPECT)
-def package_logs(operation: str) -> dict[str, Any]:
-    """Return the full log for one operation - an alias over operation_logs()
-    for the package-development workflow (PLAN.md Phase 8)."""
-    return adapter.operation_logs(operation)
+def package_logs(operation: str, tail_lines: int | None = None) -> dict[str, Any]:
+    """Return the log for one operation - an alias over operation_logs()
+    for the package-development workflow (PLAN.md Phase 8). See that
+    tool's docstring for the default tail size and log-text redaction."""
+    return adapter.operation_logs(operation, tail_lines=tail_lines)
 
 
 @mcp.tool()
