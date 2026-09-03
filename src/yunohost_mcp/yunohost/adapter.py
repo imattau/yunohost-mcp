@@ -38,8 +38,41 @@ class YunohostUnavailableError(RuntimeError):
     """Raised when a real YunoHost call is attempted but yunohost.* can't be imported."""
 
 
+_i18n_initialized = False
+
+
+def _ensure_i18n_initialized() -> None:
+    """Initialize moulinette's i18n before any real yunohost.* call.
+
+    Several yunohost.* modules (e.g. yunohost.service) call into
+    m18n.key_exists()/m18n.n(), but m18n.translator is only set up by
+    moulinette.cli()/moulinette.api() - the normal CLI/API bootstrap this
+    adapter deliberately bypasses by importing yunohost.* directly
+    in-process (see module docstring). Skipping this raises
+    AttributeError: 'Moulinette18n' object has no attribute 'translator'
+    the first time a call happens to touch m18n. yunohost.init_i18n() is
+    yunohost's own documented hook for exactly this "in-process, not via
+    moulinette.cli" scenario.
+    """
+    global _i18n_initialized
+    if _i18n_initialized:
+        return
+    _i18n_initialized = True
+    try:
+        from yunohost import init_i18n
+    except ImportError:
+        # No real top-level `yunohost` package (e.g. adapter tests inject
+        # fake yunohost.* submodules straight into sys.modules without one)
+        # - nothing to initialize. Let the caller's own import of the
+        # target module/attr raise YunohostUnavailableError if it's the
+        # real one that's actually missing.
+        return
+    init_i18n()
+
+
 def _import_attr(module_name: str, attr: str) -> Any:
     try:
+        _ensure_i18n_initialized()
         module = importlib.import_module(module_name)
         return getattr(module, attr)
     except ImportError as exc:
