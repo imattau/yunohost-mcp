@@ -658,24 +658,34 @@ class YunohostAdapter:
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
     def app_upgrade(
-        self, app: str | list[str] | None = None, force: bool = False, file: str | None = None
+        self,
+        app: str | list[str] | None = None,
+        force: bool = False,
+        file: str | None = None,
+        url: str | None = None,
     ) -> dict[str, Any]:
         if self.settings.fake_yunohost:
-            return {"fake": True, "app": app, "file": file, "result": "success"}
+            return {"fake": True, "app": app, "file": file, "url": url, "result": "success"}
         # app_upgrade() is not @is_unit_operation-decorated; it builds its
         # own OperationLogger internally, once per app it actually
         # upgrades, so there's no single id to hand back for a multi-app
         # call - the per-app result dict plus operations_list() cover it.
         # `file` (a local folder or tarball) is what package_upgrade_test
         # uses to upgrade an already-installed app from a candidate source
-        # instead of the catalog - app_upgrade() only accepts a single app
-        # when file/url is given (PHASE0-style check of the real source).
+        # instead of the catalog. `url` is the same idea for an app that
+        # isn't in any registered catalog at all (installed via `app
+        # install <url>` directly, e.g. this server's own yunohost_mcp
+        # app) - without it, real app_upgrade() has no catalog entry to
+        # compare against and raises "No apps can be upgraded" even
+        # though a newer commit genuinely exists at that url. Both accept
+        # only a single app (PHASE0-style check of the real source), same
+        # as the real function.
         # Routed via _call_via_system_python for the same reason as
         # app_install() just above - app_upgrade() can re-parse manifest
         # [install] options too (e.g. an upgrade that adds a new question,
         # or reconfirms an existing domain/group one).
         result = _call_via_system_python(
-            "yunohost.app", "app_upgrade", {"app": app or [], "force": force, "file": file}, self.settings
+            "yunohost.app", "app_upgrade", {"app": app or [], "force": force, "file": file, "url": url}, self.settings
         )
         return {"fake": False, "app": app, "result": result}
 

@@ -443,14 +443,22 @@ def app_install(app: str, label: str | None = None, args: str | None = None, for
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
 @require_confirmation("apps.upgrade", policy=policy_rules, confirmation_store=confirmation_store, checks=_check_apps_upgrade)
-def app_upgrade(app: str | None = None, force: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
+def app_upgrade(
+    app: str | None = None, force: bool = False, url: str | None = None, confirmation_id: str | None = None
+) -> dict[str, Any]:
     """Upgrade one installed YunoHost app, or all upgradable apps if none is specified.
+
+    `url` is a Git URL to upgrade from - required for an app that isn't
+    in any registered catalog (installed directly via a repo URL rather
+    than the catalog), since without it there's no source to diff
+    against and this fails with "No apps can be upgraded". Only valid
+    together with a single `app`.
 
     Blocked (PolicyViolation, not confirmable) unless a recent backup
     exists and there is enough free disk space - see policy.toml /
     policy/rules.py's DEFAULT_POLICY["apps.upgrade"].
     """
-    return adapter.app_upgrade(app=app, force=force)
+    return adapter.app_upgrade(app=app, force=force, url=url)
 
 
 @mcp.tool()

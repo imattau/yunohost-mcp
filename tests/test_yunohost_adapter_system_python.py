@@ -149,8 +149,33 @@ def test_app_upgrade_calls_call_via_system_python_with_correct_kwargs(monkeypatc
 
     assert captured["module_name"] == "yunohost.app"
     assert captured["attr"] == "app_upgrade"
-    assert captured["kwargs"] == {"app": "ditto", "force": False, "file": "/tmp/ditto-candidate"}
+    assert captured["kwargs"] == {"app": "ditto", "force": False, "file": "/tmp/ditto-candidate", "url": None}
     assert result == {"fake": False, "app": "ditto", "result": {"success": ["ditto"]}}
+
+
+def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.MonkeyPatch):
+    # An app installed directly from a Git URL (never registered in any
+    # catalog - e.g. this server's own yunohost_mcp app) has no catalog
+    # entry for app_upgrade() to diff against without an explicit `url`,
+    # and fails with "No apps can be upgraded" otherwise - caught live
+    # trying to self-upgrade yunohost_mcp via the MCP tool.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["kwargs"] = kwargs
+        return {"success": ["yunohost_mcp"]}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    adapter.app_upgrade(app="yunohost_mcp", url="https://github.com/imattau/yunohost-mcp_ynh")
+
+    assert captured["kwargs"] == {
+        "app": "yunohost_mcp",
+        "force": False,
+        "file": None,
+        "url": "https://github.com/imattau/yunohost-mcp_ynh",
+    }
 
 
 def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
