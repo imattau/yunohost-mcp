@@ -18,9 +18,20 @@ from typing import Any, TypeVar
 
 from yunohost_mcp.audit.log import AuditLog
 from yunohost_mcp.auth.identity import require_current_request
+from yunohost_mcp.policy.confirmation import pop_consumed_ticket
 from yunohost_mcp.policy.locks import LockedError, WriteLock
 
 F = TypeVar("F", bound=Callable[..., dict[str, Any]])
+
+
+def _consumed_ticket_approved_by() -> str | None:
+    """Read-and-clear whatever require_confirmation (wrapped inside this
+    decorator - see server.py's decoration order) left behind for this
+    call. Exactly one of audited_write's three exit branches runs per
+    call, so this is called exactly once per call - never leaves a stale
+    value for the next one."""
+    ticket = pop_consumed_ticket()
+    return ticket.owner_approved_by if ticket else None
 
 
 def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Callable[[F], F]:
@@ -41,6 +52,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
                     decision="allowed",
                     result="locked",
                     error=str(exc),
+                    approved_by=_consumed_ticket_approved_by(),
                 )
                 raise
             except Exception as exc:
@@ -51,6 +63,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
                     decision="allowed",
                     result="error",
                     error=str(exc),
+                    approved_by=_consumed_ticket_approved_by(),
                 )
                 raise
 
@@ -71,6 +84,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
                 decision="allowed",
                 result=outcome,
                 yunohost_operation=operation_id,
+                approved_by=_consumed_ticket_approved_by(),
             )
             return result
 

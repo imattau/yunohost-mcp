@@ -66,7 +66,14 @@ NIP-98-signed calls, verified the normal way each already is, bound
 together by the confirmation ticket (policy/confirmation.py). The expected
 flow has the requester authenticate as an agent's own delegated key
 (auth/delegation.py) and the owner approve separately via NIP-46, so their
-signer never touches the automated request path.
+signer never touches the automated request path. approval_get/
+approval_status expose that same pending record - operation_hash included
+- read-only, to the confirmation's own requester or the owner, so an
+external approval helper can fetch authoritative data before asking the
+owner to sign anything, instead of trusting an out-of-band claim. Every
+write gated by require_owner_signature also records approved_by in its
+own audit entry once executed (audit/decorator.py), not just in the
+separate owner.approve entry.
 Phase 14: high-level composite workflows (diagnose_app, validate_server,
 safe_upgrade, repair_app, test_package) built entirely out of the tools
 already in this file - no new yunohost.* call exists anywhere in Phase 14.
@@ -102,7 +109,7 @@ from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
-from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
+from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket
 from yunohost_mcp.policy.enforcement import require_confirmation, require_scope, translate_known_errors
 from yunohost_mcp.policy.locks import WriteLock
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
@@ -1243,6 +1250,63 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         "operation_plan": ticket.plan,
         "operation_hash": ticket.operation_hash,
         "approved_by": request.pubkey,
+    }
+
+
+def _visible_confirmation(confirmation_id: str) -> ConfirmationTicket:
+    """Shared access rule for approval_get/approval_status
+    (owner-approval-plan.md): visible to the confirmation's own requester
+    (so an agent can poll what it's waiting on) and to Scope.OWNER_APPROVE
+    holders (the owner, or their NIP-46 approval helper acting under the
+    owner's own identity) - no one else. Uses peek(), not consume(): a
+    read tool must never advance or invalidate ticket state."""
+    request = require_current_request()
+    ticket = confirmation_store.peek(confirmation_id)
+    if ticket.pubkey != request.pubkey and not request.has_scope(Scope.OWNER_APPROVE):
+        raise ConfirmationError("not authorized to view this confirmation")
+    return ticket
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+def approval_get(confirmation_id: str) -> dict[str, Any]:
+    """Authoritative record for a pending confirmation (owner-approval-plan.md).
+
+    The external NIP-46 approval helper calls this before asking the owner
+    to sign anything, so it reviews server-computed data - operation_hash
+    included - rather than trusting whatever the requester claims out of
+    band. Any argument, target, or operation_hash mismatch between what
+    the helper displays and what it's about to sign should be treated as
+    an invalidated approval.
+    """
+    ticket = _visible_confirmation(confirmation_id)
+    return {
+        "confirmation_id": ticket.confirmation_id,
+        "tool": ticket.tool,
+        "operation_plan": ticket.plan,
+        "operation_hash": ticket.operation_hash,
+        "requester_pubkey": ticket.pubkey,
+        "created_at": ticket.created_at,
+        "expires_at": ticket.expires_at,
+        "approved": ticket.owner_approved_by is not None,
+        "approved_by": ticket.owner_approved_by,
+    }
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+def approval_status(confirmation_id: str) -> dict[str, Any]:
+    """Lightweight poll for whether a pending confirmation
+    (owner-approval-plan.md) has been owner-approved yet - the same access
+    rule as approval_get, without the full operation plan, for a requester
+    that just wants to know whether to retry the original call yet."""
+    ticket = _visible_confirmation(confirmation_id)
+    return {
+        "confirmation_id": ticket.confirmation_id,
+        "approved": ticket.owner_approved_by is not None,
+        "expires_at": ticket.expires_at,
     }
 
 

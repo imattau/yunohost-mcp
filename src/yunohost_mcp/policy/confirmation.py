@@ -50,6 +50,7 @@ import hashlib
 import json
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -211,3 +212,29 @@ class ConfirmationStore:
 
     def __len__(self) -> int:
         return len(self._pending)
+
+
+_consumed_ticket: ContextVar[ConfirmationTicket | None] = ContextVar("consumed_confirmation_ticket", default=None)
+"""Carries the ConfirmationTicket policy/enforcement.py's require_confirmation
+just consumed for the currently-executing tool call over to
+audit/decorator.py's audited_write, which wraps require_confirmation from
+the outside (see server.py's decoration order: @audited_write always
+sits above @require_confirmation) - so it can record owner_approved_by
+into the write's own audit entry without either module changing what it
+returns to the other. Plain module-global ContextVar, not a token-based
+push/pop stack: set_consumed_ticket()/pop_consumed_ticket() below are the
+only two call sites, always used as a single set-then-pop pair within one
+tool call, the same pattern auth/identity.py's _current_request uses."""
+
+
+def set_consumed_ticket(ticket: ConfirmationTicket | None) -> None:
+    _consumed_ticket.set(ticket)
+
+
+def pop_consumed_ticket() -> ConfirmationTicket | None:
+    """Read-and-clear: audited_write calls this exactly once per call, on
+    every exit path (success, lock contention, exception), so a value
+    never leaks into an unrelated later call on the same thread."""
+    ticket = _consumed_ticket.get()
+    _consumed_ticket.set(None)
+    return ticket

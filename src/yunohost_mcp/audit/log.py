@@ -41,6 +41,7 @@ class AuditLog:
         result: str,
         yunohost_operation: str | None = None,
         error: str | None = None,
+        approved_by: str | None = None,
     ) -> str:
         audit_id = f"mcp-{uuid.uuid4().hex[:20]}"
         entry = {
@@ -53,6 +54,15 @@ class AuditLog:
             "yunohost_operation": yunohost_operation,
             "result": result,
             "error": error,
+            # Owner co-signing (owner-approval-plan.md): who approved this
+            # operation via approve_operation, when it was gated by
+            # require_owner_signature - None for every other write, and for
+            # this same operation's own confirmation_pending/error outcomes
+            # before an approval existed yet. Lets an audit_list/audit_get
+            # reader see both "who ran this" and "who authorized it" from
+            # one entry, without cross-referencing the separate
+            # owner.approve entry by confirmation_id.
+            "approved_by": approved_by,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as f:

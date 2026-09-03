@@ -66,6 +66,8 @@ EXPECTED_TOOLS = frozenset(
         "audit_list",
         "audit_get",
         "approve_operation",
+        "approval_get",
+        "approval_status",
         "diagnose_app",
         "validate_server",
         "safe_upgrade",

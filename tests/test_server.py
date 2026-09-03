@@ -40,7 +40,7 @@ PHASE8_TOOLS = {
 }
 PHASE10_TOOLS = {"audit_list", "audit_get"}
 PHASE11_TOOLS = {"server_identity"}
-PHASE13_TOOLS = {"approve_operation"}
+PHASE13_TOOLS = {"approve_operation", "approval_get", "approval_status"}
 PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app", "test_package"}
 USER_MGMT_READ_TOOLS = {"user_group_list", "user_permission_list"}
 USER_MGMT_PLAIN_CONFIRM_TOOLS = {"user_create", "user_update", "user_group_create", "user_group_update"}
@@ -506,6 +506,121 @@ async def test_phase13_approved_confirmation_can_still_be_used_for_a_second_call
 
         result = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
         assert result.is_error is not True
+
+
+@pytest.mark.anyio
+async def test_phase13_approved_write_records_approved_by_in_its_own_audit_entry():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
+
+        existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+        result = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert result.is_error is not True, result.content
+        new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["tool"] == "system.upgrade"
+    assert entry["caller"] == "local-stdio"
+    assert entry["approved_by"] == "second-admin"
+
+
+@pytest.mark.anyio
+async def test_phase13_write_not_requiring_owner_signature_has_no_approved_by():
+    # domains.write requires a plain confirmation but not owner signature -
+    # its audit entry should never carry an approved_by.
+    async with Client(mcp) as client:
+        first = await client.call_tool("domain_add", {"domain": "no-owner-sig.example.com"})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+        result = await client.call_tool(
+            "domain_add", {"domain": "no-owner-sig.example.com", "confirmation_id": confirmation_id}
+        )
+        assert result.is_error is not True, result.content
+        new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert entry["approved_by"] is None
+
+
+@pytest.mark.anyio
+async def test_approval_get_visible_to_requester():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        result = await client.call_tool("approval_get", {"confirmation_id": confirmation_id})
+        assert result.is_error is not True, result.content
+        data = result.structured_content
+        assert data["confirmation_id"] == confirmation_id
+        assert data["tool"] == "system.upgrade"
+        assert data["operation_hash"] == first.structured_content["operation_hash"]
+        assert data["requester_pubkey"] == "local-stdio"
+        assert data["approved"] is False
+        assert data["approved_by"] is None
+
+
+@pytest.mark.anyio
+async def test_approval_get_visible_to_owner_even_when_not_the_requester():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        set_current_request(SECOND_ADMIN_REQUEST)
+        try:
+            result = await client.call_tool("approval_get", {"confirmation_id": confirmation_id})
+            assert result.is_error is not True, result.content
+            assert result.structured_content["requester_pubkey"] == "local-stdio"
+        finally:
+            set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_approval_get_denied_for_unrelated_identity():
+    package_developer = AuthenticatedRequest(
+        pubkey="dev-pubkey",
+        event_id="d" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="dev-pubkey",
+            name="dev-agent",
+            roles=("package-developer",),
+            scopes=scopes_for_roles(("package-developer",)),
+        ),
+    )
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        set_current_request(package_developer)
+        try:
+            result = await client.call_tool("approval_get", {"confirmation_id": confirmation_id})
+            assert result.is_error is True
+        finally:
+            set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_approval_status_reflects_approval_state():
+    async with Client(mcp) as client:
+        first = await client.call_tool("system_upgrade", {})
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        before = await client.call_tool("approval_status", {"confirmation_id": confirmation_id})
+        assert before.structured_content == {
+            "confirmation_id": confirmation_id,
+            "approved": False,
+            "expires_at": first.structured_content["expires_at"],
+        }
+
+        await _approve_as_second_admin(client, confirmation_id)
+
+        after = await client.call_tool("approval_status", {"confirmation_id": confirmation_id})
+        assert after.structured_content["approved"] is True
 
 
 @pytest.mark.anyio

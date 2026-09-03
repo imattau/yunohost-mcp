@@ -64,7 +64,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from yunohost_mcp.auth.identity import require_current_request
 from yunohost_mcp.auth.owner import OwnerConfigError
-from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
+from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, set_consumed_ticket
 from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostUnavailableError
@@ -115,13 +115,18 @@ def require_confirmation(
 
             if rule.require_confirmation:
                 try:
-                    confirmation_store.consume(
+                    ticket = confirmation_store.consume(
                         confirmation_id or "",
                         pubkey=request.pubkey,
                         tool=policy_key,
                         arguments=kwargs,
                         require_owner_approval=rule.require_owner_signature,
                     )
+                    # Visible to audit/decorator.py's audited_write (the
+                    # decorator wrapping this one from the outside) so the
+                    # write's own audit entry can record who approved it -
+                    # see policy/confirmation.py's _consumed_ticket docstring.
+                    set_consumed_ticket(ticket)
                 except ConfirmationError:
                     if confirmation_id:
                         raise
