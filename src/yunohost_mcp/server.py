@@ -45,6 +45,17 @@ been writing since Phase 5. Gated by Scope.AUDIT_READ, which only the
 administrator role grants (policy/roles.py) - "administrator-only" per
 PLAN.md, expressed as a scope no other role includes rather than a
 role-name check in the tool itself.
+Phase 11/12: delegation (auth/delegation.py) lets an identity.toml-mapped
+owner grant a disposable agent identity a signed subset of their own
+scopes, without sharing a private key - the agent authenticates with its
+own NIP-98 signature as always and additionally presents the delegation
+event via X-Nostr-Delegation; auth/middleware.py falls back to resolving
+it only when the request's own pubkey has no direct identity.toml entry.
+Requires this server to have its own Nostr identity (Phase 12, minimal
+slice: auth/server_identity.py) so a delegation can name which server it
+targets - get_server_identity() lazily generates/loads that keypair only
+when something (the server_identity tool, or the http transport) actually
+needs it, not merely on import.
 """
 
 from __future__ import annotations
@@ -66,6 +77,8 @@ from yunohost_mcp.auth.identity import (
 )
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
+from yunohost_mcp.auth.revocation import RevocationStore
+from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
 from yunohost_mcp.policy.enforcement import require_confirmation, require_scope
@@ -84,6 +97,20 @@ confirmation_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_sec
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 
 mcp = MCPServer(settings.server_name)
+
+_server_identity: ServerIdentity | None = None
+
+
+def get_server_identity() -> ServerIdentity:
+    """Lazy singleton: only generates/loads the key file (disk I/O, and a
+    key generated on first touch) when something actually needs it - the
+    server_identity tool, or the http transport's delegation support - not
+    merely because this module was imported (stdio users, and every test,
+    would otherwise get one written to disk for no reason)."""
+    global _server_identity
+    if _server_identity is None:
+        _server_identity = ServerIdentity.load_or_generate(settings.server_identity_path())
+    return _server_identity
 
 
 def _check_apps_upgrade(rule: PolicyRule) -> None:
@@ -515,6 +542,19 @@ def whoami() -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+@redact_response
+def server_identity() -> dict[str, Any]:
+    """Return this server's own Nostr identity (Phase 12): its npub and hex
+    pubkey. A delegation (Phase 11) must name this exact pubkey in its
+    'server' tag to be accepted here. No scope required - this is public
+    information a caller needs *before* it can construct a valid delegation
+    naming this server, not something to gate behind auth for this server.
+    """
+    identity = get_server_identity()
+    return {"npub": identity.npub, "pubkey": identity.pubkey_hex}
+
+
 def create_http_app():
     """Build the ASGI app for the Streamable HTTP transport: MCP wrapped in NIP-98 auth + authz."""
     inner_app = mcp.streamable_http_app()
@@ -524,6 +564,8 @@ def create_http_app():
         identity_store=identity_store,
         replay_cache=ReplayCache(ttl_seconds=settings.nip98_replay_ttl_seconds),
         clock_skew_seconds=settings.nip98_clock_skew_seconds,
+        server_identity=get_server_identity(),
+        revocation_store=RevocationStore.load(settings.revoked_delegations_path()),
     )
 
 

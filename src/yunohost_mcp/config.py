@@ -65,6 +65,16 @@ class Settings(BaseSettings):
         an opt-in feature."""
         return self.config_dir / "policy.toml"
 
+    def server_identity_path(self) -> Path:
+        """This server's own Nostr keypair (Phase 12, minimal slice) - the
+        private key file, 0600. Generated on first run if absent."""
+        return self.config_dir / "server_identity.key"
+
+    def revoked_delegations_path(self) -> Path:
+        """Explicitly-revoked delegation event ids (Phase 11). A missing
+        file means nothing has been revoked yet, not "revoke everything"."""
+        return self.config_dir / "revoked_delegations.toml"
+
 
 def load_settings() -> Settings:
     return Settings()

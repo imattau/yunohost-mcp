@@ -6,35 +6,46 @@ so it works regardless of what web framework the wrapped app ("mcp"'s
 streamable-http Starlette app) uses internally, and so it can read the exact
 raw request body bytes NIP-98 signs over before anything else touches them.
 
-Two independent stages, per PLAN.md's architecture:
+Three independent stages, per PLAN.md's architecture:
   1. Authentication (NIP-98): proves a request was signed, fresh, and not
      replayed, by the holder of `pubkey`'s private key. Failure -> 401.
   2. Authorization (identity.toml): resolves `pubkey` to an IdentityRecord
-     with roles/scopes. No record, an expired record, or an unknown role ->
-     zero scopes -> the request is rejected here too, with 403 (identity
-     proven, but not authorized for anything). A signature alone never
-     grants access.
+     with roles/scopes.
+  3. Delegation (Phase 11, optional): if `pubkey` has no direct
+     identity.toml entry (or an expired one), and the request carries an
+     `X-Nostr-Delegation` header, that header is checked as a delegation
+     event naming `pubkey` as its delegate - see auth/delegation.py. Only
+     attempted when `server_identity` is configured; delegation is off
+     entirely otherwise (`X-Nostr-Delegation` is then just ignored).
+  No record, an expired one, an unknown role, or an invalid/absent
+  delegation -> zero scopes -> 403 (identity proven, but not authorized for
+  anything). A signature alone never grants access.
 
 Individual tool handlers still check the specific scope they need via
 auth/identity.py's AuthenticatedRequest.has_scope() — this middleware only
 guarantees that whatever reaches a tool handler has *some* non-expired,
-role-mapped identity attached.
+scope-bearing identity attached.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 
-from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityStore, set_current_request
+from yunohost_mcp.auth.delegation import DelegationError, resolve_delegated_identity, verify_delegation_event
+from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, IdentityStore, set_current_request
 from yunohost_mcp.auth.nip98 import Nip98Error, verify_nip98_request
+from yunohost_mcp.auth.nostr import NostrEvent, NostrEventError
 from yunohost_mcp.auth.replay import ReplayCache
+from yunohost_mcp.auth.revocation import RevocationStore
+from yunohost_mcp.auth.server_identity import ServerIdentity
 
 logger = logging.getLogger(__name__)
 
 
 class NostrAuthMiddleware:
-    """ASGI middleware: NIP-98 authentication + identity.toml authorization on http requests."""
+    """ASGI middleware: NIP-98 authentication + identity.toml/delegation authorization on http requests."""
 
     def __init__(
         self,
@@ -44,12 +55,16 @@ class NostrAuthMiddleware:
         replay_cache: ReplayCache | None = None,
         clock_skew_seconds: int = 60,
         exempt_paths: frozenset[str] = frozenset(),
+        server_identity: ServerIdentity | None = None,
+        revocation_store: RevocationStore | None = None,
     ) -> None:
         self.app = app
         self.identity_store = identity_store
         self.replay_cache = replay_cache or ReplayCache()
         self.clock_skew_seconds = clock_skew_seconds
         self.exempt_paths = exempt_paths
+        self.server_identity = server_identity
+        self.revocation_store = revocation_store or RevocationStore(frozenset())
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http" or scope["path"] in self.exempt_paths:
@@ -77,14 +92,10 @@ class NostrAuthMiddleware:
             await _send_error(send, 401, str(exc), www_authenticate=True)
             return
 
-        record = self.identity_store.lookup(nip98_identity.pubkey)
+        record = self._resolve_identity(nip98_identity.pubkey, headers)
         if record is None:
-            logger.info("Unknown pubkey %s rejected for %s %s", nip98_identity.pubkey, method, url)
-            await _send_error(send, 403, "pubkey is not in identity.toml: no roles granted")
-            return
-        if record.is_expired():
-            logger.info("Expired identity %s (%s) rejected for %s %s", record.name, nip98_identity.pubkey, method, url)
-            await _send_error(send, 403, f"identity {record.name!r} expired at {record.expires}")
+            logger.info("Unknown/unauthorized pubkey %s rejected for %s %s", nip98_identity.pubkey, method, url)
+            await _send_error(send, 403, "pubkey is not in identity.toml, and no valid delegation was presented")
             return
 
         request = AuthenticatedRequest(
@@ -98,6 +109,29 @@ class NostrAuthMiddleware:
             await self.app(scope, receive, send)
         finally:
             set_current_request(None)
+
+    def _resolve_identity(self, pubkey: str, headers: dict[str, str]) -> IdentityRecord | None:
+        record = self.identity_store.lookup(pubkey)
+        if record is not None and not record.is_expired():
+            return record
+
+        delegation_header = headers.get("x-nostr-delegation")
+        if self.server_identity is None or not delegation_header:
+            return None
+
+        try:
+            raw = json.loads(base64.b64decode(delegation_header, validate=True))
+            event = NostrEvent.model_validate(raw)
+            claim = verify_delegation_event(
+                event,
+                expected_delegate_pubkey=pubkey,
+                server_pubkey_hex=self.server_identity.pubkey_hex,
+                revocation_store=self.revocation_store,
+            )
+            return resolve_delegated_identity(claim, identity_store=self.identity_store)
+        except (ValueError, NostrEventError, DelegationError) as exc:
+            logger.info("Delegation rejected for pubkey %s: %s", pubkey, exc)
+            return None
 
 
 async def _buffer_body(receive):

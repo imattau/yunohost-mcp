@@ -12,10 +12,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tests.auth_helpers import make_nip98_authorization_header, new_keypair
+from tests.auth_helpers import make_delegation_header, make_nip98_authorization_header, new_keypair
 from yunohost_mcp.auth.identity import IdentityRecord, IdentityStore, get_current_request
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.replay import ReplayCache
+from yunohost_mcp.auth.revocation import RevocationStore
+from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.policy.roles import scopes_for_roles
 
 URL = "http://testserver/mcp"
@@ -168,6 +170,113 @@ async def test_exempt_path_bypasses_auth():
     status, data = await _call(app, scope)
     assert status == 200
     assert data["authenticated"] is False
+
+
+@pytest.mark.anyio
+async def test_delegated_agent_authenticates_via_x_nostr_delegation_header(tmp_path):
+    server_identity = ServerIdentity.load_or_generate(tmp_path / "server.key")
+    owner_sk, owner_pubkey = new_keypair()
+    agent_sk, agent_pubkey = new_keypair()
+
+    owner_store = _store_with(owner_pubkey, roles=("readonly",))
+    app = NostrAuthMiddleware(
+        echo_identity_app,
+        identity_store=owner_store,
+        server_identity=server_identity,
+        revocation_store=RevocationStore(frozenset()),
+    )
+
+    import time
+
+    delegation_header = make_delegation_header(
+        owner_sk,
+        owner_pubkey,
+        delegate_pubkey=agent_pubkey,
+        server_pubkey=server_identity.pubkey_hex,
+        scopes=["apps.read"],
+        expires_at=int(time.time()) + 3600,
+    )
+    # The agent signs the HTTP request itself with its OWN key - the
+    # delegation header is separate from (and doesn't replace) NIP-98.
+    nip98_header = make_nip98_authorization_header(agent_sk, agent_pubkey, method="GET", url=URL)
+    scope = _make_scope(
+        method="GET",
+        path="/mcp",
+        headers={"host": "testserver", "authorization": nip98_header, "x-nostr-delegation": delegation_header},
+    )
+    status, data = await _call(app, scope)
+    assert status == 200
+    assert data["authenticated"] is True
+    assert data["pubkey"] == agent_pubkey  # the AGENT's pubkey, not the owner's
+    assert "apps.read" in data["scopes"]
+
+
+@pytest.mark.anyio
+async def test_delegation_ignored_when_server_identity_not_configured(tmp_path):
+    owner_sk, owner_pubkey = new_keypair()
+    agent_sk, agent_pubkey = new_keypair()
+    owner_store = _store_with(owner_pubkey, roles=("readonly",))
+    # No server_identity passed - delegation support is off entirely.
+    app = NostrAuthMiddleware(echo_identity_app, identity_store=owner_store)
+
+    import time
+
+    delegation_header = make_delegation_header(
+        owner_sk,
+        owner_pubkey,
+        delegate_pubkey=agent_pubkey,
+        server_pubkey="s" * 64,
+        scopes=["apps.read"],
+        expires_at=int(time.time()) + 3600,
+    )
+    nip98_header = make_nip98_authorization_header(agent_sk, agent_pubkey, method="GET", url=URL)
+    scope = _make_scope(
+        method="GET",
+        path="/mcp",
+        headers={"host": "testserver", "authorization": nip98_header, "x-nostr-delegation": delegation_header},
+    )
+    status, _ = await _call(app, scope)
+    assert status == 403
+
+
+@pytest.mark.anyio
+async def test_revoked_delegation_rejected_by_middleware(tmp_path):
+    server_identity = ServerIdentity.load_or_generate(tmp_path / "server.key")
+    owner_sk, owner_pubkey = new_keypair()
+    agent_sk, agent_pubkey = new_keypair()
+    owner_store = _store_with(owner_pubkey, roles=("readonly",))
+
+    import time
+
+    from tests.auth_helpers import make_delegation_event
+
+    event = make_delegation_event(
+        owner_sk,
+        owner_pubkey,
+        delegate_pubkey=agent_pubkey,
+        server_pubkey=server_identity.pubkey_hex,
+        scopes=["apps.read"],
+        expires_at=int(time.time()) + 3600,
+    )
+    app = NostrAuthMiddleware(
+        echo_identity_app,
+        identity_store=owner_store,
+        server_identity=server_identity,
+        revocation_store=RevocationStore(frozenset({event.id})),
+    )
+
+    import base64
+    import json as _json
+
+    delegation_header = base64.b64encode(_json.dumps(event.model_dump()).encode()).decode()
+    nip98_header = make_nip98_authorization_header(agent_sk, agent_pubkey, method="GET", url=URL)
+    scope = _make_scope(
+        method="GET",
+        path="/mcp",
+        headers={"host": "testserver", "authorization": nip98_header, "x-nostr-delegation": delegation_header},
+    )
+    status, _ = await _call(app, scope)
+    assert status == 403
 
 
 @pytest.fixture

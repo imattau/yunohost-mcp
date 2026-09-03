@@ -61,3 +61,28 @@ def make_nip98_authorization_header(
     event = sign_event(sk, pubkey=pubkey, created_at=created_at, kind=27235, tags=tags)
     encoded = base64.b64encode(json.dumps(event.model_dump()).encode()).decode()
     return f"Nostr {encoded}"
+
+
+def make_delegation_event(
+    delegator_sk: PrivateKey,
+    delegator_pubkey: str,
+    *,
+    delegate_pubkey: str,
+    server_pubkey: str,
+    scopes: list[str],
+    expires_at: int,
+    created_at: int | None = None,
+):
+    from yunohost_mcp.auth.delegation import DELEGATION_KIND
+
+    created_at = int(time.time()) if created_at is None else created_at
+    tags = [["p", delegate_pubkey], ["server", server_pubkey], ["expiry", str(expires_at)]]
+    tags += [["scope", s] for s in scopes]
+    return sign_event(delegator_sk, pubkey=delegator_pubkey, created_at=created_at, kind=DELEGATION_KIND, tags=tags)
+
+
+def make_delegation_header(*args, **kwargs) -> str:
+    import base64
+
+    event = make_delegation_event(*args, **kwargs)
+    return base64.b64encode(json.dumps(event.model_dump()).encode()).decode()

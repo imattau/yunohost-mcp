@@ -36,6 +36,7 @@ PHASE8_TOOLS = {
     "package_run_tests",
 }
 PHASE10_TOOLS = {"audit_list", "audit_get"}
+PHASE11_TOOLS = {"server_identity"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -74,6 +75,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE7_TOOLS
             | PHASE8_TOOLS
             | PHASE10_TOOLS
+            | PHASE11_TOOLS
         )
         assert expected <= names
 
@@ -377,6 +379,21 @@ async def test_whoami_reports_local_stdio_identity():
         assert data["authenticated"] is True
         assert data["pubkey"] == "local-stdio"
         assert "administrator" in data["roles"]
+
+
+@pytest.mark.anyio
+async def test_server_identity_tool_returns_npub_and_pubkey():
+    async with Client(mcp) as client:
+        result = await client.call_tool("server_identity", {})
+        assert result.is_error is not True
+        data = result.structured_content
+        assert data["npub"].startswith("npub1")
+        assert len(data["pubkey"]) == 64
+
+        # Calling it again returns the *same* identity (lazy singleton,
+        # not regenerated per call).
+        again = await client.call_tool("server_identity", {})
+        assert again.structured_content == data
 
 
 @pytest.mark.anyio
