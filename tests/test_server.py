@@ -1116,7 +1116,7 @@ async def test_phase8_package_test_tool_denied_for_identity_without_scope():
 
 
 @pytest.mark.anyio
-async def test_phase8_package_developer_role_can_test_but_not_administer():
+async def test_phase8_package_developer_role_can_request_but_not_execute_system_upgrade():
     developer = AuthenticatedRequest(
         pubkey="feedface",
         event_id="f" * 64,
@@ -1130,9 +1130,13 @@ async def test_phase8_package_developer_role_can_test_but_not_administer():
         install = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh"})
         assert install.is_error is not True, install.content
 
-        # package-developer does not grant system.upgrade.
-        denied = await client.call_tool("system_upgrade", {})
-        assert denied.is_error is True
+        # package-developer inherits system.upgrade from app-admin, but the
+        # scope only lets it *request* the operation - require_owner_signature
+        # still parks it pending an administrator's co-sign rather than
+        # executing outright.
+        pending = await client.call_tool("system_upgrade", {})
+        assert pending.is_error is not True, pending.content
+        assert pending.structured_content["owner_signature_required"] is True
 
 
 @pytest.mark.anyio

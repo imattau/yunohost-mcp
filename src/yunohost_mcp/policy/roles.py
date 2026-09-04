@@ -56,6 +56,7 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.DOMAINS_WRITE,
     Scope.USERS_WRITE,
     Scope.USERS_DELETE,
+    Scope.SYSTEM_UPGRADE,
 }
 
 _PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {
