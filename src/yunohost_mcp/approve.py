@@ -41,6 +41,15 @@ Four actions:
       pairing over relays the owner's signer is actually likely to be
       listening on, rather than a fixed guess. See resolve_pair_relays.
 
+      --bunker-uri skips all of the above: if the signer app itself can
+      export a bunker:// connection string (its own "add a connection"
+      flow, distinct from scanning our nostrconnect:// link), pasting it
+      here connects immediately - no offer, no QR, nothing to display or
+      wait on, since the signer's endpoint is already fully described by
+      the URI. A practical alternative when nostrconnect://'s QR can't be
+      rendered usefully wherever `pair` is being driven from (e.g. a
+      plain-text-only display).
+
   yunohost-mcp-approve status
       Local-only, no network: reports whether a session is paired yet
       (and the paired signer's pubkey, if so) by reading the session
@@ -332,14 +341,45 @@ def _build_nostrconnect_uri(*, app_pubkey_hex: str, relays: list[str], secret: s
     return f"nostrconnect://{app_pubkey_hex}?{query}"
 
 
+def _render_qr_matrix_ascii(matrix: list[list[bool]]) -> str:
+    """Half-block Unicode rendering (2 module-rows per text row, like
+    qrcode.QRCode.print_ascii) - reimplemented rather than calling
+    print_ascii directly because that method's own "light module"
+    character is U+00A0 (non-breaking space), not a plain space. That
+    single character choice is what broke this in a YunoHost webadmin
+    config-panel alert: something in its rendering pipeline HTML-entity-
+    encodes U+00A0 into the literal 6-character text "&nbsp;" and never
+    decodes it back, so every light module showed up as visible garbage
+    text instead of blank space - not a size/CSS problem, a wrong-
+    whitespace-character problem. Plain ASCII space (U+0020) doesn't hit
+    whatever that encoding step specifically targets."""
+    lines = []
+    height = len(matrix)
+    width = len(matrix[0]) if height else 0
+    for y in range(0, height, 2):
+        top = matrix[y]
+        bottom = matrix[y + 1] if y + 1 < height else [False] * width
+        row = []
+        for x in range(width):
+            dark_top, dark_bottom = top[x], bottom[x]
+            if dark_top and dark_bottom:
+                row.append("█")  # █
+            elif dark_top:
+                row.append("▀")  # ▀
+            elif dark_bottom:
+                row.append("▄")  # ▄
+            else:
+                row.append(" ")  # plain space, not qrcode's default U+00A0
+        lines.append("".join(row))
+    return "\n".join(lines)
+
+
 def _qr_ascii_if_available(uri: str) -> str | None:
     """Best-effort - owner-approval-plan.md says "where supported", not
     required. Returns None (not a printed fallback message here - callers
     decide what, if anything, to say) when the optional `qrcode` package
     isn't installed; this helper does not depend on it."""
     try:
-        import io
-
         import qrcode
     except ImportError:
         return None
@@ -351,9 +391,7 @@ def _qr_ascii_if_available(uri: str) -> str | None:
     qr = qrcode.QRCode(border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(uri)
     qr.make(fit=True)
-    buf = io.StringIO()
-    qr.print_ascii(out=buf, invert=True)
-    return buf.getvalue()
+    return _render_qr_matrix_ascii(qr.get_matrix())
 
 
 async def _resolve_relays_for_offer(args: argparse.Namespace) -> list[str]:
@@ -423,6 +461,30 @@ async def _pair(args: argparse.Namespace) -> None:
             f"already paired (session at {session_path}) - pass --repair to pair again "
             "(e.g. after switching signer apps or losing the session)"
         )
+
+    if args.bunker_uri:
+        # The signer already has an endpoint published (most apps that can
+        # export a bunker:// string generate it from their own "add a
+        # connection" flow) - no nostrconnect:// offer, no QR, nothing to
+        # display or scan. We only need our own disposable local channel
+        # key; the signer's pubkey/relay/secret all come from the pasted
+        # URI itself.
+        app_keys = Keys.generate()
+        try:
+            parsed = NostrConnectUri.parse(args.bunker_uri)
+        except Exception as exc:
+            raise ApprovalHelperError(f"not a valid bunker:// URI: {exc}") from exc
+        print(f"{APP_NAME}: connecting to the pasted bunker:// signer...", file=sys.stderr)
+        connect = NostrConnect(parsed, app_keys, timedelta(seconds=args.timeout), None)
+        signer_pubkey = await connect.get_public_key_async()
+        if signer_pubkey is None:
+            raise ApprovalHelperError("could not reach the signer at that bunker:// URI - check it's current and try again")
+        session = ApprovalSession(app_secret_key=app_keys.secret_key().to_hex(), bunker_uri=str(await connect.bunker_uri()))
+        session.save(session_path)
+        Path(args.offer_file).unlink(missing_ok=True)  # any pending offer is moot now
+        print(f"{APP_NAME}: paired with signer {signer_pubkey.to_bech32()}", file=sys.stderr)
+        print(f"{APP_NAME}: session saved to {session_path}", file=sys.stderr)
+        return
 
     offer_path = Path(args.offer_file)
     offer = await _resolve_offer(args, offer_path)
@@ -624,6 +686,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_offer_relay_args(pair_parser)
     pair_parser.add_argument("--repair", action="store_true", help="pair again even if already paired")
+    pair_parser.add_argument(
+        "--bunker-uri",
+        help="pair by pasting a bunker:// URI the signer app itself generated (its own 'add a connection' "
+        "export, if it has one), instead of scanning/opening a nostrconnect:// link - no offer, no QR, "
+        "no waiting: the signer's endpoint is already in the URI, so this connects immediately. "
+        "Ignores all --relay/--owner-npub/--extra-relay/--regenerate (nothing to resolve).",
+    )
 
     subparsers.add_parser("status", help="report whether a signer is paired yet (local-only, no network)")
 
