@@ -119,12 +119,23 @@ DEFAULT_DISCOVERY_RELAYS = ["wss://purplepag.es", "wss://relay.nostr.band", "wss
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 5
 # nostrconnect:// puts one `relay=` param per relay directly in the URI it
-# encodes as a QR - a real owner's NIP-65 list is often 5-15 entries,
-# which (unlike DEFAULT_RELAYS' fixed 3) has no natural cap and produces
-# a QR too dense to comfortably scan. Auto-populated relay lists
-# (resolve_pair_relays' non-explicit path) are truncated to this many;
-# an explicit --relay is a deliberate override and left uncapped.
-MAX_AUTO_RELAYS = 4
+# encodes as a QR, and the QR's rendered size (an ASCII/text render has no
+# separate "small" option - font size isn't ours to control wherever it's
+# displayed) tracks that URI's length directly. A real owner's NIP-65 list
+# is often 5-15 entries, which (unlike DEFAULT_RELAYS' fixed 3) has no
+# natural cap; even earlier caps of 4 and 2 still produced an
+# uncomfortably large code in practice - dropping from 2 relays to 1
+# crosses a QR version boundary (a real, visible size drop; further
+# trims like a shorter app name don't move it further within the same
+# bracket, so this is close to the practical floor for this rendering
+# path). A single relay is a real trade-off (no redundancy if it's
+# down), balanced by: pairing is cheap to retry (a fresh offer, or an
+# "Additional relays"/--extra-relay addition), and pair --bunker-uri is
+# available as a relay-count-independent alternative entirely.
+# Auto-populated relay lists (resolve_pair_relays' non-explicit path)
+# are truncated to this many; an explicit --relay is a deliberate
+# override and left uncapped.
+MAX_AUTO_RELAYS = 1
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +215,13 @@ class PendingOffer:
     @classmethod
     def fresh(cls, *, relays: list[str]) -> PendingOffer:
         app_keys = Keys.generate()
-        secret = secrets.token_hex(16)
+        # 8 bytes (16 hex chars), not the more common 16/32 - this secret
+        # only needs to resist guessing for the length of one pairing
+        # attempt (OFFER_TTL_SECONDS at most, realistically the seconds
+        # between showing the code and it being scanned), not serve as a
+        # long-term credential; halving it visibly shrinks the QR
+        # encoding it, same motivation as MAX_AUTO_RELAYS above.
+        secret = secrets.token_hex(8)
         uri = _build_nostrconnect_uri(app_pubkey_hex=app_keys.public_key().to_hex(), relays=relays, secret=secret)
         return cls(
             app_secret_key=app_keys.secret_key().to_hex(),
