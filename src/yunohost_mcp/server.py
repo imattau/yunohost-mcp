@@ -403,6 +403,63 @@ def domain_add(domain: str, install_letsencrypt_cert: bool = False, confirmation
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.DOMAINS_READ)
+def domain_cert_info(domain: str) -> dict[str, Any]:
+    """Read-only certificate status for an already-registered domain
+    (must already appear in domains_list()): CA type/name, remaining
+    validity in days, a style/summary badge, whether it's ACME-eligible
+    right now, and whether a wildcard covers it - the checks worth doing
+    before calling domain_cert_install."""
+    return adapter.domain_cert_info(domain)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DOMAINS_WRITE)
+@audited_write("domains.cert", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "domains.cert",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda domain, letsencrypt=True, staging=False, **_: {
+        "action": "install certificate",
+        "domain": domain,
+        "requested": "letsencrypt" if letsencrypt else "selfsigned",
+        "staging": staging,
+        "warning": "Issues/renews the certificate in place on an existing domain "
+        "(no remove-and-recreate); with letsencrypt=true this contacts Let's "
+        "Encrypt's production endpoint and fails if the domain's DNS/reachability "
+        "isn't ACME-ready.",
+    },
+)
+def domain_cert_install(
+    domain: str,
+    letsencrypt: bool = True,
+    staging: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Issue or renew a certificate for an existing domain (must already be
+    registered - see domain_add/domains_list) via YunoHost's own
+    certificate-install path, not a remove-and-recreate of the domain.
+
+    `letsencrypt=True` (default) requests a real Let's Encrypt certificate;
+    `letsencrypt=False` installs a self-signed one instead. `staging` must
+    be passed explicitly and must be False - this YunoHost version has no
+    ACME staging endpoint configured, so staging=True is rejected rather
+    than silently falling back to production.
+
+    Check the response's `certificate.CA_type` ("letsencrypt" vs
+    "selfsigned") and `acme_error` rather than assuming success: on ACME
+    failure the call still returns normally with the resulting certificate
+    status and the underlying error message in `acme_error`, instead of
+    raising."""
+    return adapter.domain_cert_install(domain, letsencrypt=letsencrypt, staging=staging)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.USERS_READ)
 def users_list() -> dict[str, Any]:
     """List YunoHost user accounts."""

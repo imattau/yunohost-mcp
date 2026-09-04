@@ -87,6 +87,32 @@ def test_domain_add_reports_letsencrypt_when_requested():
     assert result["certificate"]["CA_type"] == "letsencrypt"
 
 
+def test_domain_cert_info():
+    result = make_adapter().domain_cert_info("example.com")
+    assert result["fake"] is True
+    assert result["domain"] == "example.com"
+    assert "CA_type" in result["certificate"]
+
+
+def test_domain_cert_install_defaults_to_letsencrypt():
+    result = make_adapter().domain_cert_install("example.com")
+    assert result["fake"] is True
+    assert result["requested"] == "letsencrypt"
+    assert result["acme_error"] is None
+    assert result["certificate"]["CA_type"] == "letsencrypt"
+
+
+def test_domain_cert_install_can_request_selfsigned():
+    result = make_adapter().domain_cert_install("example.com", letsencrypt=False)
+    assert result["requested"] == "selfsigned"
+    assert result["certificate"]["CA_type"] == "selfsigned"
+
+
+def test_domain_cert_install_rejects_staging():
+    with pytest.raises(ToolInputError):
+        make_adapter().domain_cert_install("example.com", staging=True)
+
+
 def test_users_list():
     result = make_adapter().users_list()
     assert "alice" in result["users"]

@@ -21,7 +21,7 @@ from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
-PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add"}
+PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add", "domain_cert_install"}
 APP_CHANGE_URL_TOOLS = {"app_change_url"}
 MIGRATIONS_TOOLS = {"migrations_list", "migrations_state", "migrations_run"}
 FIREWALL_TOOLS = {"firewall_list", "firewall_is_open", "firewall_open", "firewall_close", "firewall_reload"}
@@ -55,6 +55,7 @@ PHASE4_TOOLS = {
     "services_list",
     "service_status",
     "domains_list",
+    "domain_cert_info",
     "users_list",
     "backups_list",
     "operations_list",
@@ -144,6 +145,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("services_list", {}),
         ("service_status", {"names": ["nginx"]}),
         ("domains_list", {}),
+        ("domain_cert_info", {"domain": "example.com"}),
         ("users_list", {}),
         ("user_group_list", {}),
         ("user_permission_list", {}),
@@ -269,6 +271,45 @@ async def test_domain_add_requires_then_accepts_a_plain_confirmation():
         assert confirmed.structured_content.get("fake") is True
         assert confirmed.structured_content["domain"] == "new.example.com"
         assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_domain_cert_install_requires_then_accepts_a_plain_confirmation():
+    # domains.cert has require_confirmation but not require_owner_signature -
+    # same single-caller confirmation shape as domain_add above.
+    async with Client(mcp) as client:
+        first = await client.call_tool("domain_cert_install", {"domain": "example.com"})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "domain_cert_install", {"domain": "example.com", "confirmation_id": confirmation_id}
+        )
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert confirmed.structured_content["domain"] == "example.com"
+        assert confirmed.structured_content["requested"] == "letsencrypt"
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_domain_cert_install_rejects_staging():
+    # staging=True is only rejected once the adapter actually runs, i.e.
+    # after a confirmation is granted - the first (plan-only) call never
+    # invokes the adapter, so it must be driven through a full round trip.
+    async with Client(mcp) as client:
+        first = await client.call_tool("domain_cert_install", {"domain": "example.com", "staging": True})
+        assert first.is_error is not True, first.content
+        confirmation_id = first.structured_content["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "domain_cert_install",
+            {"domain": "example.com", "staging": True, "confirmation_id": confirmation_id},
+        )
+        assert confirmed.is_error is True
 
 
 @pytest.mark.anyio

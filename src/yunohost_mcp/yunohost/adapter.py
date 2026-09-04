@@ -803,6 +803,87 @@ class YunohostAdapter:
             "certificate": certificate,
         }
 
+    def domain_cert_info(self, domain: str) -> dict[str, Any]:
+        """Read-only certificate status for an already-registered domain
+        (yunohost.certificate.certificate_status, full=True): CA type/name,
+        remaining validity in days, a style/summary badge, and (full-only)
+        ACME_eligible/has_wildcards. Does not import yunohost.utils.form,
+        so - unlike domain_add - no pydantic v1/v2 conflict; a plain
+        in-process _import_attr call is fine.
+        """
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "domain": domain,
+                "certificate": {
+                    "CA_name": "Fake CA",
+                    "CA_type": "selfsigned",
+                    "validity": 3650,
+                    "style": "warning",
+                    "summary": "selfsigned",
+                    "ACME_eligible": True,
+                    "has_wildcards": False,
+                },
+            }
+        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+        certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+        return {"fake": False, "domain": domain, "certificate": certificate}
+
+    def domain_cert_install(
+        self, domain: str, letsencrypt: bool = True, staging: bool = False
+    ) -> dict[str, Any]:
+        """Issue/renew a certificate for an *existing* domain in place
+        (yunohost.certificate.certificate_install) rather than the
+        remove-and-recreate-the-domain workaround - force=True so this
+        works whether the domain currently has a selfsigned or an existing
+        letsencrypt cert (certificate_install's own default refuses to
+        replace a non-selfsigned cert without force).
+
+        `staging` has no effect: this YunoHost version's certmanager only
+        knows the production ACME endpoint (no LE staging CA wired in), so
+        staging=True is rejected outright rather than silently issuing a
+        production cert - staying explicit here is exactly why the tool
+        requires it to be passed rather than defaulting True.
+
+        On ACME failure, certificate_install() raises after attempting
+        every domain; that's caught here and reported back as
+        `acme_error` alongside the resulting (possibly still-selfsigned)
+        certificate status, rather than surfacing as an opaque tool
+        crash.
+        """
+        if staging:
+            raise ToolInputError(
+                "staging ACME issuance is not supported by this YunoHost version "
+                "(certmanager only has the production Let's Encrypt endpoint configured); "
+                "call with staging=False"
+            )
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-domain_cert_install",
+                "domain": domain,
+                "requested": "letsencrypt" if letsencrypt else "selfsigned",
+                "acme_error": None,
+                "certificate": {"CA_type": "letsencrypt" if letsencrypt else "selfsigned"},
+            }
+        certificate_install = _import_attr("yunohost.certificate", "certificate_install")
+        YunohostError = _import_attr("yunohost.utils.error", "YunohostError")
+        acme_error: str | None = None
+        try:
+            certificate_install([domain], force=True, self_signed=not letsencrypt)
+        except YunohostError as exc:
+            acme_error = str(exc)
+        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+        certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+        return {
+            "fake": False,
+            "operation_id": _latest_operation_id(),
+            "domain": domain,
+            "requested": "letsencrypt" if letsencrypt else "selfsigned",
+            "acme_error": acme_error,
+            "certificate": certificate,
+        }
+
     def service_restart(self, names: list[str]) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "restarted": names}
