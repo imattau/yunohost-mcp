@@ -23,6 +23,14 @@ Three actions:
       reconnectable bunker:// session locally (see ApprovalSession) so
       later `approve` calls don't need to re-pair every time.
 
+      Which relays that URI advertises: an explicit --relay (repeatable)
+      is used exactly as given. Otherwise, --owner-npub triggers a
+      best-effort NIP-65 (kind 10002) lookup of the owner's own published
+      relay list on a small set of discovery relays, preferring those
+      (plus any --extra-relay) over the plain DEFAULT_RELAYS fallback -
+      pairing over relays the owner's signer is actually likely to be
+      listening on, rather than a fixed guess. See resolve_pair_relays.
+
   yunohost-mcp-approve status
       Local-only, no network: reports whether a session is paired yet
       (and the paired signer's pubkey, if so) by reading the session
@@ -55,6 +63,7 @@ import base64
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sys
@@ -67,16 +76,30 @@ import anyio
 import httpx2
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
-from nostr_sdk import EventBuilder, Keys, Kind, NostrConnect, NostrConnectUri, Tag
+from nostr_sdk import Client as NostrClient
+from nostr_sdk import EventBuilder, Filter, Keys, Kind, NostrConnect, NostrConnectUri, PublicKey, RelayUrl, Tag
+
+from yunohost_mcp.auth.npub import Bech32Error, npub_to_hex
 
 NIP98_KIND = 27235
+NIP65_RELAY_LIST_KIND = 10002
 APP_NAME = "yunohost-mcp-approve"
 # Narrowest signer permission this helper ever needs (owner-approval-plan.md:
 # "Request the narrowest signer permissions possible... only sign the
 # NIP-98 request needed for owner approval") - not blanket sign_event.
 NIP46_PERMS = f"sign_event:{NIP98_KIND}"
-DEFAULT_RELAYS = ["wss://relay.nsec.app"]
+# A few broadly reliable, unauthenticated public relays - not tied to any
+# one signer vendor. Used only when nothing more specific is available:
+# an explicit --relay, and (below) the owner's own NIP-65 relay list.
+DEFAULT_RELAYS = ["wss://relay.nsec.app", "wss://relay.damus.io", "wss://nos.lol"]
+# Where to look up the owner's own NIP-65 (kind 10002) relay list, if
+# --owner-npub is given - general-purpose discovery/indexer relays, not
+# necessarily relays the owner reads/writes to themselves.
+DEFAULT_DISCOVERY_RELAYS = ["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"]
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 5
+
+logger = logging.getLogger(__name__)
 
 
 class ApprovalHelperError(RuntimeError):
@@ -127,6 +150,72 @@ def _relays_from_env_or_default() -> list[str]:
     if not raw:
         return list(DEFAULT_RELAYS)
     return [r.strip() for r in raw.split(",") if r.strip()]
+
+
+def _discovery_relays_from_env_or_default() -> list[str]:
+    raw = os.environ.get("YUNOHOST_MCP_APPROVE_DISCOVERY_RELAYS")
+    if not raw:
+        return list(DEFAULT_DISCOVERY_RELAYS)
+    return [r.strip() for r in raw.split(",") if r.strip()]
+
+
+def _dedupe(relays: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for relay in relays:
+        if relay not in seen:
+            seen.add(relay)
+            result.append(relay)
+    return result
+
+
+def resolve_pair_relays(
+    *, explicit: list[str] | None, extra: list[str], discovered: list[str], defaults: list[str]
+) -> list[str]:
+    """Priority: an explicit --relay (repeatable) is a full override - the
+    caller asked for exactly those relays, nothing added. Otherwise, use
+    whatever relays were discovered from the owner's own NIP-65 list (or,
+    failing that, the plain defaults), plus any --extra-relay the caller
+    additionally wants folded in either way."""
+    if explicit:
+        return _dedupe(explicit)
+    base = discovered or defaults
+    return _dedupe(base + extra)
+
+
+def _parse_relay_urls_from_event_tags(event) -> list[str]:  # noqa: ANN001 - nostr_sdk's Event type
+    """NIP-65 (kind 10002): one "r" tag per relay, optionally marked
+    read/write-only in a third element - any r tag is a relay this pubkey
+    is reachable through, so no filtering on that third element here."""
+    urls = []
+    for tag in event.tags().to_vec():
+        parts = tag.to_vec()
+        if len(parts) >= 2 and parts[0] == "r":
+            urls.append(parts[1])
+    return urls
+
+
+async def _fetch_owner_relay_list(owner_pubkey_hex: str, discovery_relays: list[str], timeout_seconds: int) -> list[str]:
+    """Best-effort NIP-65 lookup for the owner's own relay list, so pairing
+    defaults to relays the owner is actually likely to be reachable on
+    instead of a fixed guess. Never raises - a discovery-relay outage or a
+    owner with no published relay list must never block pairing; it just
+    falls back to resolve_pair_relays' plain defaults."""
+    client = NostrClient()
+    try:
+        for relay in discovery_relays:
+            await client.add_relay(RelayUrl.parse(relay))
+        await client.connect()
+        filter_ = Filter().author(PublicKey.parse(owner_pubkey_hex)).kind(Kind(NIP65_RELAY_LIST_KIND)).limit(1)
+        events = await client.fetch_events(filter_, timeout=timedelta(seconds=timeout_seconds))
+        if not events:
+            return []
+        return _parse_relay_urls_from_event_tags(events[0])
+    except Exception:
+        logger.warning("owner relay-list discovery failed (non-fatal, falling back to defaults)", exc_info=True)
+        return []
+    finally:
+        await client.shutdown()
 
 
 def _build_nostrconnect_uri(*, app_pubkey_hex: str, relays: list[str], secret: str) -> str:
@@ -180,7 +269,28 @@ async def _pair(args: argparse.Namespace) -> None:
 
     session = ApprovalSession.fresh()
     app_keys = session.app_keys()
-    relays = args.relay or _relays_from_env_or_default()
+
+    discovered: list[str] = []
+    if not args.relay and args.owner_npub:
+        try:
+            owner_pubkey_hex = npub_to_hex(args.owner_npub) if args.owner_npub.startswith("npub1") else args.owner_npub
+        except Bech32Error as exc:
+            raise ApprovalHelperError(f"--owner-npub {args.owner_npub!r} is not a valid npub: {exc}") from exc
+        print(f"{APP_NAME}: looking up {args.owner_npub}'s own relay list (NIP-65)...", file=sys.stderr)
+        discovered = await _fetch_owner_relay_list(
+            owner_pubkey_hex, _discovery_relays_from_env_or_default(), DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+        )
+        if discovered:
+            print(f"{APP_NAME}: found {len(discovered)} relay(s) from the owner's own list", file=sys.stderr)
+        else:
+            print(f"{APP_NAME}: no relay list found for the owner - falling back to defaults", file=sys.stderr)
+
+    relays = resolve_pair_relays(
+        explicit=args.relay,
+        extra=args.extra_relay or [],
+        discovered=discovered,
+        defaults=_relays_from_env_or_default(),
+    )
     secret = secrets.token_hex(16)
     uri = _build_nostrconnect_uri(app_pubkey_hex=app_keys.public_key().to_hex(), relays=relays, secret=secret)
 
@@ -333,8 +443,21 @@ def _build_parser() -> argparse.ArgumentParser:
     pair_parser.add_argument(
         "--relay",
         action="append",
-        help="relay to use for pairing (repeatable; see $YUNOHOST_MCP_APPROVE_RELAYS, default %s)"
-        % DEFAULT_RELAYS,
+        help="relay to use for pairing (repeatable). Full override - given this, nothing else "
+        "(--owner-npub discovery, --extra-relay, defaults) is added. See $YUNOHOST_MCP_APPROVE_RELAYS.",
+    )
+    pair_parser.add_argument(
+        "--extra-relay",
+        action="append",
+        help="an additional relay to fold in alongside whatever --owner-npub discovers (or the plain "
+        "defaults, if not given) - repeatable. Ignored if --relay is given.",
+    )
+    pair_parser.add_argument(
+        "--owner-npub",
+        help="the owner's own npub (or hex pubkey) - if given (and --relay is not), pairing looks up "
+        f"this pubkey's NIP-65 relay list first and prefers those relays, falling back to "
+        f"{DEFAULT_RELAYS} if none is published. See $YUNOHOST_MCP_APPROVE_DISCOVERY_RELAYS for where "
+        "that lookup itself happens.",
     )
     pair_parser.add_argument("--repair", action="store_true", help="pair again even if already paired")
 

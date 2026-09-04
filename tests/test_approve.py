@@ -20,7 +20,9 @@ from yunohost_mcp.approve import (
     _build_nostrconnect_uri,
     _build_parser,
     _confirm_interactively,
+    _parse_relay_urls_from_event_tags,
     _print_status,
+    resolve_pair_relays,
 )
 
 
@@ -208,3 +210,89 @@ def test_status_subcommand_parses():
     parser = _build_parser()
     args = parser.parse_args(["status"])
     assert args.action == "status"
+
+
+def test_pair_subcommand_accepts_owner_npub_and_extra_relay():
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["pair", "--owner-npub", "npub1example", "--extra-relay", "wss://a.example", "--extra-relay", "wss://b.example"]
+    )
+    assert args.owner_npub == "npub1example"
+    assert args.extra_relay == ["wss://a.example", "wss://b.example"]
+
+
+def test_resolve_pair_relays_explicit_relay_overrides_everything():
+    result = resolve_pair_relays(
+        explicit=["wss://explicit.example"],
+        extra=["wss://extra.example"],
+        discovered=["wss://discovered.example"],
+        defaults=["wss://default.example"],
+    )
+    assert result == ["wss://explicit.example"]
+
+
+def test_resolve_pair_relays_prefers_discovered_over_defaults():
+    result = resolve_pair_relays(explicit=None, extra=[], discovered=["wss://discovered.example"], defaults=["wss://default.example"])
+    assert result == ["wss://discovered.example"]
+
+
+def test_resolve_pair_relays_falls_back_to_defaults_when_nothing_discovered():
+    result = resolve_pair_relays(explicit=None, extra=[], discovered=[], defaults=["wss://default.example"])
+    assert result == ["wss://default.example"]
+
+
+def test_resolve_pair_relays_folds_in_extra_alongside_discovered_or_defaults():
+    result = resolve_pair_relays(
+        explicit=None, extra=["wss://extra.example"], discovered=["wss://discovered.example"], defaults=["wss://default.example"]
+    )
+    assert result == ["wss://discovered.example", "wss://extra.example"]
+
+
+def test_resolve_pair_relays_dedupes():
+    result = resolve_pair_relays(
+        explicit=None,
+        extra=["wss://discovered.example"],
+        discovered=["wss://discovered.example"],
+        defaults=["wss://default.example"],
+    )
+    assert result == ["wss://discovered.example"]
+
+
+class _FakeTag:
+    def __init__(self, parts):
+        self._parts = parts
+
+    def to_vec(self):
+        return self._parts
+
+
+class _FakeTags:
+    def __init__(self, tags):
+        self._tags = tags
+
+    def to_vec(self):
+        return self._tags
+
+
+class _FakeEvent:
+    def __init__(self, tags):
+        self._tags = _FakeTags(tags)
+
+    def tags(self):
+        return self._tags
+
+
+def test_parse_relay_urls_from_event_tags_collects_r_tags():
+    event = _FakeEvent(
+        [
+            _FakeTag(["r", "wss://relay-a.example"]),
+            _FakeTag(["r", "wss://relay-b.example", "write"]),
+            _FakeTag(["p", "somepubkey"]),
+        ]
+    )
+    assert _parse_relay_urls_from_event_tags(event) == ["wss://relay-a.example", "wss://relay-b.example"]
+
+
+def test_parse_relay_urls_from_event_tags_ignores_malformed_r_tags():
+    event = _FakeEvent([_FakeTag(["r"])])
+    assert _parse_relay_urls_from_event_tags(event) == []
