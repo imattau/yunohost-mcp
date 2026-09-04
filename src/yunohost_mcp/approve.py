@@ -109,6 +109,13 @@ DEFAULT_RELAYS = ["wss://relay.nsec.app", "wss://relay.damus.io", "wss://nos.lol
 DEFAULT_DISCOVERY_RELAYS = ["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"]
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 5
+# nostrconnect:// puts one `relay=` param per relay directly in the URI it
+# encodes as a QR - a real owner's NIP-65 list is often 5-15 entries,
+# which (unlike DEFAULT_RELAYS' fixed 3) has no natural cap and produces
+# a QR too dense to comfortably scan. Auto-populated relay lists
+# (resolve_pair_relays' non-explicit path) are truncated to this many;
+# an explicit --relay is a deliberate override and left uncapped.
+MAX_AUTO_RELAYS = 4
 
 logger = logging.getLogger(__name__)
 
@@ -251,14 +258,19 @@ def resolve_pair_relays(
     *, explicit: list[str] | None, extra: list[str], discovered: list[str], defaults: list[str]
 ) -> list[str]:
     """Priority: an explicit --relay (repeatable) is a full override - the
-    caller asked for exactly those relays, nothing added. Otherwise, use
-    whatever relays were discovered from the owner's own NIP-65 list (or,
-    failing that, the plain defaults), plus any --extra-relay the caller
-    additionally wants folded in either way."""
+    caller asked for exactly those relays, nothing added, and left
+    uncapped (see MAX_AUTO_RELAYS). Otherwise, use whatever relays were
+    discovered from the owner's own NIP-65 list (or, failing that, the
+    plain defaults), plus any --extra-relay the caller additionally wants
+    folded in either way - capped to MAX_AUTO_RELAYS so an owner with a
+    long published relay list doesn't end up with a QR too dense to scan.
+    --extra-relay is placed first in that truncation, so a relay someone
+    deliberately added is never the one silently dropped for exceeding
+    the cap."""
     if explicit:
         return _dedupe(explicit)
     base = discovered or defaults
-    return _dedupe(base + extra)
+    return _dedupe(extra + base)[:MAX_AUTO_RELAYS]
 
 
 def _parse_relay_urls_from_event_tags(event) -> list[str]:  # noqa: ANN001 - nostr_sdk's Event type
@@ -331,7 +343,12 @@ def _qr_ascii_if_available(uri: str) -> str | None:
         import qrcode
     except ImportError:
         return None
-    qr = qrcode.QRCode(border=1)
+    # ERROR_CORRECT_L (the lowest level) rather than the library's default
+    # M: less redundancy for the same data means fewer modules for a URI
+    # this long (nostrconnect:// already carries several relay= params, a
+    # secret, and JSON metadata) - the difference between an ascii QR
+    # that's awkwardly large and one that fits a normal screen.
+    qr = qrcode.QRCode(border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(uri)
     qr.make(fit=True)
     buf = io.StringIO()
