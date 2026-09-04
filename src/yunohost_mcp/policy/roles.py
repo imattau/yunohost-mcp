@@ -5,6 +5,18 @@ primitive of their own — an IdentityRecord's effective scopes are just the
 union of ROLE_SCOPES[role] for each of its roles. There is no per-identity
 scope override in Phase 3; if that's ever needed, it should be additive and
 explicit in identity.toml, not a way to exceed a role's scopes.
+
+Strictly hierarchical below administrator: readonly < operator < app-admin
+< package-developer, each a superset of the one before plus its own
+scopes. This was previously "package-developer is not app-admin, roles
+combine by union" (two independent, partially-overlapping branches) -
+changed because that split didn't match how the roles were actually being
+granted in practice: an identity doing real day-to-day admin work (not
+just fast install/upgrade/remove iteration) still needed package-developer
+specifically for packages.test/catalog.publish, but was then missing
+app-admin's users.delete/backups.restore for no principled reason. Keep
+this ordering when adding a new role or scope: decide which existing role
+it extends, not a fresh disjoint set.
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ _READONLY: frozenset[Scope] = frozenset(
         Scope.CATALOG_INSPECT,
         Scope.CATALOG_VERIFY,
         Scope.FIREWALL_READ,
+        Scope.APPS_CONFIG_READ,
     }
 )
 
@@ -38,20 +51,16 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.APPS_INSTALL,
     Scope.APPS_UPGRADE,
     Scope.APPS_REMOVE,
+    Scope.APPS_CONFIG_WRITE,
     Scope.BACKUPS_RESTORE,
     Scope.DOMAINS_WRITE,
     Scope.USERS_WRITE,
     Scope.USERS_DELETE,
 }
 
-_PACKAGE_DEVELOPER: frozenset[Scope] = _READONLY | {
+_PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {
     Scope.PACKAGES_TEST,
-    Scope.APPS_INSTALL,
-    Scope.APPS_UPGRADE,
-    Scope.APPS_REMOVE,
-    Scope.BACKUPS_CREATE,
     Scope.CATALOG_PUBLISH,
-    Scope.DOMAINS_WRITE,
 }
 
 _ADMINISTRATOR: frozenset[Scope] = ALL_SCOPES

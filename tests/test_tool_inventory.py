@@ -11,6 +11,8 @@ EXPECTED_TOOLS = frozenset(
         "apps_list",
         "app_info",
         "app_resources",
+        "app_config_get",
+        "app_config_set",
         "diagnosis_run",
         "diagnosis_get",
         "services_list",

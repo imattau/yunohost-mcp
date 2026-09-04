@@ -277,6 +277,22 @@ def app_resources(app: str) -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.APPS_CONFIG_READ)
+def app_config_get(app: str, key: str = "", full: bool = False, export: bool = False) -> dict[str, Any]:
+    """Read an installed app's config-panel settings.
+
+    Call with full=True first to see the panel's schema, labels, and
+    current values before calling app_config_set - `key` there must be
+    the exact dotted "<panel>.<section>.<option>" id this returns, not a
+    label or bare option name. An app with no config panel returns an
+    empty config, not an error.
+    """
+    return adapter.app_config_get(app, key=key, full=full, export=export)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.DIAGNOSIS_READ)
 def diagnosis_run(categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
     """Trigger a fresh YunoHost diagnosis run. Can take real time (network/port checks)."""
@@ -891,6 +907,35 @@ def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None
     the package (or ask the user) before assuming this alone is sufficient.
     """
     return adapter.app_change_url(app, domain=domain, path=path)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.APPS_CONFIG_WRITE)
+@audited_write("apps.config", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "apps.config",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda app, key, value, **_: {
+        "action": "set app config",
+        "app": app,
+        "key": key,
+        "value": value,
+        "warning": "Applies immediately and typically restarts the app's service. "
+        "Call app_config_get(app, full=True) first to confirm this is the exact key you mean.",
+    },
+)
+def app_config_set(app: str, key: str, value: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Set one config-panel setting on an installed app. Requires confirmation.
+
+    `key` must be the exact dotted "<panel>.<section>.<option>" id from
+    app_config_get(app, full=True) - a panel can reuse the same bare
+    option name across sections, so a shortened key can silently target
+    the wrong setting. Applying typically restarts the app's service.
+    """
+    return adapter.app_config_set(app, key=key, value=value)
 
 
 @mcp.tool()

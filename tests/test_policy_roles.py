@@ -67,3 +67,38 @@ def test_only_administrator_can_change_firewall_or_run_migrations():
         assert Scope.SYSTEM_MIGRATE not in ROLE_SCOPES[role], role
     assert Scope.FIREWALL_WRITE in ROLE_SCOPES["administrator"]
     assert Scope.SYSTEM_MIGRATE in ROLE_SCOPES["administrator"]
+
+
+def test_roles_are_strictly_hierarchical_below_administrator():
+    # readonly < operator < app-admin < package-developer < administrator -
+    # each a strict superset of the one before, not independent branches
+    # that partially overlap. Regression test for the earlier design
+    # (package-developer was its own disjoint-ish branch off readonly and
+    # was missing app-admin's users.delete/backups.restore).
+    order = ["readonly", "operator", "app-admin", "package-developer", "administrator"]
+    for lower, higher in zip(order, order[1:]):
+        assert ROLE_SCOPES[lower] < ROLE_SCOPES[higher], f"{lower} should be a strict subset of {higher}"
+
+
+def test_package_developer_has_every_app_admin_scope():
+    # The concrete gap that motivated the hierarchy change: a
+    # package-developer identity doing real admin work still needs
+    # users.delete/backups.restore, not just fast install/upgrade/remove
+    # iteration.
+    assert Scope.USERS_DELETE in ROLE_SCOPES["package-developer"]
+    assert Scope.BACKUPS_RESTORE in ROLE_SCOPES["package-developer"]
+    assert ROLE_SCOPES["app-admin"] <= ROLE_SCOPES["package-developer"]
+
+
+def test_every_role_can_read_app_config():
+    # apps.config.read is diagnostic, same tier as firewall.read - sits on
+    # _READONLY.
+    for role in ROLE_SCOPES:
+        assert Scope.APPS_CONFIG_READ in ROLE_SCOPES[role], role
+
+
+def test_only_app_admin_and_above_can_write_app_config():
+    assert Scope.APPS_CONFIG_WRITE not in ROLE_SCOPES["readonly"]
+    assert Scope.APPS_CONFIG_WRITE not in ROLE_SCOPES["operator"]
+    for role in ("app-admin", "package-developer", "administrator"):
+        assert Scope.APPS_CONFIG_WRITE in ROLE_SCOPES[role], role

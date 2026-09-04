@@ -38,6 +38,23 @@ def test_app_resources_returns_declared_resources():
     assert isinstance(result["resources"], dict)
 
 
+def test_app_config_get_fake_mode():
+    result = make_adapter().app_config_get("quantumrelay", key="peer_mesh.mesh.peers", full=True)
+    assert result["fake"] is True
+    assert result["app"] == "quantumrelay"
+    assert result["key"] == "peer_mesh.mesh.peers"
+    assert result["config"] == {}
+
+
+def test_app_config_set_has_operation_id():
+    result = make_adapter().app_config_set("quantumrelay", key="peer_mesh.mesh.peers", value="wss://qr.3nostr.com:8443")
+    assert result["fake"] is True
+    assert result["app"] == "quantumrelay"
+    assert result["key"] == "peer_mesh.mesh.peers"
+    assert result["value"] == "wss://qr.3nostr.com:8443"
+    assert "operation_id" in result
+
+
 def test_diagnosis_run_and_get():
     adapter = make_adapter()
     run_result = adapter.diagnosis_run(categories=["ip"])

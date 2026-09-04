@@ -272,6 +272,64 @@ async def test_domain_add_requires_then_accepts_a_plain_confirmation():
 
 
 @pytest.mark.anyio
+async def test_app_config_get_is_read_only_no_confirmation_needed():
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "app_config_get", {"app": "quantumrelay", "key": "peer_mesh.mesh.peers", "full": True}
+        )
+        assert result.is_error is not True, result.content
+        assert result.structured_content["app"] == "quantumrelay"
+
+
+@pytest.mark.anyio
+async def test_app_config_set_requires_then_accepts_a_plain_confirmation():
+    # apps.config has require_confirmation but not require_owner_signature -
+    # same tier as domains.write above.
+    async with Client(mcp) as client:
+        first = await client.call_tool(
+            "app_config_set",
+            {"app": "quantumrelay", "key": "peer_mesh.mesh.peers", "value": "wss://qr.3nostr.com:8443"},
+        )
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "app_config_set",
+            {
+                "app": "quantumrelay",
+                "key": "peer_mesh.mesh.peers",
+                "value": "wss://qr.3nostr.com:8443",
+                "confirmation_id": confirmation_id,
+            },
+        )
+        assert confirmed.is_error is not True, confirmed.content
+
+
+@pytest.mark.anyio
+async def test_app_config_set_denied_without_apps_config_write_scope():
+    readonly_identity = AuthenticatedRequest(
+        pubkey="readonly-pubkey",
+        event_id="f" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="readonly-pubkey", name="readonly-agent", roles=("readonly",), scopes=scopes_for_roles(("readonly",))
+        ),
+    )
+    set_current_request(readonly_identity)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "app_config_set", {"app": "quantumrelay", "key": "peer_mesh.mesh.peers", "value": "wss://x:8443"}
+            )
+            assert result.is_error is True
+    finally:
+        set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
 async def test_app_change_url_requires_then_accepts_a_plain_confirmation():
     # apps.change_url has require_confirmation but not require_owner_signature
     # or require_backup - same single-caller confirmation shape as domain_add

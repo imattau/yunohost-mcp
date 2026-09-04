@@ -287,6 +287,46 @@ class YunohostAdapter:
             resources = info.get("resources", {})
         return {"fake": self.settings.fake_yunohost, "app": app, "resources": resources}
 
+    def app_config_get(self, app: str, key: str = "", full: bool = False, export: bool = False) -> dict[str, Any]:
+        """Read an app's config-panel-defined settings (yunohost.app.app_config_get).
+
+        `key` is a dotted "<panel>.<section>.<option>" id, or "" for the
+        whole panel. `full` returns the panel's schema (labels, types,
+        current values) - what a caller should inspect before calling
+        app_config_set with an unfamiliar `key`; `export` returns a flat
+        key/value mapping instead. An app with no config_panel.toml
+        returns an empty config, not an error (matches the real API's own
+        "be permissive when no config panel found" behavior).
+        """
+        if self.settings.fake_yunohost:
+            return {"fake": True, "app": app, "key": key, "config": {}}
+        # app_config_get transitively imports utils/configpanel.py, which
+        # (like utils/form.py - see _call_via_system_python's docstring)
+        # defines pydantic v1-style @validator models - same conflict as
+        # app_install/domain_add/app_change_url.
+        result = _call_via_system_python(
+            "yunohost.app", "app_config_get", {"app": app, "key": key, "full": full, "export": export}, self.settings
+        )
+        return {"fake": False, "app": app, "key": key, "config": result}
+
+    def app_config_set(self, app: str, key: str, value: str) -> dict[str, Any]:
+        """Apply one app config-panel setting (yunohost.app.app_config_set).
+
+        `key` must be the full dotted "<panel>.<section>.<option>" id
+        from app_config_get(app, full=True) - not a bare option name the
+        panel happens to display, since a panel can reuse the same option
+        id across different sections. Setting one key at a time (rather
+        than the CLI's bulk `args="k1=v1&k2=v2"` form) keeps each write
+        traceable to exactly one confirmation/audit entry.
+        """
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-app_config_set", "app": app, "key": key, "value": value}
+        # Same pydantic v1/v2 conflict as app_config_get - see there.
+        _call_via_system_python(
+            "yunohost.app", "app_config_set", {"app": app, "key": key, "value": value}, self.settings
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "key": key, "value": value}
+
     def diagnosis_run(self, categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
         if self.settings.fake_yunohost:
             return {"fake": True, "categories_run": categories or ["ip", "dnsrecords", "services"]}

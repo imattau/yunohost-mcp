@@ -97,6 +97,11 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # nginx conf and app settings), so a backup isn't the safety net a
     # confirmation is for domain_add-shaped writes.
     "apps.change_url": PolicyRule(require_confirmation=True),
+    # An app's config-panel settings are arbitrary and app-defined -
+    # bounded to one already-installed app, not system-wide, so
+    # confirmation-gated like domains.write/apps.change_url rather than
+    # owner-signature-gated like the Phase 13 tier below.
+    "apps.config": PolicyRule(require_confirmation=True),
     # PLAN.md Phase 13's highest-risk candidates get owner co-signing by
     # default - "app removal with data" would need argument-conditional
     # policy (require_owner_signature only when purge=true) this dataclass

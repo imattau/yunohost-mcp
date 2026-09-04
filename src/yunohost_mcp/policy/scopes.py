@@ -19,6 +19,17 @@ class Scope(StrEnum):
     APPS_INSTALL = "apps.install"
     APPS_UPGRADE = "apps.upgrade"
     APPS_REMOVE = "apps.remove"
+    # app_config_get - safe for every role that already gets apps.read,
+    # same split as FIREWALL_READ/FIREWALL_WRITE below.
+    APPS_CONFIG_READ = "apps.config.read"
+    # app_config_set - an app's config-panel settings are arbitrary and
+    # app-defined (anything from a display name to, e.g., a relay's peer
+    # mesh or auth requirements) - broad enough to warrant its own scope
+    # rather than folding into APPS_UPGRADE, but bounded to one already-
+    # installed app's own declared options, not system-wide like
+    # firewall/system.upgrade - so confirmation-gated (policy/rules.py),
+    # not owner-signature-gated.
+    APPS_CONFIG_WRITE = "apps.config.write"
 
     SERVICES_READ = "services.read"
     SERVICES_RESTART = "services.restart"
