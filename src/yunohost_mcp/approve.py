@@ -14,16 +14,26 @@ the owner's key, grants no authority by itself (every actual signature
 still requires the live signer's approval), and is safe to regenerate by
 re-pairing if lost.
 
-Three actions:
+Four actions:
+
+  yunohost-mcp-approve offer
+      Print (and persist, see PendingOffer) a pairing link/QR without
+      listening for anything yet - for a caller that wants a stable,
+      always-visible code before any button click (a webadmin config
+      panel's "Signer status" display, say), rather than only ever
+      showing a link inside a one-shot action's scrolling log output.
+      Idempotent: repeated calls return the same link until it expires
+      (OFFER_TTL_SECONDS), is consumed by a successful `pair`, or
+      --regenerate is passed.
 
   yunohost-mcp-approve pair
-      One-time setup: print a nostrconnect:// URI (and a QR code, if the
-      optional `qrcode` package is installed) for the owner to scan/open
-      in their NIP-46 signer app, then wait for it to connect. Persists a
+      One-time setup: reuses any pending `offer` link (so whatever was
+      already shown/scanned keeps working), or generates one if none
+      exists, then waits for the signer to connect. Persists a
       reconnectable bunker:// session locally (see ApprovalSession) so
       later `approve` calls don't need to re-pair every time.
 
-      Which relays that URI advertises: an explicit --relay (repeatable)
+      Which relays an offer advertises: an explicit --relay (repeatable)
       is used exactly as given. Otherwise, --owner-npub triggers a
       best-effort NIP-65 (kind 10002) lookup of the owner's own published
       relay list on a small set of discovery relays, preferring those
@@ -67,6 +77,7 @@ import logging
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
@@ -142,6 +153,73 @@ def default_session_path() -> Path:
     return Path(
         os.environ.get("YUNOHOST_MCP_APPROVE_SESSION_FILE")
         or Path.home() / ".config" / "yunohost-mcp" / "approve-session.json"
+    )
+
+
+# How long a pending offer (below) stays valid before `offer` silently
+# regenerates it rather than handing out a possibly-stale-looking link -
+# generous, since this is meant to sit on screen (a webadmin panel) for a
+# while before anyone scans it, not a short-lived one-shot token.
+OFFER_TTL_SECONDS = 24 * 60 * 60
+
+
+@dataclasses.dataclass
+class PendingOffer:
+    """A pairing link/QR generated ahead of time, independent of whether
+    anything is actually listening for the signer's response yet - the
+    fix for `pair` previously doing both "generate a fresh nostrconnect://
+    link" and "block waiting for the signer" in one shot, which meant a
+    caller (e.g. a webadmin config panel) had nowhere to show a stable
+    link before a button click, and the link changed on every retry.
+
+    `offer` (see cmd below) creates and persists one of these without
+    listening for anything; `pair` reuses it (rather than generating a
+    fresh secret) so the code someone already scanned keeps working.
+    Consumed (deleted) once pairing actually succeeds, or replaced once
+    OFFER_TTL_SECONDS has passed - never reused across explicitly
+    different relay/owner-npub arguments; see cmd_offer."""
+
+    app_secret_key: str
+    secret: str
+    relays: list[str]
+    uri: str
+    created_at: float
+
+    @classmethod
+    def fresh(cls, *, relays: list[str]) -> PendingOffer:
+        app_keys = Keys.generate()
+        secret = secrets.token_hex(16)
+        uri = _build_nostrconnect_uri(app_pubkey_hex=app_keys.public_key().to_hex(), relays=relays, secret=secret)
+        return cls(
+            app_secret_key=app_keys.secret_key().to_hex(),
+            secret=secret,
+            relays=relays,
+            uri=uri,
+            created_at=time.time(),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> PendingOffer | None:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return cls(**data)
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dataclasses.asdict(self)))
+        path.chmod(0o600)
+
+    def is_expired(self, *, now: float | None = None) -> bool:
+        return (now if now is not None else time.time()) - self.created_at > OFFER_TTL_SECONDS
+
+    def app_keys(self) -> Keys:
+        return Keys.parse(self.app_secret_key)
+
+
+def default_offer_path() -> Path:
+    return Path(
+        os.environ.get("YUNOHOST_MCP_APPROVE_OFFER_FILE") or Path.home() / ".config" / "yunohost-mcp" / "approve-offer.json"
     )
 
 
@@ -242,34 +320,26 @@ def _build_nostrconnect_uri(*, app_pubkey_hex: str, relays: list[str], secret: s
     return f"nostrconnect://{app_pubkey_hex}?{query}"
 
 
-def _print_qr_if_available(uri: str) -> None:
+def _qr_ascii_if_available(uri: str) -> str | None:
     """Best-effort - owner-approval-plan.md says "where supported", not
-    required. Silently falls back to the printed URI text alone (already
-    printed by the caller) when the optional `qrcode` package isn't
-    installed; this helper does not depend on it."""
+    required. Returns None (not a printed fallback message here - callers
+    decide what, if anything, to say) when the optional `qrcode` package
+    isn't installed; this helper does not depend on it."""
     try:
+        import io
+
         import qrcode
     except ImportError:
-        print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
-        return
+        return None
     qr = qrcode.QRCode(border=1)
     qr.add_data(uri)
     qr.make(fit=True)
-    qr.print_ascii(out=sys.stderr, invert=True)
+    buf = io.StringIO()
+    qr.print_ascii(out=buf, invert=True)
+    return buf.getvalue()
 
 
-async def _pair(args: argparse.Namespace) -> None:
-    session_path = Path(args.session_file)
-    existing = ApprovalSession.load(session_path)
-    if existing and existing.bunker_uri and not args.repair:
-        raise ApprovalHelperError(
-            f"already paired (session at {session_path}) - pass --repair to pair again "
-            "(e.g. after switching signer apps or losing the session)"
-        )
-
-    session = ApprovalSession.fresh()
-    app_keys = session.app_keys()
-
+async def _resolve_relays_for_offer(args: argparse.Namespace) -> list[str]:
     discovered: list[str] = []
     if not args.relay and args.owner_npub:
         try:
@@ -285,27 +355,79 @@ async def _pair(args: argparse.Namespace) -> None:
         else:
             print(f"{APP_NAME}: no relay list found for the owner - falling back to defaults", file=sys.stderr)
 
-    relays = resolve_pair_relays(
+    return resolve_pair_relays(
         explicit=args.relay,
         extra=args.extra_relay or [],
         discovered=discovered,
         defaults=_relays_from_env_or_default(),
     )
-    secret = secrets.token_hex(16)
-    uri = _build_nostrconnect_uri(app_pubkey_hex=app_keys.public_key().to_hex(), relays=relays, secret=secret)
+
+
+async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> PendingOffer:
+    """The core of the fix for "the pairing link only ever appeared in a
+    one-shot, scrolling-away action log": `offer` (below) can call this to
+    produce and persist a link *before* anything is listening for it, and
+    `pair` calls the same thing to reuse that exact link/secret instead of
+    silently handing out a different one every retry - so whatever a
+    caller (e.g. a webadmin panel) already displayed keeps working.
+
+    Regenerates only when there's a reason to: no offer yet, --regenerate,
+    the existing one expired (OFFER_TTL_SECONDS), or an explicit --relay
+    that might name something different than what's cached."""
+    existing = None if args.regenerate else PendingOffer.load(offer_path)
+    if existing and not existing.is_expired() and not args.relay:
+        return existing
+
+    relays = await _resolve_relays_for_offer(args)
+    offer = PendingOffer.fresh(relays=relays)
+    offer.save(offer_path)
+    return offer
+
+
+async def _offer(args: argparse.Namespace) -> None:
+    """Print (and persist) a pairing link/QR without listening for
+    anything - see _resolve_offer. Safe to call repeatedly; idempotent
+    until the offer expires, is consumed by a successful `pair`, or
+    --regenerate is passed."""
+    offer = await _resolve_offer(args, Path(args.offer_file))
+    print(offer.uri)
+    qr_ascii = _qr_ascii_if_available(offer.uri)
+    if qr_ascii:
+        print(qr_ascii)
+    else:
+        print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
+
+
+async def _pair(args: argparse.Namespace) -> None:
+    session_path = Path(args.session_file)
+    existing_session = ApprovalSession.load(session_path)
+    if existing_session and existing_session.bunker_uri and not args.repair:
+        raise ApprovalHelperError(
+            f"already paired (session at {session_path}) - pass --repair to pair again "
+            "(e.g. after switching signer apps or losing the session)"
+        )
+
+    offer_path = Path(args.offer_file)
+    offer = await _resolve_offer(args, offer_path)
+    app_keys = offer.app_keys()
 
     print(f"{APP_NAME}: open this in the owner's NIP-46 signer app:", file=sys.stderr)
-    print(uri, file=sys.stderr)
-    _print_qr_if_available(uri)
+    print(offer.uri, file=sys.stderr)
+    qr_ascii = _qr_ascii_if_available(offer.uri)
+    if qr_ascii:
+        print(qr_ascii, file=sys.stderr)
+    else:
+        print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
     print(f"{APP_NAME}: waiting up to {args.timeout}s for the signer to connect...", file=sys.stderr)
 
-    connect = NostrConnect(NostrConnectUri.parse(uri), app_keys, timedelta(seconds=args.timeout), None)
+    connect = NostrConnect(NostrConnectUri.parse(offer.uri), app_keys, timedelta(seconds=args.timeout), None)
     signer_pubkey = await connect.get_public_key_async()
     if signer_pubkey is None:
-        raise ApprovalHelperError("pairing timed out or was rejected by the signer")
+        raise ApprovalHelperError("pairing timed out or was rejected by the signer - the same link/QR is still valid, try again")
 
-    session.bunker_uri = str(await connect.bunker_uri())
+    session = ApprovalSession(app_secret_key=offer.app_secret_key, bunker_uri=str(await connect.bunker_uri()))
     session.save(session_path)
+    offer_path.unlink(missing_ok=True)  # consumed - the next `offer` call generates a fresh one
     print(f"{APP_NAME}: paired with signer {signer_pubkey.to_bech32()}", file=sys.stderr)
     print(f"{APP_NAME}: session saved to {session_path}", file=sys.stderr)
 
@@ -435,30 +557,55 @@ def _build_parser() -> argparse.ArgumentParser:
         help="path to this helper's local session file (see $YUNOHOST_MCP_APPROVE_SESSION_FILE)",
     )
     parser.add_argument(
+        "--offer-file",
+        default=str(default_offer_path()),
+        help="path to this helper's pending-offer file (see $YUNOHOST_MCP_APPROVE_OFFER_FILE)",
+    )
+    parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="seconds to wait for the NIP-46 signer"
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
 
-    pair_parser = subparsers.add_parser("pair", help="one-time setup: pair with the owner's NIP-46 signer")
-    pair_parser.add_argument(
-        "--relay",
-        action="append",
-        help="relay to use for pairing (repeatable). Full override - given this, nothing else "
-        "(--owner-npub discovery, --extra-relay, defaults) is added. See $YUNOHOST_MCP_APPROVE_RELAYS.",
+    def _add_offer_relay_args(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--relay",
+            action="append",
+            help="relay to use for pairing (repeatable). Full override - given this, nothing else "
+            "(--owner-npub discovery, --extra-relay, defaults) is added. See $YUNOHOST_MCP_APPROVE_RELAYS.",
+        )
+        subparser.add_argument(
+            "--extra-relay",
+            action="append",
+            help="an additional relay to fold in alongside whatever --owner-npub discovers (or the plain "
+            "defaults, if not given) - repeatable. Ignored if --relay is given.",
+        )
+        subparser.add_argument(
+            "--owner-npub",
+            help="the owner's own npub (or hex pubkey) - if given (and --relay is not), pairing looks up "
+            f"this pubkey's NIP-65 relay list first and prefers those relays, falling back to "
+            f"{DEFAULT_RELAYS} if none is published. See $YUNOHOST_MCP_APPROVE_DISCOVERY_RELAYS for where "
+            "that lookup itself happens.",
+        )
+        subparser.add_argument(
+            "--regenerate",
+            action="store_true",
+            help="get a fresh link/secret even if an unexpired one is already pending (OFFER_TTL_SECONDS) - "
+            "normally offer/pair reuse whatever link was already shown, so a code someone already scanned "
+            "keeps working.",
+        )
+
+    offer_parser = subparsers.add_parser(
+        "offer",
+        help="print (and persist) a pairing link/QR without listening for anything yet - "
+        "for a caller (e.g. a webadmin panel) that wants a stable, always-visible code before any button click",
     )
-    pair_parser.add_argument(
-        "--extra-relay",
-        action="append",
-        help="an additional relay to fold in alongside whatever --owner-npub discovers (or the plain "
-        "defaults, if not given) - repeatable. Ignored if --relay is given.",
+    _add_offer_relay_args(offer_parser)
+
+    pair_parser = subparsers.add_parser(
+        "pair",
+        help="one-time setup: pair with the owner's NIP-46 signer, reusing any pending `offer` link if one exists",
     )
-    pair_parser.add_argument(
-        "--owner-npub",
-        help="the owner's own npub (or hex pubkey) - if given (and --relay is not), pairing looks up "
-        f"this pubkey's NIP-65 relay list first and prefers those relays, falling back to "
-        f"{DEFAULT_RELAYS} if none is published. See $YUNOHOST_MCP_APPROVE_DISCOVERY_RELAYS for where "
-        "that lookup itself happens.",
-    )
+    _add_offer_relay_args(pair_parser)
     pair_parser.add_argument("--repair", action="store_true", help="pair again even if already paired")
 
     subparsers.add_parser("status", help="report whether a signer is paired yet (local-only, no network)")
@@ -485,7 +632,9 @@ def main() -> None:
         raise ApprovalHelperError("no --server given, and $YUNOHOST_MCP_APPROVE_SERVER is not set")
 
     try:
-        if args.action == "pair":
+        if args.action == "offer":
+            anyio.run(_offer, args)
+        elif args.action == "pair":
             anyio.run(_pair, args)
         elif args.action == "status":
             _print_status(args)

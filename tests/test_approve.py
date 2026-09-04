@@ -17,11 +17,13 @@ from nostr_sdk import Keys
 
 from yunohost_mcp.approve import (
     ApprovalSession,
+    PendingOffer,
     _build_nostrconnect_uri,
     _build_parser,
     _confirm_interactively,
     _parse_relay_urls_from_event_tags,
     _print_status,
+    _qr_ascii_if_available,
     resolve_pair_relays,
 )
 
@@ -296,3 +298,49 @@ def test_parse_relay_urls_from_event_tags_collects_r_tags():
 def test_parse_relay_urls_from_event_tags_ignores_malformed_r_tags():
     event = _FakeEvent([_FakeTag(["r"])])
     assert _parse_relay_urls_from_event_tags(event) == []
+
+
+def test_pending_offer_fresh_builds_a_valid_uri_for_its_own_app_key():
+    offer = PendingOffer.fresh(relays=["wss://relay.example"])
+    assert offer.uri.startswith("nostrconnect://")
+    assert offer.secret in offer.uri
+    Keys.parse(offer.app_secret_key)  # re-parseable
+
+
+def test_pending_offer_save_and_load_round_trip(tmp_path):
+    path = tmp_path / "offer.json"
+    offer = PendingOffer.fresh(relays=["wss://relay.example"])
+    offer.save(path)
+
+    loaded = PendingOffer.load(path)
+    assert loaded == offer
+
+
+def test_pending_offer_load_missing_returns_none(tmp_path):
+    assert PendingOffer.load(tmp_path / "does-not-exist.json") is None
+
+
+def test_pending_offer_is_expired(tmp_path):
+    offer = PendingOffer.fresh(relays=["wss://relay.example"])
+    assert offer.is_expired(now=offer.created_at + 1) is False
+    assert offer.is_expired(now=offer.created_at + 24 * 60 * 60 + 1) is True
+
+
+def test_qr_ascii_returns_none_without_qrcode_package():
+    # This suite's own venv never installs the optional qrcode dependency
+    # (see approve.py's module docstring) - confirms the graceful fallback.
+    assert _qr_ascii_if_available("nostrconnect://example") is None
+
+
+def test_offer_subcommand_accepts_regenerate_and_offer_file():
+    parser = _build_parser()
+    args = parser.parse_args(["--offer-file", "/tmp/offer.json", "offer", "--regenerate", "--owner-npub", "npub1x"])
+    assert args.offer_file == "/tmp/offer.json"
+    assert args.regenerate is True
+    assert args.owner_npub == "npub1x"
+
+
+def test_pair_subcommand_accepts_regenerate():
+    parser = _build_parser()
+    args = parser.parse_args(["pair", "--regenerate"])
+    assert args.regenerate is True
