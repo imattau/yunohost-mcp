@@ -167,7 +167,7 @@ def require_confirmation(
                     )
                     if rule.require_owner_signature and _owner_signature_pending_hook is not None:
                         _owner_signature_pending_hook(ticket)
-                    return {
+                    response = {
                         "confirmation_required": True,
                         "operation_plan": plan,
                         "confirmation_id": ticket.confirmation_id,
@@ -175,6 +175,21 @@ def require_confirmation(
                         "expires_at": ticket.expires_at,
                         "owner_signature_required": rule.require_owner_signature,
                     }
+                    if rule.require_owner_signature:
+                        # Spelled out here, not just in approval_status's own
+                        # docstring, because the caller that needs this is
+                        # whatever agent just received *this* response, not
+                        # one already reading approval_status's docs -
+                        # server.py's push_approval.py may well resolve this
+                        # on its own within seconds, so don't sit idle
+                        # waiting for a human to report back.
+                        response["next_step"] = (
+                            "Owner co-signature required - do not wait for a human to report back. Poll "
+                            f"approval_status({ticket.confirmation_id!r}) periodically until it returns "
+                            "approved: true (or the ticket expires), then retry this exact call with "
+                            "confirmation_id set."
+                        )
+                    return response
 
             return fn(*args, **kwargs)
 

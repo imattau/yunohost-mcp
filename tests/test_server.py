@@ -232,6 +232,10 @@ async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool:
         assert "operation_plan" in plan_response
         assert plan_response["owner_signature_required"] is True  # both tools default to Phase 13 co-signing
         confirmation_id = plan_response["confirmation_id"]
+        # Told to poll approval_status itself rather than wait for a human
+        # to report back - push_approval.py may resolve this on its own.
+        assert confirmation_id in plan_response["next_step"]
+        assert "approval_status" in plan_response["next_step"]
 
         # Calling again with the SAME args but no confirmation_id issues a
         # brand new ticket rather than executing - it never silently proceeds.
@@ -262,6 +266,9 @@ async def test_domain_add_requires_then_accepts_a_plain_confirmation():
         plan_response = first.structured_content
         assert plan_response["confirmation_required"] is True
         assert plan_response["owner_signature_required"] is False
+        # next_step (poll approval_status yourself) is only relevant when
+        # owner co-signature is actually pending.
+        assert "next_step" not in plan_response
         confirmation_id = plan_response["confirmation_id"]
 
         confirmed = await client.call_tool(

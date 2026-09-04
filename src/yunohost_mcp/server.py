@@ -1485,7 +1485,15 @@ def approval_status(confirmation_id: str) -> dict[str, Any]:
     """Lightweight poll for whether a pending confirmation
     (owner-approval-plan.md) has been owner-approved yet - the same access
     rule as approval_get, without the full operation plan, for a requester
-    that just wants to know whether to retry the original call yet."""
+    that just wants to know whether to retry the original call yet.
+
+    Call this in a loop yourself after a require_owner_signature call
+    returns confirmation_required (see that response's own "next_step") -
+    push_approval.py may resolve it within seconds via the owner's paired
+    signer, with no human needing to report back that it happened. Poll
+    at a reasonable interval (a few seconds, not a tight loop) until
+    approved is true or expires_at passes, then retry the original call
+    with this confirmation_id."""
     ticket = _visible_confirmation(confirmation_id)
     return {
         "confirmation_id": ticket.confirmation_id,
