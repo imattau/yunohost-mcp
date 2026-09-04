@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -625,6 +626,27 @@ class YunohostAdapter:
             for name, meta in archives.items()
             if isinstance(meta, dict) and "created_at" in meta
         }
+
+    def free_space_bytes(self, path: str = "/") -> int:
+        """Real bytes free at `path`, for policy/rules.py's check_free_space.
+
+        Fake-aware like every other real-world read in this adapter:
+        fake_yunohost=True reports a large canned figure instead of
+        touching the real filesystem. Without this, check_free_space
+        previously called shutil.disk_usage() directly and unconditionally
+        - the one policy check in the codebase that ignored fake_yunohost
+        entirely, so a "validate_server"/health_check() call correctly
+        reporting a fake, always-healthy diagnosis could still be followed
+        by app_upgrade's free-space check failing for real, against
+        whatever machine happens to be running this process (e.g. a
+        disk-constrained CI runner or dev container) - a discrepancy
+        indistinguishable from a genuine low-disk condition on the actual
+        YunoHost server. Real (non-fake) mode is unaffected: this still
+        calls the real shutil.disk_usage(path).free.
+        """
+        if self.settings.fake_yunohost:
+            return 100 * 1000**3
+        return shutil.disk_usage(path).free
 
     def operations_list(self, limit: int | None = None) -> dict[str, Any]:
         if self.settings.fake_yunohost:

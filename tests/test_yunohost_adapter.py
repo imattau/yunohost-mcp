@@ -113,6 +113,14 @@ def test_domain_cert_install_rejects_staging():
         make_adapter().domain_cert_install("example.com", staging=True)
 
 
+def test_free_space_bytes_reports_a_large_fake_figure_regardless_of_real_disk():
+    # fake_yunohost must never touch the real filesystem of whatever
+    # machine happens to be running this process - a disk-constrained CI
+    # runner/dev container shouldn't make a fake-mode call see a low
+    # figure that a real YunoHost server's own diagnosis would never report.
+    assert make_adapter().free_space_bytes() >= 10 * 1000**3
+
+
 def test_users_list():
     result = make_adapter().users_list()
     assert "alice" in result["users"]

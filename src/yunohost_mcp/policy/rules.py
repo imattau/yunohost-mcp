@@ -12,9 +12,14 @@ Rule semantics, matching PLAN.md's example config exactly:
     "an archive specifically covering this app") - YunoHost archives don't
     expose per-app coverage cheaply without opening each one, and getting
     this exactly right is future work, not Phase 6's job.
-  - minimum_free_space_bytes: checked against the root filesystem via
-    shutil.disk_usage, not a YunoHost API - it's a plain, portable disk
-    check available whether or not yunohost.* is importable.
+  - minimum_free_space_bytes: checked against a free-byte count the caller
+    supplies (YunohostAdapter.free_space_bytes(), normally) rather than
+    this module reading the filesystem itself - keeps this a pure,
+    dependency-free function to test, and lets the adapter's usual
+    fake_yunohost branching apply here too (see free_space_bytes'
+    docstring for why that matters: this used to call shutil.disk_usage()
+    directly and unconditionally, the one check in the codebase that
+    stayed real even in fake mode).
 
   - require_owner_signature (PLAN.md Phase 13; owner-approval-plan.md's
     `solo` profile for v1): the pending confirmation must additionally be
@@ -33,7 +38,6 @@ right now", not "this needs a human to say yes".
 from __future__ import annotations
 
 import re
-import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,13 +168,12 @@ def load_policy(path: Path) -> dict[str, PolicyRule]:
     return rules
 
 
-def check_free_space(rule: PolicyRule, *, path: str = "/") -> None:
+def check_free_space(rule: PolicyRule, *, free_bytes: int) -> None:
     if rule.minimum_free_space_bytes is None:
         return
-    free = shutil.disk_usage(path).free
-    if free < rule.minimum_free_space_bytes:
+    if free_bytes < rule.minimum_free_space_bytes:
         raise PolicyViolation(
-            f"only {free} bytes free on {path}, policy requires at least {rule.minimum_free_space_bytes}"
+            f"only {free_bytes} bytes free, policy requires at least {rule.minimum_free_space_bytes}"
         )
 
 

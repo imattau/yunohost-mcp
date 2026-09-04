@@ -221,7 +221,7 @@ def get_server_identity() -> ServerIdentity:
 
 
 def _check_apps_upgrade(rule: PolicyRule) -> None:
-    check_free_space(rule)
+    check_free_space(rule, free_bytes=adapter.free_space_bytes())
     check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
 
 
@@ -1479,7 +1479,7 @@ def safe_upgrade(app: str) -> dict[str, Any]:
     own backup step actually happens, not just assumed to have worked.
     """
     rule = policy_rules.get("apps.upgrade", PolicyRule())
-    check_free_space(rule)
+    check_free_space(rule, free_bytes=adapter.free_space_bytes())
     result = adapter.safe_upgrade(app)
     check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
     return result

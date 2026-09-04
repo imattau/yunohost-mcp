@@ -95,18 +95,18 @@ def test_malformed_policy_toml_raises(tmp_path: Path):
 
 
 def test_check_free_space_passes_when_no_minimum_set():
-    check_free_space(PolicyRule())  # no minimum_free_space_bytes -> no-op
+    check_free_space(PolicyRule(), free_bytes=0)  # no minimum_free_space_bytes -> no-op
 
 
-def test_check_free_space_raises_when_insufficient(tmp_path: Path):
+def test_check_free_space_raises_when_insufficient():
     rule = PolicyRule(minimum_free_space_bytes=10**18)  # absurdly large
     with pytest.raises(PolicyViolation):
-        check_free_space(rule, path=str(tmp_path))
+        check_free_space(rule, free_bytes=1_000)
 
 
-def test_check_free_space_passes_when_sufficient(tmp_path: Path):
+def test_check_free_space_passes_when_sufficient():
     rule = PolicyRule(minimum_free_space_bytes=1)
-    check_free_space(rule, path=str(tmp_path))
+    check_free_space(rule, free_bytes=1_000_000)
 
 
 def test_check_recent_backup_skips_when_not_required():
