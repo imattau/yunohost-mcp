@@ -24,9 +24,6 @@ yunohost-mcp-connect = "yunohost_mcp.bridge:main"
 yunohost-mcp-delegate = "yunohost_mcp.delegate:main"
 yunohost-mcp-approve = "yunohost_mcp.approve:main"
 
-[project.optional-dependencies]
-approve-qr = ["qrcode>=7.4"]
-
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 

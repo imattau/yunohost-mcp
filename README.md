@@ -113,7 +113,7 @@ One-time setup, on whatever device the owner keeps their signer app on:
 yunohost-mcp-approve pair
 ```
 
-Prints a `nostrconnect://` URI (and a QR code, if the optional `qrcode` package is installed - `pip install 'yunohost-mcp-connect[approve-qr]'`) to open in the signer app. This persists a reconnectable session locally so later approvals don't need to re-pair.
+Prints a `nostrconnect://` URI to open in the signer app. This persists a reconnectable session locally so later approvals don't need to re-pair. If the signer app can instead export a `bunker://` connection string itself (its own "add a connection" feature), `yunohost-mcp-approve pair --bunker-uri <uri>` connects immediately using that instead - no link to open, nothing to wait on.
 
 To review and approve a specific pending operation:
 

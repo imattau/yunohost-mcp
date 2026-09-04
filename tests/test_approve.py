@@ -23,8 +23,6 @@ from yunohost_mcp.approve import (
     _confirm_interactively,
     _parse_relay_urls_from_event_tags,
     _print_status,
-    _qr_ascii_if_available,
-    _render_qr_matrix_ascii,
     resolve_pair_relays,
 )
 
@@ -350,12 +348,6 @@ def test_pending_offer_is_expired(tmp_path):
     assert offer.is_expired(now=offer.created_at + 24 * 60 * 60 + 1) is True
 
 
-def test_qr_ascii_returns_none_without_qrcode_package():
-    # This suite's own venv never installs the optional qrcode dependency
-    # (see approve.py's module docstring) - confirms the graceful fallback.
-    assert _qr_ascii_if_available("nostrconnect://example") is None
-
-
 def test_offer_subcommand_accepts_regenerate_and_offer_file():
     parser = _build_parser()
     args = parser.parse_args(["--offer-file", "/tmp/offer.json", "offer", "--regenerate", "--owner-npub", "npub1x"])
@@ -382,29 +374,3 @@ def test_pair_subcommand_bunker_uri_defaults_to_none():
     assert args.bunker_uri is None
 
 
-def test_render_qr_matrix_ascii_never_emits_nbsp():
-    # The whole point of this function existing instead of calling
-    # qrcode.QRCode.print_ascii directly: that method's "light module"
-    # character is U+00A0, which a YunoHost webadmin config-panel alert
-    # HTML-entity-encodes into the literal text "&nbsp;" and never
-    # decodes back - not a size/CSS issue, a wrong-whitespace-character
-    # one. Plain ASCII space doesn't hit that.
-    matrix = [[True, False, True, False], [False, True, False, True], [True, True, False, False]]
-    out = _render_qr_matrix_ascii(matrix)
-    assert "\xa0" not in out
-    assert "&nbsp;" not in out
-
-
-def test_render_qr_matrix_ascii_uses_half_block_characters_for_module_pairs():
-    # top dark/bottom light -> ▀, top light/bottom dark -> ▄, both dark -> █,
-    # both light -> plain space. Two module-rows collapse into one text row.
-    matrix = [[True, False, True, True], [False, True, True, False]]
-    out = _render_qr_matrix_ascii(matrix)
-    assert out == "▀▄█▀"
-
-
-def test_render_qr_matrix_ascii_handles_odd_row_count():
-    # An unpaired final row is treated as bottom=light (no IndexError).
-    matrix = [[True, False]]
-    out = _render_qr_matrix_ascii(matrix)
-    assert out == "▀ "

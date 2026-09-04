@@ -17,14 +17,15 @@ re-pairing if lost.
 Four actions:
 
   yunohost-mcp-approve offer
-      Print (and persist, see PendingOffer) a pairing link/QR without
+      Print (and persist, see PendingOffer) a pairing link without
       listening for anything yet - for a caller that wants a stable,
-      always-visible code before any button click (a webadmin config
+      always-visible link before any button click (a webadmin config
       panel's "Signer status" display, say), rather than only ever
-      showing a link inside a one-shot action's scrolling log output.
+      showing it inside a one-shot action's scrolling log output.
       Idempotent: repeated calls return the same link until it expires
       (OFFER_TTL_SECONDS), is consumed by a successful `pair`, or
-      --regenerate is passed.
+      --regenerate is passed. Link only, deliberately no QR - see
+      _offer's own docstring for why.
 
   yunohost-mcp-approve pair
       One-time setup: reuses any pending `offer` link (so whatever was
@@ -43,12 +44,10 @@ Four actions:
 
       --bunker-uri skips all of the above: if the signer app itself can
       export a bunker:// connection string (its own "add a connection"
-      flow, distinct from scanning our nostrconnect:// link), pasting it
-      here connects immediately - no offer, no QR, nothing to display or
-      wait on, since the signer's endpoint is already fully described by
-      the URI. A practical alternative when nostrconnect://'s QR can't be
-      rendered usefully wherever `pair` is being driven from (e.g. a
-      plain-text-only display).
+      flow, distinct from opening our nostrconnect:// link), pasting it
+      here connects immediately - no offer, nothing to display or wait
+      on, since the signer's endpoint is already fully described by the
+      URI.
 
   yunohost-mcp-approve status
       Local-only, no network: reports whether a session is paired yet
@@ -124,22 +123,17 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # silently falls back to guessed defaults exactly when a real list
 # would have mattered most (see MAX_AUTO_RELAYS' history).
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 10
-# nostrconnect:// puts one `relay=` param per relay directly in the URI it
-# encodes as a QR, and the QR's rendered size (an ASCII/text render has no
-# separate "small" option - font size isn't ours to control wherever it's
-# displayed) tracks that URI's length directly. A real owner's NIP-65 list
-# is often 5-15 entries, which (unlike DEFAULT_RELAYS' fixed 3) has no
-# natural cap and needs *some* limit.
+# nostrconnect:// puts one `relay=` param per relay directly in the URI.
+# A real owner's NIP-65 list is often 5-15 entries, which (unlike
+# DEFAULT_RELAYS' fixed 3) has no natural cap and needs *some* limit -
+# not to shrink a rendered QR (that whole approach was dropped; see
+# _offer's docstring), just to keep the link itself reasonably short.
 #
-# Was briefly dropped to 1 purely to shrink the QR (crossing a version
-# boundary is a real visible size cut) - reverted after that produced an
-# actual pairing failure in practice: a single relay is a real bet that
-# it happens to be one the signer is actually listening on, not just
-# reachable, and DEFAULT_RELAYS' first entry has no reason to be that for
-# every owner. 3 restores real redundancy; the QR-size angle now has two
-# other outs instead - a font-size CSS fix in the display layer where
-# that's supported (this package's config panel), and pair --bunker-uri
-# as a relay-count-independent alternative entirely.
+# Was briefly dropped to 1, which produced an actual pairing failure in
+# practice: a single relay is a real bet that it happens to be one the
+# signer is actually listening on, not just reachable, and
+# DEFAULT_RELAYS' first entry has no reason to be that for every owner.
+# 3 restores real redundancy.
 #
 # Auto-populated relay lists (resolve_pair_relays' non-explicit path)
 # are truncated to this many; an explicit --relay is a deliberate
@@ -155,8 +149,8 @@ class ApprovalHelperError(RuntimeError):
 
 @dataclasses.dataclass
 class ApprovalSession:
-    """Persisted locally (0600) so `approve` doesn't need to re-pair (scan
-    a fresh QR code) on every call. `app_secret_key` is this helper's own
+    """Persisted locally (0600) so `approve` doesn't need to re-pair (open
+    a fresh link) on every call. `app_secret_key` is this helper's own
     disposable NIP-46 channel key - see this module's docstring for why
     that's not the same risk as storing the owner's nsec. `bunker_uri` is
     None until `pair` completes; the reconnectable bunker:// URI
@@ -201,7 +195,7 @@ OFFER_TTL_SECONDS = 24 * 60 * 60
 
 @dataclasses.dataclass
 class PendingOffer:
-    """A pairing link/QR generated ahead of time, independent of whether
+    """A pairing link generated ahead of time, independent of whether
     anything is actually listening for the signer's response yet - the
     fix for `pair` previously doing both "generate a fresh nostrconnect://
     link" and "block waiting for the signer" in one shot, which meant a
@@ -210,7 +204,7 @@ class PendingOffer:
 
     `offer` (see cmd below) creates and persists one of these without
     listening for anything; `pair` reuses it (rather than generating a
-    fresh secret) so the code someone already scanned keeps working.
+    fresh secret) so the link someone already opened keeps working.
     Consumed (deleted) once pairing actually succeeds, or replaced once
     OFFER_TTL_SECONDS has passed - never reused across explicitly
     different relay/owner-npub arguments; see cmd_offer."""
@@ -228,8 +222,7 @@ class PendingOffer:
         # only needs to resist guessing for the length of one pairing
         # attempt (OFFER_TTL_SECONDS at most, realistically the seconds
         # between showing the code and it being scanned), not serve as a
-        # long-term credential; halving it visibly shrinks the QR
-        # encoding it, same motivation as MAX_AUTO_RELAYS above.
+        # long-term credential; halving it keeps the link itself shorter.
         secret = secrets.token_hex(8)
         uri = _build_nostrconnect_uri(app_pubkey_hex=app_keys.public_key().to_hex(), relays=relays, secret=secret)
         return cls(
@@ -298,7 +291,7 @@ def resolve_pair_relays(
     discovered from the owner's own NIP-65 list (or, failing that, the
     plain defaults), plus any --extra-relay the caller additionally wants
     folded in either way - capped to MAX_AUTO_RELAYS so an owner with a
-    long published relay list doesn't end up with a QR too dense to scan.
+    long published relay list doesn't end up with an unreasonably long link.
     --extra-relay is placed first in that truncation, so a relay someone
     deliberately added is never the one silently dropped for exceeding
     the cap."""
@@ -367,59 +360,6 @@ def _build_nostrconnect_uri(*, app_pubkey_hex: str, relays: list[str], secret: s
     return f"nostrconnect://{app_pubkey_hex}?{query}"
 
 
-def _render_qr_matrix_ascii(matrix: list[list[bool]]) -> str:
-    """Half-block Unicode rendering (2 module-rows per text row, like
-    qrcode.QRCode.print_ascii) - reimplemented rather than calling
-    print_ascii directly because that method's own "light module"
-    character is U+00A0 (non-breaking space), not a plain space. That
-    single character choice is what broke this in a YunoHost webadmin
-    config-panel alert: something in its rendering pipeline HTML-entity-
-    encodes U+00A0 into the literal 6-character text "&nbsp;" and never
-    decodes it back, so every light module showed up as visible garbage
-    text instead of blank space - not a size/CSS problem, a wrong-
-    whitespace-character problem. Plain ASCII space (U+0020) doesn't hit
-    whatever that encoding step specifically targets."""
-    lines = []
-    height = len(matrix)
-    width = len(matrix[0]) if height else 0
-    for y in range(0, height, 2):
-        top = matrix[y]
-        bottom = matrix[y + 1] if y + 1 < height else [False] * width
-        row = []
-        for x in range(width):
-            dark_top, dark_bottom = top[x], bottom[x]
-            if dark_top and dark_bottom:
-                row.append("█")  # █
-            elif dark_top:
-                row.append("▀")  # ▀
-            elif dark_bottom:
-                row.append("▄")  # ▄
-            else:
-                row.append(" ")  # plain space, not qrcode's default U+00A0
-        lines.append("".join(row))
-    return "\n".join(lines)
-
-
-def _qr_ascii_if_available(uri: str) -> str | None:
-    """Best-effort - owner-approval-plan.md says "where supported", not
-    required. Returns None (not a printed fallback message here - callers
-    decide what, if anything, to say) when the optional `qrcode` package
-    isn't installed; this helper does not depend on it."""
-    try:
-        import qrcode
-    except ImportError:
-        return None
-    # ERROR_CORRECT_L (the lowest level) rather than the library's default
-    # M: less redundancy for the same data means fewer modules for a URI
-    # this long (nostrconnect:// already carries several relay= params, a
-    # secret, and JSON metadata) - the difference between an ascii QR
-    # that's awkwardly large and one that fits a normal screen.
-    qr = qrcode.QRCode(border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
-    qr.add_data(uri)
-    qr.make(fit=True)
-    return _render_qr_matrix_ascii(qr.get_matrix())
-
-
 async def _resolve_relays_for_offer(args: argparse.Namespace) -> list[str]:
     discovered: list[str] = []
     if not args.relay and args.owner_npub:
@@ -457,7 +397,7 @@ async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> tuple[Pe
     that might name something different than what's cached.
 
     Returns (offer, was_freshly_generated) - the second element lets
-    `pair` decide whether it needs to print the link/QR at all: a caller
+    `pair` decide whether it needs to print the link at all: a caller
     that already displayed a cached offer (a webadmin panel's Signer
     status) doesn't need `pair` to reprint the identical thing into its
     own action-log output, which reads as a confusingly different "new"
@@ -473,17 +413,19 @@ async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> tuple[Pe
 
 
 async def _offer(args: argparse.Namespace) -> None:
-    """Print (and persist) a pairing link/QR without listening for
-    anything - see _resolve_offer. Safe to call repeatedly; idempotent
-    until the offer expires, is consumed by a successful `pair`, or
-    --regenerate is passed."""
+    """Print (and persist) a pairing link without listening for anything -
+    see _resolve_offer. Safe to call repeatedly; idempotent until the
+    offer expires, is consumed by a successful `pair`, or --regenerate is
+    passed.
+
+    Link only, deliberately no QR: an ASCII/text QR render has no display
+    this helper controls the size or font of, and got real bug reports in
+    practice (a whitespace-encoding bug in one display context, still
+    awkwardly large after fixing that). pair --bunker-uri is the
+    scan-free alternative for a signer app that can export its own
+    connection string."""
     offer, _ = await _resolve_offer(args, Path(args.offer_file))
     print(offer.uri)
-    qr_ascii = _qr_ascii_if_available(offer.uri)
-    if qr_ascii:
-        print(qr_ascii)
-    else:
-        print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
 
 
 async def _pair(args: argparse.Namespace) -> None:
@@ -498,8 +440,8 @@ async def _pair(args: argparse.Namespace) -> None:
     if args.bunker_uri:
         # The signer already has an endpoint published (most apps that can
         # export a bunker:// string generate it from their own "add a
-        # connection" flow) - no nostrconnect:// offer, no QR, nothing to
-        # display or scan. We only need our own disposable local channel
+        # connection" flow) - no nostrconnect:// offer, nothing to
+        # display. We only need our own disposable local channel
         # key; the signer's pubkey/relay/secret all come from the pasted
         # URI itself.
         app_keys = Keys.generate()
@@ -526,25 +468,20 @@ async def _pair(args: argparse.Namespace) -> None:
     if was_fresh:
         print(f"{APP_NAME}: open this in the owner's NIP-46 signer app:", file=sys.stderr)
         print(offer.uri, file=sys.stderr)
-        qr_ascii = _qr_ascii_if_available(offer.uri)
-        if qr_ascii:
-            print(qr_ascii, file=sys.stderr)
-        else:
-            print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
     else:
-        # Not a new code - whoever's calling `pair` already has this one
+        # Not a new link - whoever's calling `pair` already has this one
         # displayed (e.g. via `offer`, or a webadmin panel's Signer
-        # status) and presumably already scanned it. Reprinting it here
-        # would be the identical URI/QR showing up again in a different
+        # status) and presumably already opened it. Reprinting it here
+        # would be the identical URI showing up again in a different
         # place, easy to mistake for "a new one was just generated" -
         # see `yunohost-mcp-approve offer` if it's genuinely needed again.
-        print(f"{APP_NAME}: reusing the pairing link/QR already shown (run `{APP_NAME} offer` to see it again)", file=sys.stderr)
+        print(f"{APP_NAME}: reusing the pairing link already shown (run `{APP_NAME} offer` to see it again)", file=sys.stderr)
     print(f"{APP_NAME}: waiting up to {args.timeout}s for the signer to connect...", file=sys.stderr)
 
     connect = NostrConnect(NostrConnectUri.parse(offer.uri), app_keys, timedelta(seconds=args.timeout), None)
     signer_pubkey = await connect.get_public_key_async()
     if signer_pubkey is None:
-        raise ApprovalHelperError("pairing timed out or was rejected by the signer - the same link/QR is still valid, try again")
+        raise ApprovalHelperError("pairing timed out or was rejected by the signer - the same link is still valid, try again")
 
     session = ApprovalSession(app_secret_key=offer.app_secret_key, bunker_uri=str(await connect.bunker_uri()))
     session.save(session_path)
@@ -711,14 +648,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "--regenerate",
             action="store_true",
             help="get a fresh link/secret even if an unexpired one is already pending (OFFER_TTL_SECONDS) - "
-            "normally offer/pair reuse whatever link was already shown, so a code someone already scanned "
+            "normally offer/pair reuse whatever link was already shown, so a link someone already opened "
             "keeps working.",
         )
 
     offer_parser = subparsers.add_parser(
         "offer",
-        help="print (and persist) a pairing link/QR without listening for anything yet - "
-        "for a caller (e.g. a webadmin panel) that wants a stable, always-visible code before any button click",
+        help="print (and persist) a pairing link without listening for anything yet - "
+        "for a caller (e.g. a webadmin panel) that wants a stable, always-visible link before any button click",
     )
     _add_offer_relay_args(offer_parser)
 
@@ -731,9 +668,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pair_parser.add_argument(
         "--bunker-uri",
         help="pair by pasting a bunker:// URI the signer app itself generated (its own 'add a connection' "
-        "export, if it has one), instead of scanning/opening a nostrconnect:// link - no offer, no QR, "
-        "no waiting: the signer's endpoint is already in the URI, so this connects immediately. "
-        "Ignores all --relay/--owner-npub/--extra-relay/--regenerate (nothing to resolve).",
+        "export, if it has one), instead of opening a nostrconnect:// link - no offer, no waiting: the "
+        "signer's endpoint is already in the URI, so this connects immediately. Ignores all "
+        "--relay/--owner-npub/--extra-relay/--regenerate (nothing to resolve).",
     )
 
     subparsers.add_parser("status", help="report whether a signer is paired yet (local-only, no network)")
