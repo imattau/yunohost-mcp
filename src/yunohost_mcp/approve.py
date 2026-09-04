@@ -14,7 +14,7 @@ the owner's key, grants no authority by itself (every actual signature
 still requires the live signer's approval), and is safe to regenerate by
 re-pairing if lost.
 
-Two actions:
+Three actions:
 
   yunohost-mcp-approve pair
       One-time setup: print a nostrconnect:// URI (and a QR code, if the
@@ -23,14 +23,29 @@ Two actions:
       reconnectable bunker:// session locally (see ApprovalSession) so
       later `approve` calls don't need to re-pair every time.
 
+  yunohost-mcp-approve status
+      Local-only, no network: reports whether a session is paired yet
+      (and the paired signer's pubkey, if so) by reading the session
+      file alone. For a caller (e.g. a webadmin config panel) that wants
+      to show pairing state without waiting on a live NIP-46 round trip.
+
   yunohost-mcp-approve approve --server <url> --confirmation-id <id>
       Fetches the authoritative pending-confirmation record from the
       server (approval_get - never trusts a locally-supplied plan/hash),
-      displays it, requires an explicit interactive "yes", and - only
-      then - asks the paired signer to sign a NIP-98 event authorizing
-      approve_operation. Both requests to the server are independently
-      NIP-98-signed through the live NIP-46 round trip; nothing here ever
-      constructs or claims a signature on the signer's behalf.
+      displays it, requires an explicit interactive "yes" (unless --yes
+      is given - see below), and - only then - asks the paired signer to
+      sign a NIP-98 event authorizing approve_operation. Both requests to
+      the server are independently NIP-98-signed through the live NIP-46
+      round trip; nothing here ever constructs or claims a signature on
+      the signer's behalf.
+
+      --yes skips the interactive "Type 'yes' to confirm" prompt. Only
+      for a caller that already gates this action behind its own
+      explicit confirmation step (a webadmin action button the owner
+      deliberately clicked, having just been shown the operation_plan
+      output from this same command) - never a default, and never wired
+      up for unattended/scheduled use, since the whole point of owner
+      approval is a human looking at operation_hash before it executes.
 """
 
 from __future__ import annotations
@@ -185,6 +200,18 @@ async def _pair(args: argparse.Namespace) -> None:
     print(f"{APP_NAME}: session saved to {session_path}", file=sys.stderr)
 
 
+def _print_status(args: argparse.Namespace) -> None:
+    session = ApprovalSession.load(Path(args.session_file))
+    if session is None or not session.bunker_uri:
+        print("paired: false", file=sys.stdout)
+        return
+    print("paired: true", file=sys.stdout)
+    # bunker://<signer-pubkey-hex>?relay=...&secret=... - the signer's
+    # pubkey is the URI's host/netloc, not a query param.
+    signer_pubkey_hex = urllib.parse.urlparse(session.bunker_uri).netloc
+    print(f"signer_pubkey: {signer_pubkey_hex}", file=sys.stdout)
+
+
 def _connect_from_session(session: ApprovalSession, *, timeout_seconds: int) -> NostrConnect:
     if not session.bunker_uri:
         raise ApprovalHelperError(f"{APP_NAME}: not paired yet - run `{APP_NAME} pair` first")
@@ -273,7 +300,7 @@ async def _async_approve(args: argparse.Namespace) -> None:
         print(f"{APP_NAME}: already approved - nothing to do", file=sys.stderr)
         return
 
-    if not _confirm_interactively():
+    if not args.yes and not _confirm_interactively():
         print(f"{APP_NAME}: not approved", file=sys.stderr)
         return
 
@@ -311,11 +338,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pair_parser.add_argument("--repair", action="store_true", help="pair again even if already paired")
 
+    subparsers.add_parser("status", help="report whether a signer is paired yet (local-only, no network)")
+
     approve_parser = subparsers.add_parser("approve", help="review and approve one pending confirmation")
     approve_parser.add_argument(
         "--server", default=os.environ.get("YUNOHOST_MCP_APPROVE_SERVER"), help="e.g. https://your-domain/mcp"
     )
     approve_parser.add_argument("--confirmation-id", required=True)
+    approve_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the interactive 'yes' prompt - only for a caller that already gates this behind its "
+        "own explicit confirmation step (see module docstring)",
+    )
 
     return parser
 
@@ -329,6 +364,8 @@ def main() -> None:
     try:
         if args.action == "pair":
             anyio.run(_pair, args)
+        elif args.action == "status":
+            _print_status(args)
         else:
             anyio.run(_async_approve, args)
     except ApprovalHelperError as exc:

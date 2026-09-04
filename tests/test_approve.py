@@ -18,7 +18,9 @@ from nostr_sdk import Keys
 from yunohost_mcp.approve import (
     ApprovalSession,
     _build_nostrconnect_uri,
+    _build_parser,
     _confirm_interactively,
+    _print_status,
 )
 
 
@@ -159,3 +161,50 @@ def test_confirm_interactively_treats_eof_as_declined(monkeypatch):
 def test_confirm_interactively_declines_anything_but_yes(monkeypatch, answer):
     monkeypatch.setattr("builtins.input", lambda _: answer)
     assert _confirm_interactively() is False
+
+
+class _Args:
+    def __init__(self, session_file):
+        self.session_file = str(session_file)
+
+
+def test_status_reports_unpaired_for_missing_session(tmp_path, capsys):
+    _print_status(_Args(tmp_path / "no-session.json"))
+    assert capsys.readouterr().out.strip() == "paired: false"
+
+
+def test_status_reports_unpaired_for_session_without_bunker_uri(tmp_path, capsys):
+    path = tmp_path / "session.json"
+    ApprovalSession.fresh().save(path)
+    _print_status(_Args(path))
+    assert capsys.readouterr().out.strip() == "paired: false"
+
+
+def test_status_reports_paired_and_signer_pubkey(tmp_path, capsys):
+    path = tmp_path / "session.json"
+    session = ApprovalSession.fresh()
+    session.bunker_uri = "bunker://deadbeef1234?relay=wss://relay.example&secret=abc"
+    session.save(path)
+
+    _print_status(_Args(path))
+    out = capsys.readouterr().out
+    assert "paired: true" in out
+    assert "signer_pubkey: deadbeef1234" in out
+
+
+def test_approve_subcommand_accepts_yes_flag():
+    parser = _build_parser()
+    args = parser.parse_args(["approve", "--server", "https://example.test/mcp", "--confirmation-id", "confirm-x", "--yes"])
+    assert args.yes is True
+
+
+def test_approve_subcommand_defaults_yes_to_false():
+    parser = _build_parser()
+    args = parser.parse_args(["approve", "--server", "https://example.test/mcp", "--confirmation-id", "confirm-x"])
+    assert args.yes is False
+
+
+def test_status_subcommand_parses():
+    parser = _build_parser()
+    args = parser.parse_args(["status"])
+    assert args.action == "status"
