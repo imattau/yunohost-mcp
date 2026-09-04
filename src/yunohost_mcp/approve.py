@@ -435,7 +435,7 @@ async def _resolve_relays_for_offer(args: argparse.Namespace) -> list[str]:
     )
 
 
-async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> PendingOffer:
+async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> tuple[PendingOffer, bool]:
     """The core of the fix for "the pairing link only ever appeared in a
     one-shot, scrolling-away action log": `offer` (below) can call this to
     produce and persist a link *before* anything is listening for it, and
@@ -445,15 +445,22 @@ async def _resolve_offer(args: argparse.Namespace, offer_path: Path) -> PendingO
 
     Regenerates only when there's a reason to: no offer yet, --regenerate,
     the existing one expired (OFFER_TTL_SECONDS), or an explicit --relay
-    that might name something different than what's cached."""
+    that might name something different than what's cached.
+
+    Returns (offer, was_freshly_generated) - the second element lets
+    `pair` decide whether it needs to print the link/QR at all: a caller
+    that already displayed a cached offer (a webadmin panel's Signer
+    status) doesn't need `pair` to reprint the identical thing into its
+    own action-log output, which reads as a confusingly different "new"
+    code even though the URI is byte-for-byte the same."""
     existing = None if args.regenerate else PendingOffer.load(offer_path)
     if existing and not existing.is_expired() and not args.relay:
-        return existing
+        return existing, False
 
     relays = await _resolve_relays_for_offer(args)
     offer = PendingOffer.fresh(relays=relays)
     offer.save(offer_path)
-    return offer
+    return offer, True
 
 
 async def _offer(args: argparse.Namespace) -> None:
@@ -461,7 +468,7 @@ async def _offer(args: argparse.Namespace) -> None:
     anything - see _resolve_offer. Safe to call repeatedly; idempotent
     until the offer expires, is consumed by a successful `pair`, or
     --regenerate is passed."""
-    offer = await _resolve_offer(args, Path(args.offer_file))
+    offer, _ = await _resolve_offer(args, Path(args.offer_file))
     print(offer.uri)
     qr_ascii = _qr_ascii_if_available(offer.uri)
     if qr_ascii:
@@ -504,16 +511,25 @@ async def _pair(args: argparse.Namespace) -> None:
         return
 
     offer_path = Path(args.offer_file)
-    offer = await _resolve_offer(args, offer_path)
+    offer, was_fresh = await _resolve_offer(args, offer_path)
     app_keys = offer.app_keys()
 
-    print(f"{APP_NAME}: open this in the owner's NIP-46 signer app:", file=sys.stderr)
-    print(offer.uri, file=sys.stderr)
-    qr_ascii = _qr_ascii_if_available(offer.uri)
-    if qr_ascii:
-        print(qr_ascii, file=sys.stderr)
+    if was_fresh:
+        print(f"{APP_NAME}: open this in the owner's NIP-46 signer app:", file=sys.stderr)
+        print(offer.uri, file=sys.stderr)
+        qr_ascii = _qr_ascii_if_available(offer.uri)
+        if qr_ascii:
+            print(qr_ascii, file=sys.stderr)
+        else:
+            print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
     else:
-        print("(install the optional 'qrcode' package for a scannable QR code)", file=sys.stderr)
+        # Not a new code - whoever's calling `pair` already has this one
+        # displayed (e.g. via `offer`, or a webadmin panel's Signer
+        # status) and presumably already scanned it. Reprinting it here
+        # would be the identical URI/QR showing up again in a different
+        # place, easy to mistake for "a new one was just generated" -
+        # see `yunohost-mcp-approve offer` if it's genuinely needed again.
+        print(f"{APP_NAME}: reusing the pairing link/QR already shown (run `{APP_NAME} offer` to see it again)", file=sys.stderr)
     print(f"{APP_NAME}: waiting up to {args.timeout}s for the signer to connect...", file=sys.stderr)
 
     connect = NostrConnect(NostrConnectUri.parse(offer.uri), app_keys, timedelta(seconds=args.timeout), None)
