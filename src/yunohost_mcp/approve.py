@@ -123,19 +123,22 @@ DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 5
 # separate "small" option - font size isn't ours to control wherever it's
 # displayed) tracks that URI's length directly. A real owner's NIP-65 list
 # is often 5-15 entries, which (unlike DEFAULT_RELAYS' fixed 3) has no
-# natural cap; even earlier caps of 4 and 2 still produced an
-# uncomfortably large code in practice - dropping from 2 relays to 1
-# crosses a QR version boundary (a real, visible size drop; further
-# trims like a shorter app name don't move it further within the same
-# bracket, so this is close to the practical floor for this rendering
-# path). A single relay is a real trade-off (no redundancy if it's
-# down), balanced by: pairing is cheap to retry (a fresh offer, or an
-# "Additional relays"/--extra-relay addition), and pair --bunker-uri is
-# available as a relay-count-independent alternative entirely.
+# natural cap and needs *some* limit.
+#
+# Was briefly dropped to 1 purely to shrink the QR (crossing a version
+# boundary is a real visible size cut) - reverted after that produced an
+# actual pairing failure in practice: a single relay is a real bet that
+# it happens to be one the signer is actually listening on, not just
+# reachable, and DEFAULT_RELAYS' first entry has no reason to be that for
+# every owner. 3 restores real redundancy; the QR-size angle now has two
+# other outs instead - a font-size CSS fix in the display layer where
+# that's supported (this package's config panel), and pair --bunker-uri
+# as a relay-count-independent alternative entirely.
+#
 # Auto-populated relay lists (resolve_pair_relays' non-explicit path)
 # are truncated to this many; an explicit --relay is a deliberate
 # override and left uncapped.
-MAX_AUTO_RELAYS = 1
+MAX_AUTO_RELAYS = 3
 
 logger = logging.getLogger(__name__)
 

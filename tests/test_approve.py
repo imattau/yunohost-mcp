@@ -246,20 +246,17 @@ def test_resolve_pair_relays_falls_back_to_defaults_when_nothing_discovered():
 
 def test_resolve_pair_relays_folds_in_extra_ahead_of_discovered_or_defaults():
     # extra is placed first (see resolve_pair_relays' docstring) so it's
-    # never what MAX_AUTO_RELAYS truncation drops - with the cap at 1,
-    # that means extra alone wins here; see
-    # test_resolve_pair_relays_extra_survives_cap_ahead_of_discovered_overflow
-    # for the same guarantee against a larger discovered list.
+    # never what MAX_AUTO_RELAYS truncation drops.
     result = resolve_pair_relays(
         explicit=None, extra=["wss://extra.example"], discovered=["wss://discovered.example"], defaults=["wss://default.example"]
     )
-    assert result == ["wss://extra.example"]
+    assert result == ["wss://extra.example", "wss://discovered.example"]
 
 
 def test_resolve_pair_relays_caps_auto_populated_relays():
     discovered = [f"wss://relay{i}.example" for i in range(10)]
     result = resolve_pair_relays(explicit=None, extra=[], discovered=discovered, defaults=["wss://default.example"])
-    assert result == discovered[:1]
+    assert result == discovered[:3]
 
 
 def test_resolve_pair_relays_does_not_cap_explicit_relays():
@@ -274,7 +271,7 @@ def test_resolve_pair_relays_extra_survives_cap_ahead_of_discovered_overflow():
         explicit=None, extra=["wss://extra.example"], discovered=discovered, defaults=["wss://default.example"]
     )
     assert result[0] == "wss://extra.example"
-    assert len(result) == 1
+    assert len(result) == 3
 
 
 def test_resolve_pair_relays_dedupes():
