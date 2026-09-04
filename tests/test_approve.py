@@ -290,17 +290,15 @@ class _FakeTag:
         return self._parts
 
 
-class _FakeTags:
+class _FakeEvent:
+    # Event.tags() returns a plain list of Tag directly in this nostr_sdk
+    # build, not a wrapper with its own .to_vec() - a prior version of
+    # this fake had a fake .to_vec() here too, matching a wrong assumption
+    # that only got caught when the same mistake crashed in production
+    # (see push_approval.py's _verify_and_extract history). This fake now
+    # mirrors the real shape exactly rather than idealizing it.
     def __init__(self, tags):
         self._tags = tags
-
-    def to_vec(self):
-        return self._tags
-
-
-class _FakeEvent:
-    def __init__(self, tags):
-        self._tags = _FakeTags(tags)
 
     def tags(self):
         return self._tags
@@ -320,6 +318,25 @@ def test_parse_relay_urls_from_event_tags_collects_r_tags():
 def test_parse_relay_urls_from_event_tags_ignores_malformed_r_tags():
     event = _FakeEvent([_FakeTag(["r"])])
     assert _parse_relay_urls_from_event_tags(event) == []
+
+
+def test_parse_relay_urls_from_event_tags_against_a_real_signed_nostr_sdk_event():
+    # Regression test for a real production bug: this originally called
+    # event.tags().to_vec(), assuming Event.tags() returns a Tags wrapper
+    # - it doesn't, it's already a plain list of Tag. Silently swallowed
+    # by _fetch_owner_relay_list's broad except, meaning NIP-65 discovery
+    # likely never actually worked before this fix - always falling back
+    # to plain defaults without anyone noticing. No fakes: exercises the
+    # actual nostr_sdk Event/EventBuilder/Keys.
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag
+
+    keys = Keys.generate()
+    event = (
+        EventBuilder(Kind(10002), "")
+        .tags([Tag.parse(["r", "wss://relay-a.example"]), Tag.parse(["r", "wss://relay-b.example", "write"])])
+        .finalize(keys)
+    )
+    assert _parse_relay_urls_from_event_tags(event) == ["wss://relay-a.example", "wss://relay-b.example"]
 
 
 def test_pending_offer_fresh_builds_a_valid_uri_for_its_own_app_key():

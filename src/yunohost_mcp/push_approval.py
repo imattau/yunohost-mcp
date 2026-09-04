@@ -140,7 +140,11 @@ def _verify_and_extract(signed: Any, *, owner_pubkey_hex: str, confirmation_id: 
     if signed.author().to_hex() != owner_pubkey_hex:
         logger.warning("push owner approval signer is not the configured owner for %s - refusing", confirmation_id)
         return False
-    tag_values = {parts[0]: parts[1] for tag in signed.tags().to_vec() if len(parts := tag.to_vec()) >= 2}
+    # Event.tags() is already a plain list of Tag in this nostr_sdk build,
+    # not a Tags wrapper needing its own .to_vec() first - confirmed by
+    # this bug actually firing in production (a real signed event, not
+    # just fake unit-test data) before this fix.
+    tag_values = {parts[0]: parts[1] for tag in signed.tags() if len(parts := tag.to_vec()) >= 2}
     if tag_values.get("confirmation_id") != confirmation_id or tag_values.get("operation_hash") != operation_hash:
         logger.warning("push owner approval event doesn't match the pending ticket %s - refusing", confirmation_id)
         return False

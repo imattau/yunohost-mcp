@@ -42,14 +42,6 @@ class _FakeTag:
         return self._parts
 
 
-class _FakeTags:
-    def __init__(self, tags):
-        self._tags = tags
-
-    def to_vec(self):
-        return self._tags
-
-
 class _FakePublicKey:
     def __init__(self, hex_value):
         self._hex = hex_value
@@ -59,10 +51,15 @@ class _FakePublicKey:
 
 
 class _FakeEvent:
+    # Event.tags() returns a plain list of Tag directly in this nostr_sdk
+    # build, not a wrapper with its own .to_vec() - _verify_and_extract's
+    # original code got exactly this wrong and crashed against a real
+    # signed event in production; this fake mirrors the real shape now
+    # rather than the earlier (wrong) idealized one that let it slip by.
     def __init__(self, *, valid=True, author_hex="owner", tags=None):
         self._valid = valid
         self._author = _FakePublicKey(author_hex)
-        self._tags = _FakeTags(tags or [])
+        self._tags = tags or []
 
     def verify(self):
         return self._valid
@@ -122,3 +119,32 @@ def test_verify_and_extract_rejects_missing_tags():
 
 def test_push_approval_kind_is_distinct_from_nip98():
     assert PUSH_APPROVAL_KIND != 27235
+
+
+def test_verify_and_extract_accepts_a_real_signed_nostr_sdk_event():
+    # Regression test for a real production bug: _verify_and_extract
+    # originally called signed.tags().to_vec(), assuming Event.tags()
+    # returns a Tags wrapper - it doesn't, it's already a plain list of
+    # Tag, and the mistake only surfaced as a crash against a real signed
+    # event (the fakes above previously mirrored the same wrong
+    # assumption, so they never would have caught this). Exercises the
+    # actual nostr_sdk Event/EventBuilder/Keys, no fakes at all.
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag
+
+    from yunohost_mcp.push_approval import PUSH_APPROVAL_KIND
+
+    keys = Keys.generate()
+    event = (
+        EventBuilder(Kind(PUSH_APPROVAL_KIND), "approve?")
+        .tags([Tag.parse(["confirmation_id", "confirm-1"]), Tag.parse(["operation_hash", "hash1"])])
+        .finalize(keys)
+    )
+    assert (
+        _verify_and_extract(
+            event,
+            owner_pubkey_hex=keys.public_key().to_hex(),
+            confirmation_id="confirm-1",
+            operation_hash="hash1",
+        )
+        is True
+    )

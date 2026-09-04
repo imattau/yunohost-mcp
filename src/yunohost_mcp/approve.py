@@ -306,7 +306,14 @@ def _parse_relay_urls_from_event_tags(event) -> list[str]:  # noqa: ANN001 - nos
     read/write-only in a third element - any r tag is a relay this pubkey
     is reachable through, so no filtering on that third element here."""
     urls = []
-    for tag in event.tags().to_vec():
+    # Event.tags() is already a plain list of Tag in this nostr_sdk build,
+    # not a Tags wrapper needing its own .to_vec() first - this call site
+    # had that exact bug in production (see push_approval.py's
+    # _verify_and_extract, where the same mistake actually crashed and
+    # got caught), silently swallowed here by _fetch_owner_relay_list's
+    # broad except - meaning NIP-65 discovery likely never worked at all
+    # before this fix, always falling back to plain defaults.
+    for tag in event.tags():
         parts = tag.to_vec()
         if len(parts) >= 2 and parts[0] == "r":
             urls.append(parts[1])
