@@ -1240,27 +1240,63 @@ class YunohostAdapter:
         finally:
             Path(event_path).unlink(missing_ok=True)
 
+    def catalog_list(self) -> dict[str, Any]:
+        """The whole Nostr-catalogue snapshot (every declared app, not just
+        this server's own), built the same way nostr-catalogd's own
+        /v3/apps.json is: fetch every kind-30078 declaration from the
+        configured relays, apply the trusted-publisher policy for any app
+        id with more than one candidate declaration, keep the newest per
+        app id. Read-only - the CLI's own `catalog` subcommand does the
+        relay round trip; nothing here signs or publishes anything.
+        """
+        relays = self._catalog_relays()
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "relays": relays,
+                "apps": {
+                    "example": {"id": "example", "name": "Example", "version": "1.0~ynh1"},
+                },
+            }
+        if not relays:
+            raise ToolInputError("catalog_relays must contain at least one relay URL")
+        args = ["catalog", "--relays", ",".join(relays)]
+        trusted_publishers = self._catalog_trusted_publishers()
+        if trusted_publishers:
+            args += ["--trusted-publishers", ",".join(trusted_publishers)]
+        result = self._run_catalog_json(args)
+        return {"fake": False, "relays": relays, **result}
+
     def _catalog_relays(self) -> list[str]:
         relays = [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
         if relays:
             return relays
-        return self._catalog_relays_from_nostr_catalog_ynh()
+        return self._read_nostr_catalog_ynh_env("NOSTR_YNH_RELAYS")
 
-    def _catalog_relays_from_nostr_catalog_ynh(self) -> list[str]:
-        # Falls back to nostr_catalog_ynh's own NOSTR_YNH_RELAYS (written
-        # by its render_daemon_env, see scripts/_common.sh) so this app
-        # doesn't need a second, separately-maintained relay list - see
-        # config.py's catalog_relays_env_path docstring.
+    def _catalog_trusted_publishers(self) -> list[str]:
+        publishers = [p.strip() for p in self.settings.catalog_trusted_publishers.split(",") if p.strip()]
+        if publishers:
+            return publishers
+        return self._read_nostr_catalog_ynh_env("NOSTR_YNH_TRUSTED_PUBLISHERS")
+
+    def _read_nostr_catalog_ynh_env(self, key: str) -> list[str]:
+        # Falls back to nostr_catalog_ynh's own env file (written by its
+        # render_daemon_env, see scripts/_common.sh) so this app doesn't
+        # need a second, separately-maintained copy of its relay list or
+        # trusted-publisher set - see config.py's catalog_relays_env_path
+        # docstring. Same file backs both NOSTR_YNH_RELAYS and
+        # NOSTR_YNH_TRUSTED_PUBLISHERS.
         env_path = self.settings.catalog_relays_env_path
         try:
             content = env_path.read_text()
         except OSError:
             return []
+        prefix = f"{key}="
         for line in content.splitlines():
-            if not line.startswith("NOSTR_YNH_RELAYS="):
+            if not line.startswith(prefix):
                 continue
-            value = line[len("NOSTR_YNH_RELAYS=") :].strip()
-            return [relay.strip() for relay in value.split(",") if relay.strip()]
+            value = line[len(prefix) :].strip()
+            return [item.strip() for item in value.split(",") if item.strip()]
         return []
 
     def _validate_catalog_source(self, source: str, ref: str | None) -> None:

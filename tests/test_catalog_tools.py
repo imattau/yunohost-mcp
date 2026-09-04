@@ -64,6 +64,46 @@ def test_catalog_verify_fake_mode_never_needs_publisher_key():
     assert result["valid"] is True
 
 
+def test_catalog_trusted_publishers_falls_back_to_nostr_catalog_ynh_env_file(tmp_path: Path):
+    env_path = tmp_path / "nostr-catalogd.env"
+    env_path.write_text("NOSTR_YNH_RELAYS=wss://relay.damus.io\nNOSTR_YNH_TRUSTED_PUBLISHERS=npub1aaa,npub1bbb\n")
+    adapter = YunohostAdapter(
+        Settings(fake_yunohost=False, catalog_trusted_publishers="", catalog_relays_env_path=env_path)
+    )
+    assert adapter._catalog_trusted_publishers() == ["npub1aaa", "npub1bbb"]
+
+
+def test_catalog_trusted_publishers_explicit_override_wins():
+    adapter = YunohostAdapter(Settings(fake_yunohost=False, catalog_trusted_publishers="npub1override"))
+    assert adapter._catalog_trusted_publishers() == ["npub1override"]
+
+
+def test_catalog_list_fake_mode_never_contacts_relays():
+    adapter = YunohostAdapter(Settings(fake_yunohost=True, catalog_relays="wss://relay.test"))
+    result = adapter.catalog_list()
+    assert result["fake"] is True
+    assert result["relays"] == ["wss://relay.test"]
+    assert "example" in result["apps"]
+
+
+def test_catalog_list_requires_at_least_one_relay():
+    adapter = YunohostAdapter(Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=Path("/does/not/exist")))
+    with pytest.raises(ValueError, match="catalog_relays"):
+        adapter.catalog_list()
+
+
+@pytest.mark.anyio
+async def test_catalog_list_tool_is_read_only_no_confirmation_needed():
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool("catalog_list", {})
+            assert result.is_error is not True, result.content
+            assert "apps" in result.structured_content
+    finally:
+        set_current_request(None)
+
+
 @pytest.mark.anyio
 async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Path):
     set_current_request(LOCAL_STDIO_REQUEST)

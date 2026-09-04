@@ -1493,6 +1493,19 @@ def catalog_verify(event_or_naddr: str) -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.CATALOG_INSPECT)
+def catalog_list() -> dict[str, Any]:
+    """List every app currently declared in the Nostr catalogue - not just
+    what's installed on this server. Queries the configured relays fresh
+    on every call (no local cache), applying the same trusted-publisher
+    policy nostr-catalogd itself uses when more than one publisher has
+    declared the same app id."""
+    return adapter.catalog_list()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.CATALOG_PUBLISH)
 @audited_write("catalog.publish", lock=write_lock, audit_log=audit_log)
 @require_confirmation(

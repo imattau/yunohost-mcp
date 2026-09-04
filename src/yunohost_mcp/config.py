@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # Explicit override; leave empty to fall back to nostr_catalog_ynh's
     # own NOSTR_YNH_RELAYS (see catalog_relays_env_path below).
     catalog_relays: str = ""
+    # Same idea as catalog_relays, for the `catalog` CLI subcommand's own
+    # --trusted-publishers (catalog_list()): which publisher npubs/hex
+    # keys count when the same app id has declarations from more than one
+    # publisher. Leave empty to fall back to nostr_catalog_ynh's own
+    # NOSTR_YNH_TRUSTED_PUBLISHERS, written to the same env file.
+    catalog_trusted_publishers: str = ""
     catalog_relays_env_path: Path = Path("/etc/nostr-catalogd/nostr-catalogd.env")
     catalog_cli_timeout_seconds: int = 120
     catalog_require_remote_ref: bool = True

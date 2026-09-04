@@ -78,6 +78,7 @@ EXPECTED_TOOLS = frozenset(
         "catalog_package_inspect",
         "catalog_publish_plan",
         "catalog_verify",
+        "catalog_list",
         "catalog_publish",
         "whoami",
         "server_identity",
