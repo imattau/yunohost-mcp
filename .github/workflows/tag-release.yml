@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: write
-  id-token: write
+  actions: write
 
 concurrency:
   group: tag-release
@@ -82,25 +82,22 @@ jobs:
           git tag --annotate "${tag}" --message "Release ${tag}"
           git push origin "${tag}"
 
-  publish:
-    needs: tag
-    runs-on: ubuntu-latest
-    environment: pypi
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: latest
-          enable-cache: true
-          python-version: '3.12'
-
-      - name: Build distributions
-        run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
+      # A tag pushed with the default GITHUB_TOKEN does NOT trigger other
+      # workflows' `on: push: tags:` (GitHub's own anti-recursion rule) -
+      # publish-pypi.yml's push trigger silently never fires from the line
+      # above. Dispatch it explicitly instead of duplicating its publish
+      # steps here: an inline publish job in *this* workflow was tried
+      # before and failed ("invalid-publisher") because PyPI's trusted
+      # publisher is registered for publish-pypi.yml specifically - its
+      # OIDC token's workflow_ref claim won't match any other workflow
+      # file, including this one. Reusing the one already-registered
+      # workflow, via the API (not a push), avoids both problems at once.
+      - name: Trigger PyPI publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          gh workflow run publish-pypi.yml --ref master -f tag="${tag}"
