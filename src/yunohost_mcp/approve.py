@@ -117,7 +117,13 @@ DEFAULT_RELAYS = ["wss://relay.nsec.app", "wss://relay.damus.io", "wss://nos.lol
 # necessarily relays the owner reads/writes to themselves.
 DEFAULT_DISCOVERY_RELAYS = ["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"]
 DEFAULT_TIMEOUT_SECONDS = 120
-DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 5
+# 5s was too tight in practice: connecting to 3 discovery relays and
+# fetching a NIP-65 event over the WAN (especially from a smaller
+# self-hosted box) can genuinely take longer than that, and a timeout
+# here is indistinguishable from "no relay list published" - it just
+# silently falls back to guessed defaults exactly when a real list
+# would have mattered most (see MAX_AUTO_RELAYS' history).
+DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 10
 # nostrconnect:// puts one `relay=` param per relay directly in the URI it
 # encodes as a QR, and the QR's rendered size (an ASCII/text render has no
 # separate "small" option - font size isn't ours to control wherever it's
