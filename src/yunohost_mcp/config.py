@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     # on it (approve_operation is checked independently of whether any
     # notification was ever sent, delivered, or read).
     owner_notify_relays: str = ""
+    # owner_push_approval: instead of (or alongside) the DM nudge above,
+    # actively request the owner's signature the moment a require_owner_
+    # signature confirmation is created - reusing whatever NIP-46 session
+    # yunohost-mcp-approve pair already established (config_dir/
+    # approve-session.json by default; the same file the ynh packaging's
+    # config-panel Pair action writes to, since it runs on this same box).
+    # No separate approve_operation call needed if the owner approves via
+    # their signer's push prompt: see server.py's _push_owner_approval.
+    # Disabled automatically (not an error) whenever no session is paired
+    # yet - this is additive to the existing manual approve_operation
+    # flow, never a replacement for it, since a signer might be offline,
+    # decline, or simply not be paired.
+    owner_push_approval_enabled: bool = True
+    owner_push_approval_timeout_seconds: int = 90
+    owner_push_approval_session_path: Path | None = None
 
     # Path to a local checkout of github.com/YunoHost/package_linter
     # (package_linter.py at its root). package_lint() is unavailable (not
@@ -164,6 +179,18 @@ class Settings(BaseSettings):
         """Explicitly-revoked delegation event ids (Phase 11). A missing
         file means nothing has been revoked yet, not "revoke everything"."""
         return self.config_dir / "revoked_delegations.toml"
+
+    def approve_session_path(self) -> Path:
+        """Where yunohost-mcp-approve's paired NIP-46 session lives -
+        owner_push_approval_session_path if explicitly set, else the same
+        default the CLI itself uses when pointed at this server's own
+        config_dir (approve.py's default_session_path() falls back to
+        ~/.config/yunohost-mcp for a *human's own machine*; this server
+        process instead expects the ynh packaging's convention of pairing
+        directly into config_dir, since its config-panel actions run on
+        this same box - see yunohost_mcp_approve_session_file in the
+        packaging repo's _common.sh)."""
+        return self.owner_push_approval_session_path or (self.config_dir / "approve-session.json")
 
 
 def load_settings() -> Settings:

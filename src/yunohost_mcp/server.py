@@ -110,6 +110,7 @@ from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
 from yunohost_mcp.notify import notify_owner_best_effort, parse_relay_list
+from yunohost_mcp.push_approval import request_owner_signature_in_background
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket
 from yunohost_mcp.policy.enforcement import (
     require_confirmation,
@@ -174,7 +175,55 @@ def _notify_owner_pending(ticket: ConfirmationTicket) -> None:
     )
 
 
-set_owner_signature_pending_hook(_notify_owner_pending)
+def _push_owner_approval(ticket: ConfirmationTicket) -> None:
+    """Wired into the same hook as _notify_owner_pending below -
+    push_approval.py's actual live signing request, additive to that
+    module's text-only nudge. A no-op (never even spawns the background
+    thread) whenever owner_push_approval_enabled is off or no owner is
+    configured; push_approval.py itself handles "no session paired yet"
+    and every other failure mode as a no-op rather than an error, so this
+    never affects whether the confirmation_required response already
+    returned to the original caller."""
+    if not settings.owner_push_approval_enabled:
+        return
+    owner_pubkey = get_owner_pubkey()
+    if owner_pubkey is None:
+        return
+
+    def _mark_approved() -> None:
+        # Bypasses the approve_operation MCP tool entirely (push_approval.py
+        # has already independently verified the owner's own signature over
+        # exactly this ticket - see its _verify_and_extract), which also
+        # means its @audited_write wrapper never runs - record the
+        # equivalent audit entry by hand so this doesn't silently vanish
+        # from the audit trail just because it went through a different path.
+        confirmation_store.approve(ticket.confirmation_id, approver_pubkey=owner_pubkey, owner_pubkey=owner_pubkey)
+        audit_log.record(
+            tool="owner.approve",
+            arguments={"confirmation_id": ticket.confirmation_id},
+            caller_pubkey=owner_pubkey,
+            decision="allowed",
+            result="success",
+        )
+
+    request_owner_signature_in_background(
+        session_path=settings.approve_session_path(),
+        owner_pubkey_hex=owner_pubkey,
+        tool=ticket.tool,
+        operation_plan=ticket.plan,
+        operation_hash=ticket.operation_hash,
+        confirmation_id=ticket.confirmation_id,
+        timeout_seconds=settings.owner_push_approval_timeout_seconds,
+        on_approved=_mark_approved,
+    )
+
+
+def _on_owner_signature_pending(ticket: ConfirmationTicket) -> None:
+    _notify_owner_pending(ticket)
+    _push_owner_approval(ticket)
+
+
+set_owner_signature_pending_hook(_on_owner_signature_pending)
 
 
 class AsyncToolMCPServer(MCPServer):

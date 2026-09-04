@@ -85,12 +85,15 @@ def set_owner_signature_pending_hook(hook: Callable[[Any], None] | None) -> None
     False, regardless of whether a hook is set.
 
     This module stays deliberately ignorant of what the hook does
-    (relays, owner pubkey, NIP-17/59 - all notify.py's concern, not
-    this one's) - it only calls it, and does not catch anything the hook
-    raises: server.py only ever wires in notify_owner_best_effort, which
-    already guarantees it never raises (see notify.py's own docstring),
-    so a hook that isn't exception-safe should fail loudly here rather
-    than have this module quietly swallow a bug in it.
+    (relays, owner pubkey, NIP-17/59, or push_approval.py's live NIP-46
+    signature request - all server.py's concern, not this one's) - it
+    only calls it, and does not catch anything the hook raises: every
+    hook server.py wires in guarantees it never raises on its own
+    synchronous path (see notify.py's and push_approval.py's own
+    docstrings - the latter's actual signing round trip runs on a
+    background thread precisely so it can't block or raise back into
+    this call), so a hook that isn't exception-safe should fail loudly
+    here rather than have this module quietly swallow a bug in it.
     """
     global _owner_signature_pending_hook
     _owner_signature_pending_hook = hook

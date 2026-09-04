@@ -123,6 +123,8 @@ yunohost-mcp-approve approve --server https://your-yunohost-domain/mcp --confirm
 
 This fetches the authoritative pending-operation record from the server (never trusts a locally-supplied plan), displays the exact tool, arguments, and `operation_hash`, and requires typing `yes` before submitting the signed approval. Once approved, the original requester can retry its call.
 
+**Automatic push approval.** Once paired, this step usually isn't needed at all: the moment a `require_owner_signature` operation is requested, the server itself reuses the same paired session to open a live NIP-46 connection and ask your signer app to sign a small, human-readable approval event right then - a real push prompt on your signer app, no command to run. Approving there marks the ticket approved directly; declining, timing out (`YUNOHOST_MCP_OWNER_PUSH_APPROVAL_TIMEOUT_SECONDS`, default 90s), or no session being paired yet just leaves the ticket pending for a manual `yunohost-mcp-approve approve` as above. Disable entirely with `YUNOHOST_MCP_OWNER_PUSH_APPROVAL_ENABLED=false`.
+
 ## Development
 
 ```

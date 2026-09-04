@@ -555,6 +555,89 @@ async def test_owner_signature_pending_notification_not_fired_for_plain_confirma
 
 
 @pytest.mark.anyio
+async def test_owner_push_approval_fires_by_default(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(
+        server_module, "request_owner_signature_in_background", lambda **kwargs: calls.append(kwargs)
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("system_upgrade", {})
+        confirmation_id = result.structured_content["confirmation_id"]
+        operation_hash = result.structured_content["operation_hash"]
+
+    assert len(calls) == 1
+    assert calls[0]["confirmation_id"] == confirmation_id
+    assert calls[0]["operation_hash"] == operation_hash
+    assert calls[0]["tool"] == "system.upgrade"
+    assert calls[0]["owner_pubkey_hex"] == SECOND_ADMIN_REQUEST.pubkey
+    assert calls[0]["session_path"] == server_module.settings.approve_session_path()
+    assert calls[0]["timeout_seconds"] == server_module.settings.owner_push_approval_timeout_seconds
+    assert callable(calls[0]["on_approved"])
+
+
+@pytest.mark.anyio
+async def test_owner_push_approval_disabled_via_setting(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(
+        server_module, "request_owner_signature_in_background", lambda **kwargs: calls.append(kwargs)
+    )
+    monkeypatch.setattr(server_module.settings, "owner_push_approval_enabled", False)
+
+    async with Client(mcp) as client:
+        await client.call_tool("system_upgrade", {})
+
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_owner_push_approval_not_fired_for_plain_confirmation(monkeypatch: pytest.MonkeyPatch):
+    # domains.write requires confirmation but not owner signature - push
+    # approval, like the DM notification, is specifically for
+    # require_owner_signature.
+    from yunohost_mcp import server as server_module
+
+    calls = []
+    monkeypatch.setattr(
+        server_module, "request_owner_signature_in_background", lambda **kwargs: calls.append(kwargs)
+    )
+
+    async with Client(mcp) as client:
+        await client.call_tool("domain_add", {"domain": "push-approval-check.example.com"})
+
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_owner_push_approval_on_approved_marks_ticket_approved_and_audits(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    captured = {}
+    monkeypatch.setattr(
+        server_module, "request_owner_signature_in_background", lambda **kwargs: captured.update(kwargs)
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("system_upgrade", {})
+        confirmation_id = result.structured_content["confirmation_id"]
+
+        before = len(server_module.audit_log.list())
+        captured["on_approved"]()  # simulate the signer having approved
+        after = server_module.audit_log.list()
+        assert len(after) == before + 1
+        assert after[0]["tool"] == "owner.approve"
+        assert after[0]["caller"] == SECOND_ADMIN_REQUEST.pubkey
+        assert after[0]["result"] == "success"
+
+        executed = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
+        assert executed.is_error is not True
+
+
+@pytest.mark.anyio
 async def test_phase13_execute_without_owner_approval_is_denied():
     async with Client(mcp) as client:
         first = await client.call_tool("system_upgrade", {})
