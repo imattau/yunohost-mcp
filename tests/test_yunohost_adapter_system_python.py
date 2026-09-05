@@ -192,6 +192,21 @@ def test_user_metadata_lists_call_system_python(monkeypatch: pytest.MonkeyPatch,
     assert result == {"fake": False, **expected}
 
 
+def test_domains_list_calls_system_python(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs)
+        return {"domains": ["example.com"], "main": "example.com"}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    result = YunohostAdapter(settings=_settings()).domains_list()
+
+    assert captured == {"module_name": "yunohost.domain", "attr": "domain_list", "kwargs": {}}
+    assert result == {"fake": False, "domains": ["example.com"], "main": "example.com"}
+
+
 def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.MonkeyPatch):
     # An app installed directly from a Git URL (never registered in any
     # catalog - e.g. this server's own yunohost_mcp app) has no catalog

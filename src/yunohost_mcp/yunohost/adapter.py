@@ -623,8 +623,9 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "domains": ["example.com"], "main": "example.com"}
-        domain_list = _import_attr("yunohost.domain", "domain_list")
-        return {"fake": False, **domain_list()}
+        # domain_list() also queries LDAP for the domain inventory; keep it
+        # in the system interpreter for the same reason as users_list().
+        return {"fake": False, **_call_via_system_python("yunohost.domain", "domain_list", {}, self.settings)}
 
     def users_list(self) -> dict[str, Any]:
         brokered = self._broker_call("users.list", {})
