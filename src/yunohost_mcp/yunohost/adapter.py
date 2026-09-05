@@ -632,8 +632,12 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "users": {"alice": {"fullname": "Alice Example", "mail": "alice@example.com"}}}
-        user_list = _import_attr("yunohost.user", "user_list")
-        return {"fake": False, **user_list()}
+        # Keep this in the system interpreter like the other LDAP-backed
+        # YunoHost calls. The MCP venv does not reliably carry YunoHost's
+        # full runtime/LDAP dependency set, and an import/runtime failure in
+        # the root helper otherwise becomes the unhelpful "internal broker
+        # error" at the MCP boundary.
+        return {"fake": False, **_call_via_system_python("yunohost.user", "user_list", {}, self.settings)}
 
     # user_create/user_delete/user_update/user_group_create/user_group_delete/
     # user_group_update are @is_unit_operation-decorated (yunohost.user), same

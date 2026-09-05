@@ -153,6 +153,21 @@ def test_app_upgrade_calls_call_via_system_python_with_correct_kwargs(monkeypatc
     assert result == {"fake": False, "app": "ditto", "result": {"success": ["ditto"]}}
 
 
+def test_users_list_calls_system_python(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs)
+        return {"users": {"codex": {"fullname": "Codex"}}}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    result = YunohostAdapter(settings=_settings()).users_list()
+
+    assert captured == {"module_name": "yunohost.user", "attr": "user_list", "kwargs": {}}
+    assert result == {"fake": False, "users": {"codex": {"fullname": "Codex"}}}
+
+
 def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.MonkeyPatch):
     # An app installed directly from a Git URL (never registered in any
     # catalog - e.g. this server's own yunohost_mcp app) has no catalog
