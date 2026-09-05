@@ -1,6 +1,6 @@
 [project]
 name = "yunohost-mcp-connect"
-version = "0.8.4"
+version = "0.8.5"
 description = "MCP server for secure, Nostr-authenticated YunoHost administration"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
