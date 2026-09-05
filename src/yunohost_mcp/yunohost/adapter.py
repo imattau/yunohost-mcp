@@ -730,8 +730,10 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "groups": {"all_users": {"members": ["alice"]}}}
-        user_group_list = _import_attr("yunohost.user", "user_group_list")
-        return {"fake": False, **user_group_list()}
+        return {
+            "fake": False,
+            **_call_via_system_python("yunohost.user", "user_group_list", {}, self.settings),
+        }
 
     def user_group_create(self, groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call("user.group_create", {"groupname": groupname, "confirmation_id": confirmation_id})
@@ -774,8 +776,10 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "permissions": {"myapp.main": {"allowed": ["all_users"]}}}
-        user_permission_list = _import_attr("yunohost.user", "user_permission_list")
-        return {"fake": False, **user_permission_list(full=True)}
+        return {
+            "fake": False,
+            **_call_via_system_python("yunohost.user", "user_permission_list", {"full": True}, self.settings),
+        }
 
     # user_permission_add/user_permission_remove are @is_flash_unit_operation
     # (flash=True) - log.py's is_unit_operation() only prepends an

@@ -168,6 +168,30 @@ def test_users_list_calls_system_python(monkeypatch: pytest.MonkeyPatch):
     assert result == {"fake": False, "users": {"codex": {"fullname": "Codex"}}}
 
 
+@pytest.mark.parametrize(
+    ("method", "attr", "expected"),
+    [
+        ("user_group_list", "user_group_list", {"groups": {"all_users": {"members": ["codex"]}}}),
+        ("user_permission_list", "user_permission_list", {"permissions": {"mcp.main": {"allowed": ["all_users"]}}}),
+    ],
+)
+def test_user_metadata_lists_call_system_python(monkeypatch: pytest.MonkeyPatch, method, attr, expected):
+    captured = {}
+
+    def fake_call(module_name, called_attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=called_attr, kwargs=kwargs)
+        return expected
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    result = getattr(YunohostAdapter(settings=_settings()), method)()
+
+    assert captured["module_name"] == "yunohost.user"
+    assert captured["attr"] == attr
+    assert captured["kwargs"] == ({"full": True} if method == "user_permission_list" else {})
+    assert result == {"fake": False, **expected}
+
+
 def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.MonkeyPatch):
     # An app installed directly from a Git URL (never registered in any
     # catalog - e.g. this server's own yunohost_mcp app) has no catalog
