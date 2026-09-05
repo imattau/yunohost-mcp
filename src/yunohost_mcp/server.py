@@ -278,11 +278,23 @@ def get_server_identity() -> ServerIdentity:
 
 
 def _check_apps_upgrade(rule: PolicyRule) -> None:
+    # These reads are brokered in the packaged deployment. Calling them while
+    # constructing the confirmation response would forward the same NIP-98
+    # envelope to the root helper multiple times; the helper's replay cache
+    # correctly rejects that as a replay. The root helper repeats these hard
+    # checks immediately before the privileged upgrade, so skipping the
+    # frontend copies preserves enforcement without the nested broker calls.
+    if settings.broker_socket_path is not None:
+        return
     check_free_space(rule, free_bytes=adapter.free_space_bytes())
     check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
 
 
 def _check_apps_remove(rule: PolicyRule) -> None:
+    # See _check_apps_upgrade: the root broker owns the final hard-policy
+    # check, and must be the only broker caller for this HTTP request.
+    if settings.broker_socket_path is not None:
+        return
     check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
 
 
