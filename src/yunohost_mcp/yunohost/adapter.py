@@ -336,7 +336,12 @@ class YunohostAdapter:
             return None
         from yunohost_mcp.broker.client import call
 
-        return call(operation, arguments, socket_path=self.settings.broker_socket_path)
+        return call(
+            operation,
+            arguments,
+            socket_path=self.settings.broker_socket_path,
+            timeout=self.settings.request_timeout_seconds,
+        )
 
     def server_info(self) -> dict[str, Any]:
         brokered = self._broker_call("server.info", {})
