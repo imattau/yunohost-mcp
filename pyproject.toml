@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 yunohost-mcp = "yunohost_mcp.server:main"
+yunohost-mcp-broker = "yunohost_mcp.broker.helper:main"
 yunohost-mcp-connect = "yunohost_mcp.bridge:main"
 yunohost-mcp-delegate = "yunohost_mcp.delegate:main"
 yunohost-mcp-approve = "yunohost_mcp.approve:main"

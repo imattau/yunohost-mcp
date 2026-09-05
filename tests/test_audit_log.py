@@ -54,6 +54,22 @@ def test_creates_parent_directory(tmp_path: Path):
     assert log.path.exists()
 
 
+def test_record_can_bind_a_broker_request(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    log.record(
+        tool="app.upgrade",
+        arguments={"app": "nextcloud"},
+        caller_pubkey="agent",
+        decision="allowed",
+        result="success",
+        request_id="request-1",
+        execution_context="broker",
+    )
+    entry = json.loads(log.path.read_text().strip())
+    assert entry["request_id"] == "request-1"
+    assert entry["execution_context"] == "broker"
+
+
 def test_list_returns_newest_first(tmp_path: Path):
     log = AuditLog(path=tmp_path / "audit.jsonl")
     first_id = log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")

@@ -140,7 +140,7 @@ def test_revoked_delegation_rejected():
 def test_delegation_with_no_expiry_tag_rejected():
     sk, delegator = new_keypair()
     _, delegate = new_keypair()
-    event = make_delegation_event(
+    make_delegation_event(
         sk, delegator, delegate_pubkey=delegate, server_pubkey=SERVER_PUBKEY, scopes=["apps.read"], expires_at=_future()
     )
     # Strip the expiry tag after signing is impossible without invalidating

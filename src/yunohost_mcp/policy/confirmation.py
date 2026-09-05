@@ -48,6 +48,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
+import sqlite3
 import time
 import uuid
 from contextvars import ContextVar
@@ -212,6 +214,116 @@ class ConfirmationStore:
 
     def __len__(self) -> int:
         return len(self._pending)
+
+
+class SQLiteConfirmationStore:
+    """Cross-process confirmation store for the frontend and root helper.
+
+    SQLite supplies the transaction boundary that the original in-memory
+    store cannot provide once MCP and YunoHost execution live in separate
+    processes. The public method contract intentionally mirrors
+    ``ConfirmationStore`` so policy code does not care which deployment mode
+    is active.
+    """
+
+    def __init__(self, path, ttl_seconds: int = 300, *, owner_approval_ttl_seconds: int | None = None) -> None:
+        self.path = str(path)
+        self._ttl_seconds = ttl_seconds
+        self._owner_approval_ttl_seconds = owner_approval_ttl_seconds or ttl_seconds
+        with self._connect() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS confirmations ("
+                "id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, tool TEXT NOT NULL, arguments_hash TEXT NOT NULL, "
+                "plan TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, operation_hash TEXT NOT NULL, "
+                "owner_approved_by TEXT)"
+            )
+        # The file contains confirmation plans and operation hashes shared by
+        # the unprivileged frontend and root helper. Keep it accessible only
+        # to the configured service owner/group, regardless of which process
+        # creates it first or what the process umask happens to be.
+        os.chmod(self.path, 0o660)
+
+    def _connect(self):
+        db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        db.execute("PRAGMA busy_timeout=30000")
+        return db
+
+    def create(self, *, pubkey, tool, arguments, plan, require_owner_signature=False):
+        now = time.time()
+        confirmation_id = f"confirm-{uuid.uuid4().hex[:20]}"
+        ticket = ConfirmationTicket(
+            confirmation_id=confirmation_id, pubkey=pubkey, tool=tool,
+            arguments_hash=_hash_arguments(arguments), plan=plan, created_at=now,
+            expires_at=now + (self._owner_approval_ttl_seconds if require_owner_signature else self._ttl_seconds),
+            operation_hash=_operation_hash(confirmation_id=confirmation_id, pubkey=pubkey, tool=tool, arguments=arguments),
+        )
+        with self._connect() as db:
+            db.execute("INSERT INTO confirmations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", self._row(ticket))
+        return ticket
+
+    def approve(self, confirmation_id, *, approver_pubkey, owner_pubkey):
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ticket = self._get(db, confirmation_id)
+            self._check_live(db, ticket)
+            if approver_pubkey != owner_pubkey:
+                db.rollback()
+                raise ConfirmationError("approver is not the configured owner - owner co-signing requires the exact configured owner identity to sign the approval")
+            db.execute("UPDATE confirmations SET owner_approved_by=? WHERE id=?", (approver_pubkey, confirmation_id))
+            db.commit()
+            return dataclasses.replace(ticket, owner_approved_by=approver_pubkey)
+
+    def peek(self, confirmation_id):
+        with self._connect() as db:
+            ticket = self._get(db, confirmation_id)
+            self._check_live(db, ticket)
+            return ticket
+
+    def consume(self, confirmation_id, *, pubkey, tool, arguments, require_owner_approval=False):
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ticket = self._get(db, confirmation_id)
+            self._check_live(db, ticket)
+            if ticket.pubkey != pubkey:
+                self._delete_and_raise(db, confirmation_id, "confirmation was issued to a different identity")
+            if ticket.tool != tool:
+                self._delete_and_raise(db, confirmation_id, "confirmation was issued for a different tool")
+            if ticket.arguments_hash != _hash_arguments(arguments):
+                self._delete_and_raise(db, confirmation_id, "confirmation does not match these exact arguments")
+            if require_owner_approval and ticket.owner_approved_by is None:
+                db.rollback()
+                raise ConfirmationError("this operation requires owner co-signature - use approve_operation() first")
+            db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
+            db.commit()
+            return ticket
+
+    def __len__(self):
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM confirmations").fetchone()[0]
+
+    @staticmethod
+    def _row(ticket):
+        return (ticket.confirmation_id, ticket.pubkey, ticket.tool, ticket.arguments_hash, json.dumps(ticket.plan), ticket.created_at, ticket.expires_at, ticket.operation_hash, ticket.owner_approved_by)
+
+    @staticmethod
+    def _get(db, confirmation_id):
+        row = db.execute("SELECT * FROM confirmations WHERE id=?", (confirmation_id,)).fetchone()
+        if row is None:
+            raise ConfirmationError("unknown or already-used confirmation_id")
+        return ConfirmationTicket(row[0], row[1], row[2], row[3], json.loads(row[4]), row[5], row[6], row[7], row[8])
+
+    @staticmethod
+    def _check_live(db, ticket):
+        if time.time() >= ticket.expires_at:
+            db.execute("DELETE FROM confirmations WHERE id=?", (ticket.confirmation_id,))
+            db.commit()
+            raise ConfirmationError("confirmation has expired")
+
+    @staticmethod
+    def _delete_and_raise(db, confirmation_id, message):
+        db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
+        db.commit()
+        raise ConfirmationError(message)
 
 
 _consumed_ticket: ContextVar[ConfirmationTicket | None] = ContextVar("consumed_confirmation_ticket", default=None)

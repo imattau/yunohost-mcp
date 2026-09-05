@@ -1,4 +1,4 @@
-"""ASGI middleware enforcing NIP-98 authentication AND identity.toml
+"""ASGI middleware enforcing NIP-98 authentication AND MCP authorization
 authorization on every HTTP request, before it reaches the MCP session.
 
 This is deliberately a raw ASGI middleware (not Starlette's BaseHTTPMiddleware)
@@ -53,7 +53,7 @@ class NostrAuthMiddleware:
         self,
         app,
         *,
-        identity_store: IdentityStore,
+    identity_store: IdentityStore,
         replay_cache: ReplayCache | None = None,
         clock_skew_seconds: int = 60,
         exempt_paths: frozenset[str] = frozenset(),
@@ -115,6 +115,11 @@ class NostrAuthMiddleware:
             event_id=nip98_identity.event_id,
             event_created_at=nip98_identity.created_at,
             identity=record,
+            authorization=authorization,
+            method=method,
+            url=url,
+            body=body,
+            delegation=headers.get("x-nostr-delegation"),
         )
         set_current_request(request)
         try:

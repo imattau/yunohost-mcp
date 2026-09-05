@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import stat
-import sys
 import textwrap
 
 import pytest

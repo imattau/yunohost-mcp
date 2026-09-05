@@ -98,11 +98,11 @@ from yunohost_mcp.audit.decorator import audited_write
 from yunohost_mcp.audit.log import AuditLog
 from yunohost_mcp.auth.identity import (
     LOCAL_STDIO_REQUEST,
-    IdentityStore,
     get_current_request,
     require_current_request,
     set_current_request,
 )
+from yunohost_mcp.auth.groups import identity_store_for_settings
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.owner import resolve_owner_pubkey
 from yunohost_mcp.auth.replay import ReplayCache
@@ -111,7 +111,7 @@ from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
 from yunohost_mcp.notify import notify_owner_best_effort, parse_relay_list
 from yunohost_mcp.push_approval import request_owner_signature_in_background
-from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket
+from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket, SQLiteConfirmationStore
 from yunohost_mcp.policy.enforcement import (
     require_confirmation,
     require_scope,
@@ -129,9 +129,17 @@ adapter = YunohostAdapter(settings=settings)
 write_lock = WriteLock()
 audit_log = AuditLog(path=settings.audit_log_path())
 policy_rules = load_policy(settings.policy_file_path())
-confirmation_store = ConfirmationStore(
-    ttl_seconds=settings.confirmation_ttl_seconds,
-    owner_approval_ttl_seconds=settings.owner_approval_ttl_seconds,
+confirmation_store = (
+    SQLiteConfirmationStore(
+        settings.confirmation_store_file,
+        ttl_seconds=settings.confirmation_ttl_seconds,
+        owner_approval_ttl_seconds=settings.owner_approval_ttl_seconds,
+    )
+    if settings.confirmation_store_file
+    else ConfirmationStore(
+        ttl_seconds=settings.confirmation_ttl_seconds,
+        owner_approval_ttl_seconds=settings.owner_approval_ttl_seconds,
+    )
 )
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 catalog_plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
@@ -140,7 +148,7 @@ catalog_plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_sec
 # (auth/owner.py) against the same live-reloaded identity.toml the HTTP
 # transport itself authenticates against, on stdio too (LOCAL_STDIO_REQUEST
 # never has a real npub, but approve_operation is still reachable there).
-identity_store = IdentityStore.live(settings.identity_file_path())
+identity_store = identity_store_for_settings(settings)
 
 
 def get_owner_pubkey() -> str | None:
@@ -422,6 +430,7 @@ def domains_list() -> dict[str, Any]:
     "domains.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda domain, install_letsencrypt_cert=False, **_: {
         "action": "add domain",
         "domain": domain,
@@ -446,7 +455,7 @@ def domain_add(domain: str, install_letsencrypt_cert: bool = False, confirmation
     points here; check the response's `certificate.CA_type` ("letsencrypt"
     vs "selfsigned") rather than assuming success.
     """
-    return adapter.domain_add(domain, install_letsencrypt_cert=install_letsencrypt_cert)
+    return adapter.domain_add(domain, install_letsencrypt_cert=install_letsencrypt_cert, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -471,6 +480,7 @@ def domain_cert_info(domain: str) -> dict[str, Any]:
     "domains.cert",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda domain, letsencrypt=True, staging=False, **_: {
         "action": "install certificate",
         "domain": domain,
@@ -503,7 +513,9 @@ def domain_cert_install(
     failure the call still returns normally with the resulting certificate
     status and the underlying error message in `acme_error`, instead of
     raising."""
-    return adapter.domain_cert_install(domain, letsencrypt=letsencrypt, staging=staging)
+    return adapter.domain_cert_install(
+        domain, letsencrypt=letsencrypt, staging=staging, confirmation_id=confirmation_id
+    )
 
 
 @mcp.tool()
@@ -524,6 +536,7 @@ def users_list() -> dict[str, Any]:
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda username, domain, password=None, fullname=None, mailbox_quota="0", admin=False, **_: {
         "action": "create user",
         "username": username,
@@ -546,7 +559,8 @@ def user_create(
     registered - see domain_add/domains_list). `admin` adds the new user to
     the `admins` group, granting webadmin/SSH access - grant with care."""
     return adapter.user_create(
-        username, domain=domain, password=password, fullname=fullname, mailbox_quota=mailbox_quota, admin=admin
+        username, domain=domain, password=password, fullname=fullname, mailbox_quota=mailbox_quota, admin=admin,
+        confirmation_id=confirmation_id,
     )
 
 
@@ -559,6 +573,7 @@ def user_create(
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda username, change_password=None, **kwargs: {
         "action": "update user",
         "username": username,
@@ -590,6 +605,7 @@ def user_update(
         remove_mailalias=remove_mailalias,
         mailbox_quota=mailbox_quota,
         fullname=fullname,
+        confirmation_id=confirmation_id,
     )
 
 
@@ -602,6 +618,7 @@ def user_update(
     "users.delete",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda username, purge=False, **_: {
         "action": "delete user",
         "username": username,
@@ -612,7 +629,7 @@ def user_update(
 def user_delete(username: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
     """Delete a YunoHost user account. Requires owner co-signature
     (approve_operation) in addition to confirmation - see PLAN.md Phase 13."""
-    return adapter.user_delete(username, purge=purge)
+    return adapter.user_delete(username, purge=purge, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -634,13 +651,14 @@ def user_group_list() -> dict[str, Any]:
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda groupname, **_: {"action": "create group", "groupname": groupname},
 )
 def user_group_create(groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Create a new YunoHost user group - a prerequisite for granting a
     custom set of users access to an app permission (see
     user_permission_add) rather than an individual username."""
-    return adapter.user_group_create(groupname)
+    return adapter.user_group_create(groupname, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -652,6 +670,7 @@ def user_group_create(groupname: str, confirmation_id: str | None = None) -> dic
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda groupname, add=None, remove=None, **_: {
         "action": "update group",
         "groupname": groupname,
@@ -664,7 +683,7 @@ def user_group_update(
 ) -> dict[str, Any]:
     """Add or remove usernames from a YunoHost group (e.g. adding a user to
     `admins` grants webadmin/SSH access - grant with care)."""
-    return adapter.user_group_update(groupname, add=add, remove=remove)
+    return adapter.user_group_update(groupname, add=add, remove=remove, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -676,6 +695,7 @@ def user_group_update(
     "users.delete",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda groupname, **_: {
         "action": "delete group",
         "groupname": groupname,
@@ -685,7 +705,7 @@ def user_group_update(
 def user_group_delete(groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Delete a YunoHost user group. Requires owner co-signature
     (approve_operation) in addition to confirmation - see PLAN.md Phase 13."""
-    return adapter.user_group_delete(groupname)
+    return adapter.user_group_delete(groupname, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -707,6 +727,7 @@ def user_permission_list() -> dict[str, Any]:
     "users.permissions",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda permission, names, **_: {
         "action": "grant permission",
         "permission": permission,
@@ -718,7 +739,7 @@ def user_permission_add(permission: str, names: list[str], confirmation_id: str 
     - see user_permission_list for existing permission names). Requires
     owner co-signature (approve_operation) in addition to confirmation -
     see PLAN.md Phase 13's "permission changes" candidate."""
-    return adapter.user_permission_add(permission, names)
+    return adapter.user_permission_add(permission, names, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -730,6 +751,7 @@ def user_permission_add(permission: str, names: list[str], confirmation_id: str 
     "users.permissions",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda permission, names, **_: {
         "action": "revoke permission",
         "permission": permission,
@@ -740,7 +762,7 @@ def user_permission_remove(permission: str, names: list[str], confirmation_id: s
     """Revoke a user or group's access to an app permission. Requires owner
     co-signature (approve_operation) in addition to confirmation - see
     PLAN.md Phase 13's "permission changes" candidate."""
-    return adapter.user_permission_remove(permission, names)
+    return adapter.user_permission_remove(permission, names, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -856,9 +878,20 @@ def operations_resource() -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.SERVICES_RESTART)
 @audited_write("services.restart", lock=write_lock, audit_log=audit_log)
-def service_restart(names: list[str]) -> dict[str, Any]:
+@require_confirmation(
+    "services.restart",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda names, **_: {
+        "action": "restart services",
+        "services": names,
+        "warning": "Restarting services can interrupt applications and network access.",
+    },
+)
+def service_restart(names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
     """Restart one or more YunoHost services."""
-    return adapter.service_restart(names)
+    return adapter.service_restart(names, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -866,14 +899,30 @@ def service_restart(names: list[str]) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.BACKUPS_CREATE)
 @audited_write("backups.create", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "backups.create",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda name=None, description=None, apps=None, system=None, **_: {
+        "action": "create backup",
+        "name": name,
+        "description": description,
+        "apps": apps or [],
+        "system": system or [],
+    },
+)
 def backup_create(
     name: str | None = None,
     description: str | None = None,
     apps: list[str] | None = None,
     system: list[str] | None = None,
+    confirmation_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a new local backup archive."""
-    return adapter.backup_create(name=name, description=description, apps=apps, system=system)
+    return adapter.backup_create(
+        name=name, description=description, apps=apps, system=system, confirmation_id=confirmation_id
+    )
 
 
 @mcp.tool()
@@ -881,9 +930,26 @@ def backup_create(
 @translate_known_errors
 @require_scope(Scope.APPS_INSTALL)
 @audited_write("apps.install", lock=write_lock, audit_log=audit_log)
-def app_install(app: str, label: str | None = None, args: str | None = None, force: bool = False) -> dict[str, Any]:
+@require_confirmation(
+    "apps.install",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, label=None, args=None, force=False, **_: {
+        "action": "install app",
+        "app": app,
+        "label": label,
+        "force": force,
+        "has_custom_args": args is not None,
+        "warning": "App installation runs the app's installation scripts with YunoHost privileges.",
+    },
+)
+def app_install(
+    app: str, label: str | None = None, args: str | None = None, force: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
     """Install a YunoHost app."""
-    return adapter.app_install(app, label=label, args=args, force=force)
+    return adapter.app_install(app, label=label, args=args, force=force, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -891,7 +957,13 @@ def app_install(app: str, label: str | None = None, args: str | None = None, for
 @translate_known_errors
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
-@require_confirmation("apps.upgrade", policy=policy_rules, confirmation_store=confirmation_store, checks=_check_apps_upgrade)
+@require_confirmation(
+    "apps.upgrade",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    checks=_check_apps_upgrade,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+)
 def app_upgrade(
     app: str | None = None, force: bool = False, url: str | None = None, confirmation_id: str | None = None
 ) -> dict[str, Any]:
@@ -907,7 +979,7 @@ def app_upgrade(
     exists and there is enough free disk space - see policy.toml /
     policy/rules.py's DEFAULT_POLICY["apps.upgrade"].
     """
-    return adapter.app_upgrade(app=app, force=force, url=url)
+    return adapter.app_upgrade(app=app, force=force, url=url, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -966,6 +1038,7 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
     policy=policy_rules,
     confirmation_store=confirmation_store,
     checks=_check_apps_remove,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda app, purge=False, **_: {
         "action": "remove app",
         "app": app,
@@ -976,7 +1049,7 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
 )
 def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
     """Remove an installed YunoHost app. Requires confirmation and a recent backup archive."""
-    return adapter.app_remove(app, purge=purge)
+    return adapter.app_remove(app, purge=purge, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -992,6 +1065,7 @@ def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None
     "apps.change_url",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda app, domain, path, **_: {
         "action": "change app url",
         "app": app,
@@ -1012,7 +1086,7 @@ def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None
     rebuild app-specific assets that were baked in for the old path - check
     the package (or ask the user) before assuming this alone is sufficient.
     """
-    return adapter.app_change_url(app, domain=domain, path=path)
+    return adapter.app_change_url(app, domain=domain, path=path, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1024,6 +1098,7 @@ def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None
     "apps.config",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda app, key, value, **_: {
         "action": "set app config",
         "app": app,
@@ -1041,7 +1116,7 @@ def app_config_set(app: str, key: str, value: str, confirmation_id: str | None =
     option name across sections, so a shortened key can silently target
     the wrong setting. Applying typically restarts the app's service.
     """
-    return adapter.app_config_set(app, key=key, value=value)
+    return adapter.app_config_set(app, key=key, value=value, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1053,6 +1128,7 @@ def app_config_set(app: str, key: str, value: str, confirmation_id: str | None =
     "backups.restore",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda name, apps=None, system=None, force=False, **_: {
         "action": "restore backup",
         "name": name,
@@ -1069,7 +1145,7 @@ def backup_restore(
     confirmation_id: str | None = None,
 ) -> dict[str, Any]:
     """Restore from a local backup archive. Requires confirmation."""
-    return adapter.backup_restore(name, apps=apps, system=system, force=force)
+    return adapter.backup_restore(name, apps=apps, system=system, force=force, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1081,6 +1157,7 @@ def backup_restore(
     "system.upgrade",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda **_: {
         "action": "upgrade system packages",
         "warning": "This upgrades OS-level packages and may restart services.",
@@ -1088,7 +1165,7 @@ def backup_restore(
 )
 def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
     """Upgrade system (OS-level) packages. Requires confirmation."""
-    return adapter.system_upgrade()
+    return adapter.system_upgrade(confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1120,6 +1197,7 @@ def migrations_state() -> dict[str, Any]:
     "system.migrate",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda targets=None, skip=False, auto=False, force_rerun=False, **_: {
         "action": "run migrations",
         "targets": targets or [],
@@ -1151,6 +1229,7 @@ def migrations_run(
         force_rerun=force_rerun,
         accept_disclaimer=accept_disclaimer,
         skip_postmigrations=skip_postmigrations,
+        confirmation_id=confirmation_id,
     )
 
 
@@ -1182,6 +1261,7 @@ def firewall_is_open(port: int | str, protocol: str) -> dict[str, Any]:
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda port, protocol, comment="", upnp=False, **_: {
         "action": "open firewall port",
         "port": port,
@@ -1203,7 +1283,7 @@ def firewall_open(
     dash-separated range. Requires confirmation and owner co-signature -
     a wrong port/protocol here is externally visible and reachable, same
     risk tier as system_upgrade/backup_restore."""
-    return adapter.firewall_open(port, protocol, comment=comment, upnp=upnp, no_reload=no_reload)
+    return adapter.firewall_open(port, protocol, comment=comment, upnp=upnp, no_reload=no_reload, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1215,6 +1295,7 @@ def firewall_open(
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda port, protocol, upnp_only=False, **_: {
         "action": "close firewall port",
         "port": port,
@@ -1235,7 +1316,7 @@ def firewall_close(
     dash-separated range. Requires confirmation and owner co-signature -
     see the warning in the confirmation plan before approving this on
     port 22/80/443."""
-    return adapter.firewall_close(port, protocol, upnp_only=upnp_only, no_reload=no_reload)
+    return adapter.firewall_close(port, protocol, upnp_only=upnp_only, no_reload=no_reload, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1247,6 +1328,7 @@ def firewall_close(
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda skip_upnp=False, **_: {
         "action": "reload firewall rules",
         "skip_upnp": skip_upnp,
@@ -1259,7 +1341,7 @@ def firewall_reload(skip_upnp: bool = False, confirmation_id: str | None = None)
     and owner co-signature, same tier as firewall_open/firewall_close -
     this is the point at which any pending rule change actually takes
     effect."""
-    return adapter.firewall_reload(skip_upnp=skip_upnp)
+    return adapter.firewall_reload(skip_upnp=skip_upnp, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1365,13 +1447,27 @@ def package_logs(operation: str, tail_lines: int | None = None) -> dict[str, Any
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_run_tests(source: str, app_id: str | None = None) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda source, app_id=None, **_: {
+        "action": "run package install/backup/remove/restore test cycle",
+        "source": source,
+        "app_id": app_id,
+        "warning": "This installs and removes the candidate app and creates a test backup on the server.",
+    },
+)
+def package_run_tests(
+    source: str, app_id: str | None = None, confirmation_id: str | None = None
+) -> dict[str, Any]:
     """Run the standard install -> backup -> remove -> restore -> remove
     cycle against a candidate package in one call. Stops at the first
     failing step; see yunohost/adapter.py's package_run_tests for exactly
     what each step does and why this isn't package_check's full CI matrix.
     """
-    return adapter.package_run_tests(source, app_id=app_id)
+    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1561,13 +1657,27 @@ def repair_app(app: str, strategy: str = "conservative") -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def test_package(source: str, app_id: str | None = None) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda source, app_id=None, **_: {
+        "action": "run package install/backup/remove/restore test cycle",
+        "source": source,
+        "app_id": app_id,
+        "warning": "This installs and removes the candidate app and creates a test backup on the server.",
+    },
+)
+def test_package(
+    source: str, app_id: str | None = None, confirmation_id: str | None = None
+) -> dict[str, Any]:
     """Alias for package_run_tests() - PLAN.md Phase 14 names this
     separately from Phase 8's package_run_tests, but it's the same
     install -> backup -> remove -> restore cycle; see
     yunohost/adapter.py's package_run_tests for what each step does.
     """
-    return adapter.package_run_tests(source, app_id=app_id)
+    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -1626,6 +1736,7 @@ def catalog_list() -> dict[str, Any]:
     "catalog.publish",
     policy=policy_rules,
     confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
     plan_builder=lambda plan_id, **_: {
         "action": "publish YunoHost package declaration to configured Nostr relays",
         "plan_id": plan_id,
@@ -1649,6 +1760,8 @@ def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[st
     return adapter.catalog_publish(
         source=plan_ticket.plan["source"],
         ref=plan_ticket.plan.get("ref"),
+        confirmation_id=confirmation_id,
+        plan_id=plan_id,
     )
 
 

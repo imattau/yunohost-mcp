@@ -1,10 +1,63 @@
 from __future__ import annotations
 
 import time
+import stat
 
 import pytest
 
-from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore
+from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, set_current_request
+from yunohost_mcp.policy.enforcement import require_confirmation
+from yunohost_mcp.policy.rules import PolicyRule
+from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, SQLiteConfirmationStore
+
+
+def test_sqlite_confirmation_survives_a_new_store_instance(tmp_path):
+    path = tmp_path / "confirmations.sqlite"
+    first = SQLiteConfirmationStore(path)
+    ticket = first.create(pubkey="agent", tool="apps.remove", arguments={"app": "x"}, plan={"action": "remove"})
+    second = SQLiteConfirmationStore(path)
+
+    consumed = second.consume(ticket.confirmation_id, pubkey="agent", tool="apps.remove", arguments={"app": "x"})
+
+    assert consumed.operation_hash == ticket.operation_hash
+    assert len(first) == 0
+
+
+def test_sqlite_confirmation_file_is_group_only(tmp_path):
+    path = tmp_path / "confirmations.sqlite"
+    SQLiteConfirmationStore(path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o660
+
+
+def test_broker_deferred_confirmation_is_not_consumed_before_root_execution(tmp_path):
+    store = SQLiteConfirmationStore(tmp_path / "confirmations.sqlite")
+    policy = {"apps.upgrade": PolicyRule(require_confirmation=True)}
+    executed = []
+
+    @require_confirmation(
+        "apps.upgrade",
+        policy=policy,
+        confirmation_store=store,
+        defer_to_broker=lambda: True,
+    )
+    def operation(app: str, confirmation_id: str | None = None):
+        executed.append(app)
+        return {"ok": True}
+
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        pending = operation(app="nextcloud")
+        assert pending["confirmation_required"] is True
+        confirmation_id = pending["confirmation_id"]
+
+        assert operation(app="nextcloud", confirmation_id=confirmation_id) == {"ok": True}
+        assert executed == ["nextcloud"]
+        # The root broker, not the frontend decorator, owns the one-shot
+        # consume. This simulates the final step after the operation call.
+        store.consume(confirmation_id, pubkey=LOCAL_STDIO_REQUEST.pubkey, tool="apps.upgrade", arguments={"app": "nextcloud"})
+    finally:
+        set_current_request(None)
 
 
 def test_consume_valid_ticket():

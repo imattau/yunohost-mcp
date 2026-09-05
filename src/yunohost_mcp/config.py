@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # Confirmation tickets (Phase 6) expire after this long if unused.
     confirmation_ttl_seconds: int = 300
+    confirmation_store_file: Path | None = None
 
     # Owner co-signing (Phase 13; owner-approval-plan.md, v1 `solo` only).
     # owner_npub: an explicit owner identity (npub or hex pubkey). A
@@ -107,6 +108,13 @@ class Settings(BaseSettings):
     # specific calls. See yunohost/adapter.py's _call_via_system_python().
     system_python: str = "/usr/bin/python3"
     system_python_timeout_seconds: int = 1800
+
+    # Empty keeps the current in-process adapter behavior. When set, the
+    # frontend can delegate registered YunoHost calls to the local broker.
+    broker_socket_path: Path | None = None
+    identity_backend: str = "toml"
+    nostr_auth_lookup_socket: Path | None = None
+    nostr_auth_lookup_timeout_seconds: int = 5
 
     # service_logs(): structured systemd journal entries for one
     # YunoHost-managed service (see adapter.py). journalctl_path lets a

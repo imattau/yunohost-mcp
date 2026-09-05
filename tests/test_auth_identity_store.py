@@ -98,6 +98,15 @@ roles = ["administrator"]
         IdentityStore.load(toml_path)
 
 
+def test_malformed_hex_pubkey_rejected(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        '[identity."not-a-public-key"]\nname = "Broken"\nroles = ["readonly"]\n'
+    )
+    with pytest.raises(IdentityConfigError, match="64-character hexadecimal"):
+        IdentityStore.load(toml_path)
+
+
 def test_malformed_toml_raises_config_error(tmp_path: Path):
     toml_path = tmp_path / "identity.toml"
     toml_path.write_text("this is not [valid toml")

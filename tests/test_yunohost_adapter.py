@@ -10,11 +10,18 @@ from __future__ import annotations
 import pytest
 
 from yunohost_mcp.config import Settings
-from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
+from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter, YunohostUnavailableError
 
 
 def make_adapter() -> YunohostAdapter:
     return YunohostAdapter(settings=Settings(fake_yunohost=True))
+
+
+def test_broker_mode_fails_closed_for_unregistered_adapter_operations(tmp_path):
+    adapter = YunohostAdapter(settings=Settings(broker_socket_path=tmp_path / "broker.sock"))
+
+    with pytest.raises(YunohostUnavailableError, match="not yet available through the privileged broker"):
+        adapter.test_http_endpoint("https://example.test")
 
 
 def test_apps_list():

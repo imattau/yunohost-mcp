@@ -16,6 +16,7 @@ key-name matching applied to every tool's *response* too
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -42,6 +43,8 @@ class AuditLog:
         yunohost_operation: str | None = None,
         error: str | None = None,
         approved_by: str | None = None,
+        request_id: str | None = None,
+        execution_context: str | None = None,
     ) -> str:
         audit_id = f"mcp-{uuid.uuid4().hex[:20]}"
         entry = {
@@ -64,9 +67,14 @@ class AuditLog:
             # owner.approve entry by confirmation_id.
             "approved_by": approved_by,
         }
+        if request_id is not None:
+            entry["request_id"] = request_id
+        if execution_context is not None:
+            entry["execution_context"] = execution_context
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
+        os.chmod(self.path, 0o660)
         return audit_id
 
     def list(self, limit: int | None = None) -> list[dict[str, Any]]:

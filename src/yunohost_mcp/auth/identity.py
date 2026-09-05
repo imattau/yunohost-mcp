@@ -11,17 +11,18 @@ module is deny-by-default.
 from __future__ import annotations
 
 import logging
+import re
 import tomllib
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from yunohost_mcp.auth.npub import Bech32Error, npub_to_hex
 from yunohost_mcp.policy.roles import UnknownRoleError, scopes_for_roles
 from yunohost_mcp.policy.scopes import ALL_SCOPES, Scope
+
+logger = logging.getLogger(__name__)
 
 
 class IdentityConfigError(ValueError):
@@ -156,7 +157,10 @@ def _resolve_key_to_hex(raw_key: str) -> str:
             return npub_to_hex(raw_key)
         except Bech32Error as exc:
             raise IdentityConfigError(str(exc)) from exc
-    return raw_key.lower()
+    candidate = raw_key.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", candidate):
+        raise IdentityConfigError("identity key must be an npub or 64-character hexadecimal public key")
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,13 @@ class AuthenticatedRequest:
     event_id: str
     event_created_at: int
     identity: IdentityRecord | None = field(default=None)
+    # Original HTTP material, available only while handling an HTTP request.
+    # The broker uses this to verify what the client actually signed.
+    authorization: str | None = None
+    method: str | None = None
+    url: str | None = None
+    body: bytes = b""
+    delegation: str | None = None
 
     @property
     def scopes(self) -> frozenset[Scope]:
