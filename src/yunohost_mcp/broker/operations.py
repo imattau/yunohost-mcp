@@ -129,6 +129,109 @@ def _service_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
     return adapter.service_logs(service, lines=lines, **optional)
 
 
+def _introspection_filters(arguments: dict[str, Any], *, default_lines: int = 200) -> tuple[str | None, str | None, str | None, str | None, int]:
+    since = arguments.get("since")
+    until = arguments.get("until")
+    priority = arguments.get("priority")
+    grep = arguments.get("grep")
+    lines = arguments.get("lines", default_lines)
+    if any(value is not None and (not isinstance(value, str) or len(value) > 256) for value in (since, until, priority, grep)):
+        raise ValueError("introspection filters must be bounded strings")
+    if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 2000:
+        raise ValueError("lines must be between 1 and 2000")
+    return since, until, priority, grep, lines
+
+
+def _journal_query(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"units", "since", "until", "priority", "grep", "lines"}:
+        raise ValueError("unknown journal query argument")
+    units = arguments.get("units")
+    if not isinstance(units, list) or not 1 <= len(units) <= 16 or not all(
+        isinstance(unit, str) and unit for unit in units
+    ):
+        raise ValueError("units must contain 1 to 16 non-empty names")
+    since, until, priority, grep, lines = _introspection_filters(arguments)
+    return adapter.journal_query(units, since=since, until=until, priority=priority, grep=grep, lines=lines)
+
+
+def _web_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"host", "path", "status", "since", "until", "lines"}:
+        raise ValueError("unknown web log argument")
+    host, path = arguments.get("host"), arguments.get("path")
+    status = arguments.get("status")
+    if host is not None and (not isinstance(host, str) or not host):
+        raise ValueError("host must be a non-empty string")
+    if path is not None and (not isinstance(path, str) or not path.startswith("/")):
+        raise ValueError("path must be an absolute URL path")
+    if status is not None and (not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599):
+        raise ValueError("status must be an HTTP status code")
+    since, until, _priority, _grep, lines = _introspection_filters(arguments)
+    return adapter.web_logs(host=host, path=path, status=status, since=since, until=until, lines=lines)
+
+
+def _system_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if arguments:
+        raise ValueError("system snapshot does not accept arguments")
+    return adapter.system_snapshot()
+
+
+def _service_history(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"names", "lines"}:
+        raise ValueError("unknown service history argument")
+    names = arguments.get("names")
+    lines = arguments.get("lines", 50)
+    if not isinstance(names, list) or not 1 <= len(names) <= 32 or not all(isinstance(name, str) and name for name in names):
+        raise ValueError("names must contain 1 to 32 non-empty service names")
+    if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 2000:
+        raise ValueError("lines must be between 1 and 2000")
+    return adapter.service_history(names, lines=lines)
+
+
+def _ssh_diagnose(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"since", "lines"}:
+        raise ValueError("unknown SSH diagnosis argument")
+    since = arguments.get("since", "-24h")
+    lines = arguments.get("lines", 200)
+    if not isinstance(since, str) or len(since) > 256:
+        raise ValueError("since must be a bounded string")
+    if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 2000:
+        raise ValueError("lines must be between 1 and 2000")
+    return adapter.ssh_diagnose(since=since, lines=lines)
+
+
+def _network_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if arguments:
+        raise ValueError("network snapshot does not accept arguments")
+    return adapter.network_snapshot()
+
+
+def _http_probe(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"url", "timeout_seconds"}:
+        raise ValueError("unknown HTTP probe argument")
+    url = arguments.get("url")
+    timeout_seconds = arguments.get("timeout_seconds", 10.0)
+    if not isinstance(url, str) or not url or len(url) > 4096:
+        raise ValueError("url must be a bounded non-empty string")
+    if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0.1 <= timeout_seconds <= 60:
+        raise ValueError("timeout_seconds must be between 0.1 and 60")
+    return adapter.http_probe(url, timeout_seconds=float(timeout_seconds))
+
+
+def _incident_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"since", "until", "lines"}:
+        raise ValueError("unknown incident snapshot argument")
+    since = arguments.get("since", "-24h")
+    until = arguments.get("until")
+    lines = arguments.get("lines", 100)
+    if not isinstance(since, str) or len(since) > 256:
+        raise ValueError("since must be a bounded string")
+    if until is not None and (not isinstance(until, str) or len(until) > 256):
+        raise ValueError("until must be a bounded string")
+    if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 500:
+        raise ValueError("lines must be between 1 and 500")
+    return adapter.incident_snapshot(since=since, until=until, lines=lines)
+
+
 def _updates_check(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     if arguments:
         raise ValueError("operation does not accept arguments")
@@ -790,6 +893,14 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "user.groups": BrokerOperation("user.groups", "users.read", _no_args(YunohostAdapter.user_group_list)),
     "user.permissions": BrokerOperation("user.permissions", "users.read", _no_args(YunohostAdapter.user_permission_list)),
     "service.logs": BrokerOperation("service.logs", "logs.read", _service_logs),
+    "journal.query": BrokerOperation("journal.query", "logs.read", _journal_query),
+    "web.logs": BrokerOperation("web.logs", "logs.read", _web_logs),
+    "system.snapshot": BrokerOperation("system.snapshot", "server.read", _system_snapshot),
+    "service.history": BrokerOperation("service.history", "services.read", _service_history),
+    "ssh.diagnose": BrokerOperation("ssh.diagnose", "diagnosis.read", _ssh_diagnose),
+    "network.snapshot": BrokerOperation("network.snapshot", "server.read", _network_snapshot),
+    "http.probe": BrokerOperation("http.probe", "diagnosis.read", _http_probe),
+    "incident.snapshot": BrokerOperation("incident.snapshot", "diagnosis.read", _incident_snapshot),
     "updates.check": BrokerOperation("updates.check", "system.update", _updates_check),
     "updates.refresh": BrokerOperation("updates.refresh", "system.update", _updates_refresh),
     "migrations.list": BrokerOperation("migrations.list", "system.update", _migrations_list),

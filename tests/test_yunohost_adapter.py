@@ -77,6 +77,42 @@ def test_services_list_and_service_status():
     assert set(status["services"]) == {"nginx", "postgresql"}
 
 
+def test_introspection_tools_have_fake_contracts():
+    adapter = make_adapter()
+    assert adapter.journal_query(["kernel"])["fake"] is True
+    assert adapter.web_logs(status=500)["fake"] is True
+    assert adapter.system_snapshot()["fake"] is True
+    assert adapter.service_history(["nginx"])["fake"] is True
+    assert adapter.ssh_diagnose()["fake"] is True
+    assert adapter.network_snapshot()["fake"] is True
+    assert adapter.http_probe("https://example.test")["fake"] is True
+    assert adapter.incident_snapshot(lines=10)["fake"] is True
+
+
+def test_web_logs_parses_access_and_error_records(tmp_path):
+    (tmp_path / "access.log").write_text(
+        '203.0.113.10 - - [06/Sep/2026:10:00:00 +0000] \"GET /broken HTTP/1.1\" 500 123 \"-\" \"test-agent\" 502 127.0.0.1:9000\\n'
+    )
+    (tmp_path / "error.log").write_text(
+        '2026/09/06 10:00:01 [error] 123#123: *1 upstream timed out, client: 203.0.113.10\\n'
+    )
+    adapter = YunohostAdapter(
+        settings=Settings(fake_yunohost=False, nginx_log_dir=tmp_path)
+    )
+
+    result = adapter.web_logs(since="2026-09-06T09:59:00Z", until="2026-09-06T10:01:00Z")
+
+    assert len(result["entries"]) == 2
+    entry = next(item for item in result["entries"] if item["kind"] == "access")
+    assert entry["kind"] == "access"
+    assert entry["path"] == "/broken"
+    assert entry["status"] == 500
+    assert entry["upstream_status"] == 502
+    assert entry["upstream_address"] == "127.0.0.1:9000"
+    error = next(item for item in result["entries"] if item["kind"] == "error")
+    assert "upstream timed out" in error["message"]
+
+
 def test_domains_list():
     result = make_adapter().domains_list()
     assert result["main"] in result["domains"]

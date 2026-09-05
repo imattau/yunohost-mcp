@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     service_logs_timeout_seconds: int = 30
     service_logs_max_lines: int = 2000
 
+    # Read-only incident introspection. These defaults point only at the
+    # standard Nginx log directory and keep every response bounded.
+    nginx_log_dir: Path = Path("/var/log/nginx")
+    nginx_logs_max_lines: int = 2000
+    introspection_command_timeout_seconds: int = 15
+    introspection_max_output_bytes: int = 256_000
+    allow_private_http_probes: bool = False
+
     # operation_logs()/package_logs(): a real install/upgrade operation's
     # log can run to thousands of lines (full shell traces from every
     # script hook) - returning that by default is a lot of low-signal

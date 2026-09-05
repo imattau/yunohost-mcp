@@ -82,6 +82,22 @@ connector stays alive, reports no discovered tools until the instance returns,
 and retries on later requests; other configured MCP servers can still start
 and remain usable.
 
+## Incident introspection
+
+The server includes bounded, read-only diagnostics for intermittent outages:
+
+- web_logs parses Nginx access/error logs, including HTTP and upstream status.
+- journal_query reads allowlisted service, SSH, firewall, kernel, OOM, and
+  systemd journals.
+- system_snapshot, service_history, ssh_diagnose, and network_snapshot expose
+  host, restart, access-control, and socket state.
+- http_probe tests an HTTP(S) endpoint, while incident_snapshot collects the
+  main evidence for a time window.
+
+Log paths, output limits, command timeouts, and whether private HTTP targets
+are permitted are configurable with YUNOHOST_MCP_* settings. All of these
+tools are read-only and enforce bounded output.
+
 ## Connecting Claude Desktop or Codex
 
 Both point at `yunohost-mcp-connect`, not at the server directly — the bridge is what signs each request with your Nostr key. Use the full path to `yunohost-mcp-connect` in whatever environment you installed `yunohost-mcp` into (e.g. `~/.local/pipx/venvs/yunohost-mcp/bin/yunohost-mcp-connect`, or a venv's `bin/` directory — `which yunohost-mcp-connect` after activating it will tell you).

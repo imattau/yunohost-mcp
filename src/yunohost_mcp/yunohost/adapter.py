@@ -23,14 +23,21 @@ live YunoHost.
 from __future__ import annotations
 
 import importlib
+import ipaddress
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from yunohost_mcp.config import Settings
 from yunohost_mcp.redaction import redact_text
@@ -54,6 +61,92 @@ class ToolInputError(ValueError):
     error). See policy/enforcement.py's translate_known_errors, which
     catches this specific type (not bare ValueError) for exactly that
     reason."""
+
+
+_INTROSPECTION_JOURNAL_UNITS = frozenset(
+    {
+        "nginx",
+        "ssh",
+        "sshd",
+        "fail2ban",
+        "nftables",
+        "kernel",
+        "systemd",
+        "systemd-oomd",
+        "systemd-logind",
+        "yunohost-api",
+        "yunohost-portal-api",
+        "yunohost_mcp",
+        "yunohost_mcp-helper",
+    }
+)
+
+_NGINX_ACCESS_RE = re.compile(
+    r'^(?P<remote>\S+)\s+\S+\s+\S+\s+\[(?P<timestamp>[^]]+)\]\s+'
+    r'"(?P<request>[^"]*)"\s+(?P<status>\d{3})\s+(?P<bytes>\S+)'
+    r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<user_agent>[^"]*)")?'
+    r'(?P<rest>.*)$'
+)
+_NGINX_ERROR_RE = re.compile(r'^(?P<timestamp>[^ ]+\s+[^ ]+)\s+\[(?P<level>[^]]+)\]\s+(?P<message>.*)$')
+
+
+def _parse_introspection_time(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    if value == "now":
+        return datetime.now(timezone.utc)
+    relative = re.fullmatch(r"-(\d+)([smhdw])", value)
+    if relative:
+        amount, unit = int(relative.group(1)), relative.group(2)
+        seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+        return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ToolInputError("time bounds must be ISO-8601 or a relative value such as -24h") from exc
+    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+
+
+def _parse_nginx_timestamp(value: str) -> datetime | None:
+    for format_string in ("%d/%b/%Y:%H:%M:%S %z", "%Y/%m/%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(value, format_string)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+    return None
+
+
+def _tail_file_lines(path: Path, lines: int, *, max_bytes: int = 2_000_000) -> list[str]:
+    """Read only a bounded tail of a text log without loading its whole file."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        end = handle.tell()
+        start = max(0, end - max_bytes)
+        handle.seek(start)
+        data = handle.read(end - start)
+    if start:
+        data = data[data.find(b"\n") + 1 :]
+    return data.decode("utf-8", errors="replace").splitlines()[-lines:]
+
+
+def _run_introspection_command(settings: Settings, args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=settings.introspection_command_timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise YunohostUnavailableError(f"introspection command timed out: {args[0]}") from exc
+
+
+def _bounded_output(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "\n[output truncated]"
 
 
 _yunohost_runtime_initialized = False
@@ -287,6 +380,14 @@ class YunohostAdapter:
             "services_list",
             "service_status",
             "service_logs",
+            "journal_query",
+            "web_logs",
+            "system_snapshot",
+            "service_history",
+            "ssh_diagnose",
+            "network_snapshot",
+            "http_probe",
+            "incident_snapshot",
             "service_restart",
             "domains_list",
             "users_list",
@@ -607,6 +708,437 @@ class YunohostAdapter:
                 continue
             entries.append(_normalize_journal_entry(raw, default_service=service))
         return {"fake": False, "service": service, "entries": entries}
+
+    def journal_query(
+        self,
+        units: list[str],
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        priority: str | None = None,
+        grep: str | None = None,
+        lines: int = 200,
+    ) -> dict[str, Any]:
+        """Query a deliberately allowlisted set of system journals.
+
+        service_logs() remains tied to YunoHost-managed services. This
+        companion is for host-level incident evidence such as kernel, OOM,
+        SSH, fail2ban, and systemd messages, without exposing a generic
+        command or arbitrary unit reader.
+        """
+        brokered = self._broker_call(
+            "journal.query",
+            {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines},
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "units": units,
+                "entries": [
+                    {
+                        "timestamp": "2026-09-03T12:00:00+00:00",
+                        "service": units[0] if units else "system",
+                        "priority": "info",
+                        "message": "fake journal entry",
+                    }
+                ],
+            }
+        if not units:
+            raise ToolInputError("at least one journal unit is required")
+        unknown = sorted(set(units) - _INTROSPECTION_JOURNAL_UNITS)
+        if unknown:
+            raise ToolInputError(f"journal units are not allowlisted: {', '.join(unknown)}")
+        capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
+        entries: list[dict[str, Any]] = []
+        for unit in units:
+            args = [self.settings.journalctl_path, "--no-pager", "-o", "json", "-n", str(capped_lines)]
+            args += ["-k" if unit == "kernel" else "-u", unit]
+            if since:
+                args += ["--since", since]
+            if until:
+                args += ["--until", until]
+            if priority:
+                args += ["-p", priority]
+            if grep:
+                args += ["--grep", grep]
+            try:
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.settings.service_logs_timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise YunohostUnavailableError("journalctl timed out") from exc
+            if proc.returncode != 0:
+                raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
+            for line in proc.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                entries.append(_normalize_journal_entry(raw, default_service=unit))
+                if len(entries) >= capped_lines:
+                    break
+            if len(entries) >= capped_lines:
+                break
+        entries.sort(key=lambda entry: entry.get("timestamp") or "")
+        return {"fake": False, "units": units, "entries": entries[-capped_lines:]}
+
+    def web_logs(
+        self,
+        *,
+        host: str | None = None,
+        path: str | None = None,
+        status: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        lines: int = 200,
+    ) -> dict[str, Any]:
+        """Read bounded, structured Nginx access and error log records."""
+        brokered = self._broker_call(
+            "web.logs",
+            {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines},
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "log_dir": str(self.settings.nginx_log_dir),
+                "entries": [
+                    {
+                        "kind": "access",
+                        "file": "access.log",
+                        "status": 200,
+                        "path": "/",
+                        "method": "GET",
+                    }
+                ],
+            }
+        if host is not None and (not host or len(host) > 253):
+            raise ToolInputError("host must be a bounded non-empty hostname")
+        if path is not None and (not path.startswith("/") or len(path) > 4096):
+            raise ToolInputError("path must be an absolute bounded URL path")
+        if status is not None and not 100 <= status <= 599:
+            raise ToolInputError("status must be an HTTP status code")
+        lower_bound = _parse_introspection_time(since)
+        upper_bound = _parse_introspection_time(until)
+        if lower_bound and upper_bound and lower_bound > upper_bound:
+            raise ToolInputError("since must not be later than until")
+        capped_lines = max(1, min(lines, self.settings.nginx_logs_max_lines))
+        log_dir = self.settings.nginx_log_dir
+        if not log_dir.is_dir():
+            return {"fake": False, "log_dir": str(log_dir), "entries": [], "warning": "Nginx log directory is unavailable"}
+        files = [
+            item for item in sorted(log_dir.iterdir())
+            if item.is_file() and not item.is_symlink() and (item.name.endswith(".log") or ".log." in item.name)
+            and not item.name.endswith(".gz")
+        ]
+        entries: list[dict[str, Any]] = []
+        for file in files:
+            try:
+                raw_lines = _tail_file_lines(file, capped_lines)
+            except (OSError, UnicodeError):
+                continue
+            for raw_line in raw_lines:
+                entry = _parse_nginx_log_line(raw_line, file.name)
+                if entry is None:
+                    continue
+                parsed_time = _parse_nginx_timestamp(entry.get("source_timestamp", ""))
+                if parsed_time is not None:
+                    entry["timestamp"] = parsed_time.isoformat()
+                    if lower_bound and parsed_time < lower_bound:
+                        continue
+                    if upper_bound and parsed_time > upper_bound:
+                        continue
+                elif lower_bound or upper_bound:
+                    continue
+                if status is not None and entry.get("status") != status:
+                    continue
+                if host is not None and host.lower() not in str(entry.get("host") or entry.get("file", "")).lower():
+                    continue
+                if path is not None and entry.get("path") != path:
+                    continue
+                entry.pop("source_timestamp", None)
+                entries.append(entry)
+        entries.sort(key=lambda entry: entry.get("timestamp") or "")
+        return {"fake": False, "log_dir": str(log_dir), "entries": entries[-capped_lines:]}
+
+    def system_snapshot(self) -> dict[str, Any]:
+        """Return bounded host resource, boot, OOM, and process evidence."""
+        brokered = self._broker_call("system.snapshot", {})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "uptime_seconds": 86400.0,
+                "load_average": [0.1, 0.1, 0.1],
+                "memory": {"total_bytes": 16_000_000_000, "available_bytes": 12_000_000_000},
+                "swap": {},
+                "disk": {"/": {"free_bytes": 100_000_000_000}},
+                "processes": [],
+                "oom_events": [],
+            }
+        try:
+            uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
+        except (OSError, ValueError, IndexError) as exc:
+            raise YunohostUnavailableError(f"could not read /proc/uptime: {exc}") from exc
+        meminfo: dict[str, int] = {}
+        try:
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                key, value = line.split(":", 1)
+                parts = value.strip().split()
+                if parts:
+                    meminfo[key] = int(parts[0]) * (1024 if len(parts) > 1 and parts[1] == "kB" else 1)
+        except (OSError, ValueError) as exc:
+            raise YunohostUnavailableError(f"could not read /proc/meminfo: {exc}") from exc
+        disk = shutil.disk_usage("/")
+        process_result = _run_introspection_command(
+            self.settings,
+            ["ps", "-eo", "pid=,comm=,stat=,%cpu=,%mem=", "--sort=-%cpu"],
+        )
+        processes = [
+            dict(zip(("pid", "command", "state", "cpu_percent", "memory_percent"), line.split(), strict=False))
+            for line in process_result.stdout.splitlines()[:20]
+            if line.split()
+        ]
+        try:
+            oom_events = self.journal_query(
+                ["kernel", "systemd-oomd"], priority="err..emerg", lines=50
+            )["entries"]
+        except Exception as exc:  # noqa: BLE001 - preserve the rest of the snapshot
+            oom_events = [{"error": str(exc)}]
+        boot_id = None
+        try:
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except OSError:
+            pass
+        return {
+            "fake": False,
+            "uptime_seconds": uptime_seconds,
+            "boot_id": boot_id,
+            "load_average": list(os.getloadavg()),
+            "memory": {
+                "total_bytes": meminfo.get("MemTotal"),
+                "available_bytes": meminfo.get("MemAvailable"),
+                "free_bytes": meminfo.get("MemFree"),
+                "cached_bytes": meminfo.get("Cached"),
+            },
+            "swap": {
+                "total_bytes": meminfo.get("SwapTotal"),
+                "free_bytes": meminfo.get("SwapFree"),
+            },
+            "disk": {"/": {"total_bytes": disk.total, "free_bytes": disk.free, "used_bytes": disk.used}},
+            "processes": processes,
+            "oom_events": oom_events,
+        }
+
+    def service_history(self, names: list[str], *, lines: int = 50) -> dict[str, Any]:
+        """Return current systemd state and restart history for services."""
+        brokered = self._broker_call("service.history", {"names": names, "lines": lines})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "services": {name: {"status": "running", "restart_count": 0} for name in names}}
+        if not names:
+            raise ToolInputError("at least one service name is required")
+        known = set(self.services_list().get("services", {}))
+        unknown = sorted(set(names) - known)
+        if unknown:
+            raise ToolInputError(f"services are not known to YunoHost: {', '.join(unknown)}")
+        result: dict[str, Any] = {}
+        properties = (
+            "Id", "LoadState", "ActiveState", "SubState", "Result", "MainPID",
+            "ExecMainCode", "ExecMainStatus", "NRestarts", "ActiveEnterTimestamp",
+            "InactiveExitTimestamp", "FragmentPath",
+        )
+        for name in names:
+            proc = _run_introspection_command(
+                self.settings, ["systemctl", "show", name, "--no-pager", *sum((["--property", item] for item in properties), [])]
+            )
+            values: dict[str, str] = {}
+            for line in proc.stdout.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value
+            result[name] = {
+                "status": values.get("ActiveState"),
+                "substate": values.get("SubState"),
+                "result": values.get("Result"),
+                "main_pid": values.get("MainPID"),
+                "exit_code": values.get("ExecMainCode"),
+                "exit_status": values.get("ExecMainStatus"),
+                "restart_count": values.get("NRestarts"),
+                "active_since": values.get("ActiveEnterTimestamp"),
+                "inactive_since": values.get("InactiveExitTimestamp"),
+                "unit_file": values.get("FragmentPath"),
+            }
+            try:
+                result[name]["recent_errors"] = self.service_logs(
+                    name, priority="err..emerg", lines=lines
+                )["entries"]
+            except Exception as exc:  # noqa: BLE001 - retain state if journal access is partial
+                result[name]["recent_errors_error"] = str(exc)
+            if proc.returncode != 0:
+                result[name]["error"] = _bounded_output(proc.stderr, self.settings.introspection_max_output_bytes)
+        return {"fake": False, "services": result}
+
+    def ssh_diagnose(self, *, since: str = "-24h", lines: int = 200) -> dict[str, Any]:
+        """Collect read-only SSH, firewall, and fail2ban evidence."""
+        brokered = self._broker_call("ssh.diagnose", {"since": since, "lines": lines})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "services": {}, "listeners": [], "jails": [], "logs": []}
+        services = self.service_status(["ssh", "fail2ban", "nftables"])
+        listeners = _run_introspection_command(self.settings, ["ss", "-H", "-lnt"])
+        jail_data: dict[str, Any] = {}
+        status = _run_introspection_command(self.settings, ["fail2ban-client", "status"])
+        jails = re.findall(r"Jail list:\s*([^\n]+)", status.stdout)
+        jail_names = [name.strip() for name in (jails[0].split(",") if jails else []) if name.strip()][:32]
+        for jail in jail_names:
+            jail_status = _run_introspection_command(self.settings, ["fail2ban-client", "status", jail])
+            jail_data[jail] = _bounded_output(jail_status.stdout or jail_status.stderr, self.settings.introspection_max_output_bytes)
+        try:
+            logs = self.journal_query(
+                ["ssh", "sshd", "fail2ban", "nftables"],
+                since=since,
+                priority="err..emerg",
+                lines=lines,
+            )["entries"]
+        except Exception as exc:  # noqa: BLE001 - retain service evidence on partial failure
+            logs = [{"error": str(exc)}]
+        return {
+            "fake": False,
+            "services": services.get("services", services),
+            "listeners": _bounded_output(listeners.stdout, self.settings.introspection_max_output_bytes).splitlines(),
+            "fail2ban": {
+                "status_command_ok": status.returncode == 0,
+                "jails": jail_data,
+                "error": _bounded_output(status.stderr, self.settings.introspection_max_output_bytes) if status.returncode else None,
+            },
+            "logs": logs,
+        }
+
+    def network_snapshot(self) -> dict[str, Any]:
+        """Return bounded local addresses, routes, and listening sockets."""
+        brokered = self._broker_call("network.snapshot", {})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "addresses": [], "routes": [], "listeners": []}
+        commands = {
+            "addresses": ["ip", "-brief", "address"],
+            "routes": ["ip", "route"],
+            "listeners": ["ss", "-H", "-lntup"],
+        }
+        result: dict[str, Any] = {"fake": False}
+        for key, args in commands.items():
+            proc = _run_introspection_command(self.settings, args)
+            output = proc.stdout or proc.stderr
+            result[key] = _bounded_output(redact_text(output), self.settings.introspection_max_output_bytes).splitlines()
+            if proc.returncode != 0:
+                result.setdefault("errors", {})[key] = proc.returncode
+        return result
+
+    def http_probe(self, url: str, *, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Probe an HTTP(S) endpoint and return status/timing metadata."""
+        brokered = self._broker_call("http.probe", {"url": url, "timeout_seconds": timeout_seconds})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "url": url, "reachable": True, "status_code": 200, "elapsed_ms": 1}
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ToolInputError("url must be an HTTP(S) URL without embedded credentials")
+        if len(url) > 4096 or parsed.fragment:
+            raise ToolInputError("url is too long or contains a fragment")
+        if not 0.1 <= timeout_seconds <= 60:
+            raise ToolInputError("timeout_seconds must be between 0.1 and 60")
+        if not self.settings.allow_private_http_probes:
+            try:
+                addresses = {
+                    ipaddress.ip_address(result[4][0])
+                    for result in socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
+                }
+            except socket.gaierror as exc:
+                raise ToolInputError(f"could not resolve probe host: {exc}") from exc
+            if any(address.is_private or address.is_loopback or address.is_link_local or address.is_reserved for address in addresses):
+                raise ToolInputError("private, loopback, link-local, and reserved HTTP probe targets are disabled")
+        started = time.monotonic()
+        request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/http-probe"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - explicit diagnostic probe
+                response.read(4096)
+                return {
+                    "fake": False,
+                    "url": url,
+                    "final_url": response.geturl(),
+                    "reachable": True,
+                    "status_code": response.status,
+                    "content_type": response.headers.get("Content-Type"),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                }
+        except urllib.error.HTTPError as exc:
+            return {
+                "fake": False,
+                "url": url,
+                "final_url": exc.geturl(),
+                "reachable": True,
+                "status_code": exc.code,
+                "content_type": exc.headers.get("Content-Type") if exc.headers else None,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 - diagnostics report connection failures
+            return {
+                "fake": False,
+                "url": url,
+                "reachable": False,
+                "status_code": None,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                "error": redact_text(str(exc)),
+            }
+
+    def incident_snapshot(
+        self,
+        *,
+        since: str = "-24h",
+        until: str | None = None,
+        lines: int = 100,
+    ) -> dict[str, Any]:
+        """Collect the main read-only evidence for one incident window."""
+        brokered = self._broker_call(
+            "incident.snapshot", {"since": since, "until": until, "lines": lines}
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "system": self.system_snapshot(), "web": self.web_logs(lines=lines)}
+        services = ["nginx", "ssh", "fail2ban", "nftables", "yunohost-api", "yunohost_mcp"]
+        return {
+            "fake": False,
+            "window": {"since": since, "until": until},
+            "system": self.system_snapshot(),
+            "service_history": self.service_history(services, lines=lines),
+            "web": self.web_logs(status=500, since=since, until=until, lines=lines),
+            "journal": self.journal_query(
+                ["nginx", "ssh", "fail2ban", "nftables", "kernel", "systemd-oomd"],
+                since=since,
+                until=until,
+                priority="err..emerg",
+                lines=lines,
+            ),
+            "ssh": self.ssh_diagnose(since=since, lines=lines),
+            "network": self.network_snapshot(),
+        }
 
     def service_status(self, names: list[str]) -> dict[str, Any]:
         brokered = self._broker_call("services.status", {"names": names})
@@ -2108,6 +2640,43 @@ class YunohostAdapter:
             "diagnosis_before": before["diagnosis"],
             "diagnosis_after": after["diagnosis"],
         }
+
+
+def _parse_nginx_log_line(line: str, filename: str) -> dict[str, Any] | None:
+    """Normalize common Nginx access/error formats without returning raw lines."""
+    access = _NGINX_ACCESS_RE.match(line)
+    if access:
+        request_parts = access.group("request").split(maxsplit=2)
+        request_target = request_parts[1] if len(request_parts) > 1 else ""
+        parsed_url = urlsplit(request_target)
+        rest = access.group("rest").strip()
+        upstream_match = re.search(r"(?P<status>[1-5]\d{2})\s+(?P<address>\S+:\d+)", rest)
+        return {
+            "kind": "access",
+            "file": filename,
+            "source_timestamp": access.group("timestamp"),
+            "remote_addr": access.group("remote"),
+            "method": request_parts[0] if request_parts else None,
+            "path": parsed_url.path or request_target,
+            "status": int(access.group("status")),
+            "bytes": access.group("bytes") if access.group("bytes").isdigit() else None,
+            "upstream_status": int(upstream_match.group("status")) if upstream_match else None,
+            "upstream_address": upstream_match.group("address") if upstream_match else None,
+        }
+    error = _NGINX_ERROR_RE.match(line)
+    if error:
+        return {
+            "kind": "error",
+            "file": filename,
+            "source_timestamp": error.group("timestamp"),
+            "level": error.group("level"),
+            "message": redact_text(error.group("message"))[:4000],
+        }
+    return {
+        "kind": "raw",
+        "file": filename,
+        "message": redact_text(line)[:4000],
+    }
 
 
 _JOURNAL_PRIORITY_NAMES = {

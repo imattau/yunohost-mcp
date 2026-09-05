@@ -427,6 +427,97 @@ def service_logs(
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.LOGS_READ)
+def journal_query(
+    units: list[str],
+    since: str | None = None,
+    until: str | None = None,
+    priority: str | None = None,
+    grep: str | None = None,
+    lines: int = 200,
+) -> dict[str, Any]:
+    """Query allowlisted system journals, including kernel, OOM, SSH,
+    fail2ban, firewall, systemd, and application units."""
+    return adapter.journal_query(units, since=since, until=until, priority=priority, grep=grep, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.LOGS_READ)
+def web_logs(
+    host: str | None = None,
+    path: str | None = None,
+    status: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    lines: int = 200,
+) -> dict[str, Any]:
+    """Read bounded, structured Nginx access and error logs."""
+    return adapter.web_logs(host=host, path=path, status=status, since=since, until=until, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SERVER_READ)
+def system_snapshot() -> dict[str, Any]:
+    """Return host uptime, boot, resource, process, disk, and OOM evidence."""
+    return adapter.system_snapshot()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SERVICES_READ)
+def service_history(names: list[str], lines: int = 50) -> dict[str, Any]:
+    """Return service state, exit details, restart counts, and timestamps."""
+    return adapter.service_history(names, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DIAGNOSIS_READ)
+def ssh_diagnose(since: str = "-24h", lines: int = 200) -> dict[str, Any]:
+    """Collect SSH listener, fail2ban, firewall, service, and auth evidence."""
+    return adapter.ssh_diagnose(since=since, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SERVER_READ)
+def network_snapshot() -> dict[str, Any]:
+    """Return local addresses, routes, and listening sockets."""
+    return adapter.network_snapshot()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DIAGNOSIS_READ)
+def http_probe(url: str, timeout_seconds: float = 10.0) -> dict[str, Any]:
+    """Probe an HTTP(S) endpoint and return status, timing, and content type."""
+    return adapter.http_probe(url, timeout_seconds=timeout_seconds)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DIAGNOSIS_READ)
+def incident_snapshot(
+    since: str = "-24h",
+    until: str | None = None,
+    lines: int = 100,
+) -> dict[str, Any]:
+    """Collect the main read-only evidence for one incident time window."""
+    return adapter.incident_snapshot(since=since, until=until, lines=lines)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.DOMAINS_READ)
 def domains_list() -> dict[str, Any]:
     """List domains configured on this YunoHost server."""

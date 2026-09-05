@@ -253,6 +253,16 @@ diagnosis_get()
 
 services_list()
 service_status(service)
+service_logs(service)
+service_history(services)
+
+journal_query(units, ...)
+web_logs(...)
+system_snapshot()
+network_snapshot()
+ssh_diagnose()
+http_probe(url)
+incident_snapshot(...)
 
 domains_list()
 
@@ -285,6 +295,8 @@ This alone would allow an AI to answer:
 - Which apps need updates?
 - What is consuming disk space?
 - Are there failed YunoHost operations?
+- Which HTTP requests returned 500, and which upstream failed?
+- Did a service restart, reboot, OOM event, SSH ban, or firewall change coincide?
 
 without giving it write access.
 

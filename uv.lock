@@ -973,7 +973,7 @@ wheels = [
 
 [[package]]
 name = "yunohost-mcp-connect"
-version = "0.8.20"
+version = "0.8.21"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
