@@ -40,6 +40,10 @@ class YunohostUnavailableError(RuntimeError):
     """Raised when a real YunoHost call is attempted but yunohost.* can't be imported."""
 
 
+class NoAppsToUpgradeError(YunohostUnavailableError, ValueError):
+    """The requested app upgrade has no available upgrade."""
+
+
 class ToolInputError(ValueError):
     """Deliberate caller-input validation failures raised by this adapter
     (a bad catalog source URL, a missing required ref, an unknown repair
@@ -1270,9 +1274,21 @@ class YunohostAdapter:
         # app_install() just above - app_upgrade() can re-parse manifest
         # [install] options too (e.g. an upgrade that adds a new question,
         # or reconfirms an existing domain/group one).
-        result = _call_via_system_python(
-            "yunohost.app", "app_upgrade", {"app": app or [], "force": force, "file": file, "url": url}, self.settings
-        )
+        try:
+            result = _call_via_system_python(
+                "yunohost.app",
+                "app_upgrade",
+                {"app": app or [], "force": force, "file": file, "url": url},
+                self.settings,
+            )
+        except YunohostUnavailableError as exc:
+            # YunoHost reports an already-current app as a subprocess
+            # failure ("No apps can be upgraded"). Preserve that expected
+            # operational outcome so the broker returns a useful tool error
+            # instead of masking it as an internal failure.
+            if "no apps can be upgraded" in str(exc).lower():
+                raise NoAppsToUpgradeError("nothing to upgrade") from exc
+            raise
         return {"fake": False, "app": app, "result": result}
 
     def app_remove(self, app: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:

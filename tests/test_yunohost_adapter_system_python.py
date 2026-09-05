@@ -178,6 +178,20 @@ def test_app_upgrade_passes_url_for_a_non_catalog_app(monkeypatch: pytest.Monkey
     }
 
 
+def test_app_upgrade_reports_nothing_to_upgrade_cleanly(monkeypatch: pytest.MonkeyPatch):
+    def no_upgrade(*args, **kwargs):
+        raise adapter_module.YunohostUnavailableError(
+            "yunohost.app.app_upgrade failed in the system-python subprocess "
+            "(exit 1): No apps can be upgraded"
+        )
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", no_upgrade)
+
+    adapter = YunohostAdapter(settings=_settings())
+    with pytest.raises(adapter_module.NoAppsToUpgradeError, match="nothing to upgrade"):
+        adapter.app_upgrade(app="yunohost_mcp")
+
+
 def test_domain_add_calls_call_via_system_python_with_correct_kwargs_and_always_ignores_dyndns(
     monkeypatch: pytest.MonkeyPatch,
 ):
