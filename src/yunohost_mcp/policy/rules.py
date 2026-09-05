@@ -129,6 +129,12 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # port/rule can lock the admin out of their own server with no
     # MCP-level undo.
     "firewall.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # Not a write, but owner-signature-gated for the same reason as the
+    # tier above: the audit trail includes every identity's calls, not
+    # just the requester's own, so app-admin (which now has Scope.
+    # AUDIT_READ) can ask, but each read still needs the owner's explicit
+    # per-call approval rather than being a standing grant.
+    "audit.read": PolicyRule(require_confirmation=True, require_owner_signature=True),
 }
 
 

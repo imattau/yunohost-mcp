@@ -1486,8 +1486,20 @@ def package_run_tests(
 @redact_response
 @translate_known_errors
 @require_scope(Scope.AUDIT_READ)
-def audit_list(limit: int | None = None) -> dict[str, Any]:
-    """List audit trail entries, newest first. Administrator-only (Scope.AUDIT_READ)."""
+@require_confirmation(
+    "audit.read",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda limit=None, **_: {
+        "action": "read audit trail",
+        "limit": limit,
+        "warning": "The audit trail includes every identity's tool calls, not just yours.",
+    },
+)
+def audit_list(limit: int | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
+    """List audit trail entries, newest first. Requires Scope.AUDIT_READ
+    (app-admin and above) plus owner co-signature per call - see
+    audit_get."""
     return {"entries": audit_log.list(limit=limit)}
 
 
@@ -1495,8 +1507,23 @@ def audit_list(limit: int | None = None) -> dict[str, Any]:
 @redact_response
 @translate_known_errors
 @require_scope(Scope.AUDIT_READ)
-def audit_get(audit_id: str) -> dict[str, Any]:
-    """Return one audit trail entry by id. Administrator-only (Scope.AUDIT_READ)."""
+@require_confirmation(
+    "audit.read",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    plan_builder=lambda audit_id, **_: {
+        "action": "read audit trail entry",
+        "audit_id": audit_id,
+        "warning": "The audit trail includes every identity's tool calls, not just yours.",
+    },
+)
+def audit_get(audit_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Return one audit trail entry by id. Requires Scope.AUDIT_READ
+    (app-admin and above) plus owner co-signature per call: unlike other
+    confirmed reads, this isn't gated for the caller's own protection -
+    it's gated because the trail exposes every *other* identity's calls
+    too, so the owner approves each read rather than it being a standing
+    grant."""
     entry = audit_log.get(audit_id)
     if entry is None:
         raise ToolInputError(f"no audit entry with id {audit_id!r}")

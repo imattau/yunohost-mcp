@@ -57,6 +57,12 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.USERS_WRITE,
     Scope.USERS_DELETE,
     Scope.SYSTEM_UPGRADE,
+    # Cross-identity visibility (the audit trail includes every caller's
+    # entries, not just this one's), so audit_list/audit_get additionally
+    # require owner co-signature per call (DEFAULT_POLICY["audit.read"]) -
+    # granting the scope to app-admin only lets an identity *ask*, it
+    # doesn't skip that per-call approval.
+    Scope.AUDIT_READ,
 }
 
 _PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {

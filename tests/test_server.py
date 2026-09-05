@@ -1313,21 +1313,43 @@ async def test_phase9_tool_response_is_redacted_end_to_end(monkeypatch: pytest.M
         assert "also-secret" not in text_blob
 
 
+async def _audit_call(client: Client, tool: str, args: dict):
+    """audit_list/audit_get require confirmation + owner co-signature
+    (DEFAULT_POLICY["audit.read"]) since the trail exposes every
+    identity's calls, not just the caller's own - not just Scope.
+    AUDIT_READ (app-admin and above)."""
+    first = await client.call_tool(tool, args)
+    assert first.is_error is not True, first.content
+    plan_response = first.structured_content
+    assert plan_response["confirmation_required"] is True
+    assert plan_response["owner_signature_required"] is True
+    confirmation_id = plan_response["confirmation_id"]
+
+    await _approve_as_second_admin(client, confirmation_id)
+
+    return await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+
+
 @pytest.mark.anyio
-async def test_phase10_audit_list_and_get_administrator_only():
+async def test_phase10_audit_list_and_get_require_owner_cosign():
     async with Client(mcp) as client:
         install = await client.call_tool("app_install", {"app": "nextcloud"})
         assert install.is_error is not True
 
-        listed = await client.call_tool("audit_list", {"limit": 1})
-        assert listed.is_error is not True
+        # limit=5, not 1: approving the audit.read confirmation itself
+        # writes an "owner.approve" entry (_audit_call's own
+        # _approve_as_second_admin call) after the app_install one, so the
+        # single most recent entry by the time this executes is no longer
+        # guaranteed to be apps.install.
+        listed = await _audit_call(client, "audit_list", {"limit": 5})
+        assert listed.is_error is not True, listed.content
         entries = listed.structured_content["entries"]
-        assert len(entries) == 1
-        assert entries[0]["tool"] == "apps.install"
-        audit_id = entries[0]["audit_id"]
+        install_entries = [e for e in entries if e["tool"] == "apps.install"]
+        assert len(install_entries) == 1
+        audit_id = install_entries[0]["audit_id"]
 
-        got = await client.call_tool("audit_get", {"audit_id": audit_id})
-        assert got.is_error is not True
+        got = await _audit_call(client, "audit_get", {"audit_id": audit_id})
+        assert got.is_error is not True, got.content
         assert got.structured_content["audit_id"] == audit_id
         assert got.structured_content["tool"] == "apps.install"
 
@@ -1335,24 +1357,27 @@ async def test_phase10_audit_list_and_get_administrator_only():
 @pytest.mark.anyio
 async def test_phase10_audit_get_unknown_id_errors():
     async with Client(mcp) as client:
-        result = await client.call_tool("audit_get", {"audit_id": "mcp-does-not-exist"})
+        result = await _audit_call(client, "audit_get", {"audit_id": "mcp-does-not-exist"})
         assert result.is_error is True
 
 
 @pytest.mark.anyio
-async def test_phase10_audit_tools_denied_for_non_administrator_roles():
-    developer = AuthenticatedRequest(
+async def test_phase10_audit_tools_denied_below_app_admin():
+    # Scope.AUDIT_READ is granted from app-admin up (package-developer
+    # inherits it too) - operator and readonly sit below that and must
+    # still be denied outright, before ever reaching the owner-cosign gate.
+    operator = AuthenticatedRequest(
         pubkey="feedface",
         event_id="f" * 64,
         event_created_at=0,
         identity=IdentityRecord(
             pubkey="feedface",
-            name="dev-agent",
-            roles=("package-developer",),
-            scopes=scopes_for_roles(("package-developer",)),
+            name="operator-agent",
+            roles=("operator",),
+            scopes=scopes_for_roles(("operator",)),
         ),
     )
-    set_current_request(developer)
+    set_current_request(operator)
     async with Client(mcp) as client:
         result = await client.call_tool("audit_list", {})
         assert result.is_error is True
