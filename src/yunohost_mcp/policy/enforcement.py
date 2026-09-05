@@ -201,6 +201,12 @@ def require_confirmation(
                         )
                     return response
 
+            # The frontend validates/delegates broker-owned confirmations, but
+            # the root helper still needs the exact ticket id to consume at
+            # the privilege boundary. Keep it in the handler call; otherwise
+            # every confirmed brokered write arrives at the helper as None.
+            if confirmation_id is not None:
+                kwargs["confirmation_id"] = confirmation_id
             return fn(*args, **kwargs)
 
         return wrapper  # type: ignore[return-value]

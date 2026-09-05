@@ -42,7 +42,7 @@ def test_broker_deferred_confirmation_is_not_consumed_before_root_execution(tmp_
         defer_to_broker=lambda: True,
     )
     def operation(app: str, confirmation_id: str | None = None):
-        executed.append(app)
+        executed.append((app, confirmation_id))
         return {"ok": True}
 
     set_current_request(LOCAL_STDIO_REQUEST)
@@ -52,7 +52,7 @@ def test_broker_deferred_confirmation_is_not_consumed_before_root_execution(tmp_
         confirmation_id = pending["confirmation_id"]
 
         assert operation(app="nextcloud", confirmation_id=confirmation_id) == {"ok": True}
-        assert executed == ["nextcloud"]
+        assert executed == [("nextcloud", confirmation_id)]
         # The root broker, not the frontend decorator, owns the one-shot
         # consume. This simulates the final step after the operation call.
         store.consume(confirmation_id, pubkey=LOCAL_STDIO_REQUEST.pubkey, tool="apps.upgrade", arguments={"app": "nextcloud"})
