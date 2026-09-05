@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.imattau/yunohost-mcp",
+  "title": "YunoHost MCP",
+  "description": "Nostr-authenticated MCP server for secure, auditable YunoHost administration and app-package development.",
+  "repository": {
+    "url": "https://github.com/imattau/yunohost-mcp",
+    "source": "github"
+  },
+  "version": "0.8.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "yunohost-mcp-connect",
+      "version": "0.8.3",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

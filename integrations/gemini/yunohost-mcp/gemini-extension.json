@@ -1,0 +1,15 @@
+{
+  "name": "yunohost-mcp",
+  "version": "0.8.3",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "yunohost-mcp": {
+      "command": "uvx",
+      "args": ["--from", "yunohost-mcp-connect", "yunohost-mcp-connect"],
+      "env": {
+        "YUNOHOST_MCP_CLIENT_REMOTE_URL": "${YUNOHOST_MCP_CLIENT_REMOTE_URL}",
+        "YUNOHOST_MCP_CLIENT_KEY_FILE": "${YUNOHOST_MCP_CLIENT_KEY_FILE}"
+      }
+    }
+  }
+}

@@ -42,6 +42,16 @@ jobs:
 
       - name: Validate integration artifacts
         run: |
+          python -m json.tool server.json >/dev/null
+          python -m json.tool .claude-plugin/marketplace.json >/dev/null
           python -m json.tool integrations/claude-code/yunohost-mcp/.claude-plugin/plugin.json >/dev/null
           python -m json.tool integrations/claude-code/yunohost-mcp/.mcp.json >/dev/null
+          python -m json.tool integrations/codex/yunohost-mcp/.codex-plugin/plugin.json >/dev/null
           python -m json.tool integrations/codex/yunohost-mcp/.mcp.json >/dev/null
+          python -m json.tool integrations/gemini/yunohost-mcp/gemini-extension.json >/dev/null
+          python -m json.tool integrations/opencode/yunohost-mcp/opencode.json.example >/dev/null
+          python3 - <<'PY'
+          import tomllib
+          with open("integrations/gemini/yunohost-mcp/commands/setup.toml", "rb") as handle:
+              tomllib.load(handle)
+          PY

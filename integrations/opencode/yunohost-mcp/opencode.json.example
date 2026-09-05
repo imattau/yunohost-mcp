@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "yunohost-mcp": {
+        "type": "local",
+        "command": ["uvx", "--from", "yunohost-mcp-connect", "yunohost-mcp-connect"],
+        "environment": {
+          "YUNOHOST_MCP_CLIENT_REMOTE_URL": "https://your-yunohost-domain/mcp",
+          "YUNOHOST_MCP_CLIENT_KEY_FILE": "~/.config/yunohost-mcp/opencode.key"
+        }
+      }
+    }
+  }
+}

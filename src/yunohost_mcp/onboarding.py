@@ -21,7 +21,7 @@ from yunohost_mcp.auth.signing import ClientIdentity
 from yunohost_mcp.bridge import BridgeConfigError, Nip98BridgeAuth, generate_key
 
 
-CLIENTS = ("codex", "claude-desktop", "claude-code", "hermes")
+CLIENTS = ("codex", "claude-desktop", "claude-code", "gemini", "hermes", "opencode", "openclaw")
 DEFAULT_NAME = "yunohost-mcp"
 
 
@@ -50,8 +50,14 @@ def config_path(client: str) -> Path:
         return _claude_desktop_config_path()
     if client == "claude-code":
         return Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home())) / ".claude.json"
+    if client == "gemini":
+        return Path(os.environ.get("GEMINI_HOME", Path.home() / ".gemini")) / "settings.json"
     if client == "hermes":
         return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "config.yaml"
+    if client == "opencode":
+        return Path(os.environ.get("OPENCODE_CONFIG_FILE", Path.home() / ".config" / "opencode" / "opencode.json"))
+    if client == "openclaw":
+        return Path(os.environ.get("OPENCLAW_CONFIG_PATH", Path.home() / ".openclaw" / "openclaw.json"))
     raise BridgeConfigError(f"unknown client {client!r}; choose one of {', '.join(CLIENTS)}")
 
 
@@ -188,13 +194,93 @@ def _write_hermes_config(path: Path, name: str, server: dict[str, Any], *, print
     return {"path": str(path), "written": not print_only, "changed": True, "backup": str(backup) if backup else None}
 
 
+def _write_opencode_config(path: Path, name: str, server: dict[str, Any], *, print_only: bool) -> dict[str, Any]:
+    current: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BridgeConfigError(f"cannot read JSON configuration {path}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise BridgeConfigError(f"JSON configuration {path} must contain an object")
+        current = loaded
+    mcp = current.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise BridgeConfigError(f"mcp in {path} is not an object")
+    servers = mcp.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise BridgeConfigError(f"mcp.servers in {path} is not an object")
+    entry = {
+        "type": "local",
+        "command": ["uvx", "--from", "yunohost-mcp-connect", "yunohost-mcp-connect"],
+        "environment": {
+            "YUNOHOST_MCP_CLIENT_REMOTE_URL": server["env"]["YUNOHOST_MCP_CLIENT_REMOTE_URL"],
+            "YUNOHOST_MCP_CLIENT_KEY_FILE": server["env"]["YUNOHOST_MCP_CLIENT_KEY_FILE"],
+        },
+    }
+    if name in servers and servers[name] != entry:
+        raise BridgeConfigError(f"MCP server {name!r} already exists with a different configuration in {path}")
+    changed = servers.get(name) != entry
+    servers[name] = entry
+    if not print_only and changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        backup = _backup(path)
+        path.write_text(json.dumps(current, indent=2) + "\n")
+    else:
+        backup = None
+    return {"path": str(path), "written": not print_only, "changed": changed, "backup": str(backup) if backup else None}
+
+
+def _write_openclaw_config(path: Path, name: str, server: dict[str, Any], *, print_only: bool) -> dict[str, Any]:
+    current: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BridgeConfigError(f"cannot read JSON configuration {path}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise BridgeConfigError(f"JSON configuration {path} must contain an object")
+        current = loaded
+    mcp = current.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise BridgeConfigError(f"mcp in {path} is not an object")
+    servers = mcp.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise BridgeConfigError(f"mcp.servers in {path} is not an object")
+    entry = {
+        "command": "uvx",
+        "args": ["--from", "yunohost-mcp-connect", "yunohost-mcp-connect"],
+        "env": {
+            "YUNOHOST_MCP_CLIENT_REMOTE_URL": server["env"]["YUNOHOST_MCP_CLIENT_REMOTE_URL"],
+            "YUNOHOST_MCP_CLIENT_KEY_FILE": server["env"]["YUNOHOST_MCP_CLIENT_KEY_FILE"],
+        },
+    }
+    if name in servers and servers[name] != entry:
+        raise BridgeConfigError(f"MCP server {name!r} already exists with a different configuration in {path}")
+    changed = servers.get(name) != entry
+    servers[name] = entry
+    if not print_only and changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        backup = _backup(path)
+        path.write_text(json.dumps(current, indent=2) + "\n")
+    else:
+        backup = None
+    return {"path": str(path), "written": not print_only, "changed": changed, "backup": str(backup) if backup else None}
+
+
 def write_client_config(client: str, name: str, key_file: Path, remote_url: str, *, print_only: bool) -> dict[str, Any]:
     server = _server_config(key_file, remote_url)
     path = config_path(client)
     if client in {"claude-desktop", "claude-code"}:
         return _write_json_config(path, name, server, print_only=print_only)
+    if client == "gemini":
+        return _write_json_config(path, name, server, print_only=print_only)
     if client == "codex":
         return _write_codex_config(path, name, server, print_only=print_only)
+    if client == "opencode":
+        return _write_opencode_config(path, name, server, print_only=print_only)
+    if client == "openclaw":
+        return _write_openclaw_config(path, name, server, print_only=print_only)
     return _write_hermes_config(path, name, server, print_only=print_only)
 
 
@@ -207,7 +293,7 @@ def _prompt_client() -> str:
     for index, client in enumerate(CLIENTS, start=1):
         print(f"  {index}. {client}", file=sys.stderr)
     while True:
-        answer = input("Client [1-4]: ").strip().lower()
+        answer = input(f"Client [1-{len(CLIENTS)}]: ").strip().lower()
         if answer.isdigit() and 1 <= int(answer) <= len(CLIENTS):
             return CLIENTS[int(answer) - 1]
         if answer in CLIENTS:

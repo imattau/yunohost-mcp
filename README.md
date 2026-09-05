@@ -1,5 +1,7 @@
 # yunohost-mcp
 
+<!-- mcp-name: io.github.imattau/yunohost-mcp -->
+
 Secure MCP server for YunoHost: Nostr-authenticated, policy-controlled, auditable administration, diagnostics, and `_ynh` package development for AI clients (Codex, Claude, OpenCode, ChatGPT-compatible MCP clients).
 
 See [PLAN.md](PLAN.md) for the full design and phased roadmap, and [PHASE0_INVESTIGATION.md](PHASE0_INVESTIGATION.md) for how it maps onto YunoHost's actual Python API.
@@ -47,7 +49,8 @@ uvx --from yunohost-mcp-connect yunohost-mcp-connect setup \
   --format json
 ```
 
-Supported clients are `codex`, `claude-desktop`, `claude-code`, and `hermes`.
+Supported clients are `codex`, `claude-desktop`, `claude-code`, `gemini`,
+`hermes`, and `opencode`.
 Setup is safe to rerun, refuses conflicting server definitions, backs up an
 existing configuration before changing it, and never prints the private key.
 Use `--print-only` when the agent should display configuration without writing

@@ -150,3 +150,38 @@ def test_hermes_config_inserts_inside_existing_section(tmp_path, monkeypatch):
 
     saved = config.read_text()
     assert saved.index("  yunohost-mcp:") < saved.index("profiles:")
+
+
+def test_gemini_config_uses_mcp_servers(tmp_path, monkeypatch):
+    config = tmp_path / "settings.json"
+    monkeypatch.setattr(onboarding, "config_path", lambda client: config)
+
+    onboarding.setup(_setup_args(tmp_path, client="gemini", output_format="text"))
+
+    saved = json.loads(config.read_text())
+    assert saved["mcpServers"]["yunohost-mcp"]["command"] == "uvx"
+    assert saved["mcpServers"]["yunohost-mcp"]["env"]["YUNOHOST_MCP_CLIENT_KEY_FILE"].endswith("gemini.key")
+
+
+def test_opencode_config_uses_local_server_shape(tmp_path, monkeypatch):
+    config = tmp_path / "opencode.json"
+    monkeypatch.setattr(onboarding, "config_path", lambda client: config)
+
+    onboarding.setup(_setup_args(tmp_path, client="opencode", output_format="text"))
+
+    saved = json.loads(config.read_text())
+    entry = saved["mcp"]["servers"]["yunohost-mcp"]
+    assert entry["type"] == "local"
+    assert entry["command"][:2] == ["uvx", "--from"]
+
+
+def test_openclaw_config_uses_mcp_server_shape(tmp_path, monkeypatch):
+    config = tmp_path / "openclaw.json"
+    monkeypatch.setattr(onboarding, "config_path", lambda client: config)
+
+    onboarding.setup(_setup_args(tmp_path, client="openclaw", output_format="text"))
+
+    saved = json.loads(config.read_text())
+    entry = saved["mcp"]["servers"]["yunohost-mcp"]
+    assert entry["command"] == "uvx"
+    assert entry["args"][-1] == "yunohost-mcp-connect"

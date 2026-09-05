@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "yunohost-mcp",
+  "description": "Agent integrations for secure, Nostr-authenticated YunoHost MCP administration.",
+  "owner": {
+    "name": "YunoHost MCP"
+  },
+  "plugins": [
+    {
+      "name": "yunohost-mcp",
+      "source": "./integrations/claude-code/yunohost-mcp",
+      "description": "Agent-assisted setup and diagnostics for YunoHost MCP.",
+      "version": "0.8.3",
+      "category": "productivity"
+    }
+  ]
+}

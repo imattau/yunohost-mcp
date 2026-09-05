@@ -1,0 +1,2 @@
+description = "Set up the YunoHost MCP bridge for Gemini CLI"
+prompt = "Run the YunoHost MCP setup flow for Gemini CLI. Ask for the server MCP URL if it is not already known, then run `uvx --from yunohost-mcp-connect yunohost-mcp-connect setup --server <URL> --client gemini --non-interactive --format json`. Never request, display, or copy the private key. Explain that the generated npub must be granted an appropriate role on the server, then report the doctor command printed by setup."
