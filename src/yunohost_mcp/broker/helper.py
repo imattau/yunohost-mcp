@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import pwd
 import socket
 import socketserver
@@ -296,6 +297,14 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"refusing to replace non-socket path: {args.socket_path}")
         args.socket_path.unlink()
     server = BrokerServer(args.socket_path, allowed_uid)
+    # YunoHost's LDAPInterface authenticates the root connection through
+    # SASL-EXTERNAL and verifies the complete peer identity, including the
+    # effective GID (gidNumber=0+uidNumber=0).  The packaged systemd unit
+    # therefore runs this process with root's primary group.  Keep the
+    # socket narrowly accessible by changing only the socket's group to the
+    # unprivileged frontend user's primary group after binding it.
+    allowed_gid = pwd.getpwnam(args.allowed_user).pw_gid
+    os.chown(args.socket_path, 0, allowed_gid)
     args.socket_path.chmod(0o660)
     logger.info("broker listening on %s", args.socket_path)
     try:
