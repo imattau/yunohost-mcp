@@ -4,7 +4,7 @@ description: Set up and diagnose a secure, Nostr-authenticated YunoHost MCP conn
 metadata:
   hermes:
     tags: [yunohost, mcp, nostr, self-hosting, administration]
-    version: 0.8.3
+    version: 0.8.4
 ---
 
 # YunoHost MCP setup

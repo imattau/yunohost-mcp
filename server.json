@@ -7,12 +7,12 @@
     "url": "https://github.com/imattau/yunohost-mcp",
     "source": "github"
   },
-  "version": "0.8.3",
+  "version": "0.8.4",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "yunohost-mcp-connect",
-      "version": "0.8.3",
+      "version": "0.8.4",
       "transport": {
         "type": "stdio"
       }
