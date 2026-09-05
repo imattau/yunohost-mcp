@@ -26,7 +26,7 @@ from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.policy.confirmation import SQLiteConfirmationStore
 from yunohost_mcp.policy.confirmation import ConfirmationError
 from yunohost_mcp.policy.rules import check_free_space, check_recent_backup, load_policy
-from yunohost_mcp.yunohost.adapter import YunohostAdapter
+from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError
 
 logger = logging.getLogger("yunohost_mcp.broker")
 _UCRED_FORMAT = "3i"
@@ -101,6 +101,13 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
                 audit_operation_id = result.get("operation_id")
             self._send(request_id, ok=True, result=result)
         except (BrokerProtocolError, ValueError) as exc:
+            audit_error = str(exc)
+            self._send(request_id, ok=False, error=str(exc))
+        except YunohostUnavailableError as exc:
+            # Preserve expected YunoHost/runtime failures at the broker
+            # boundary. Masking these as "internal broker error" makes a
+            # missing dependency or LDAP/runtime problem impossible to
+            # diagnose from an MCP client.
             audit_error = str(exc)
             self._send(request_id, ok=False, error=str(exc))
         except Exception:
