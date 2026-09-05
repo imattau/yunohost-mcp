@@ -23,7 +23,7 @@ Use the local signed bridge so Hermes can connect to a YunoHost MCP endpoint.
    ```
 
 3. Explain that setup creates a per-client Nostr identity and writes Hermes'
-   `~/.hermes/config.yaml`.
+   MCP configuration.
 4. Never print or request the private key contents.
 5. Tell the user to enrol the displayed npub with the appropriate YunoHost
    role, restart Hermes, and run the doctor command printed by setup.
