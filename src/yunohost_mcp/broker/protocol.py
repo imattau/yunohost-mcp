@@ -12,6 +12,8 @@ import json
 import secrets
 import base64
 from dataclasses import dataclass
+from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any
 
 PROTOCOL_VERSION = 1
@@ -134,10 +136,21 @@ def encode_response(*, request_id: str, ok: bool, result: Any = None, error: str
         value["result"] = result
     else:
         value["error"] = error or "broker operation failed"
-    raw = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+    raw = json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=_json_default).encode()
     if len(raw) > MAX_MESSAGE_BYTES:
         raise BrokerProtocolError("broker response exceeds message limit")
     return raw + b"\n"
+
+
+def _json_default(value: object) -> str | list[object]:
+    """Serialize native YunoHost result values at the broker boundary."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, set):
+        return sorted(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _optional_string(value: dict[str, Any], key: str) -> str | None:

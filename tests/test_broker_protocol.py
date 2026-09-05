@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,18 @@ def test_response_is_versioned_and_correlated():
     response = json.loads(encode_response(request_id="request-1", ok=True, result={"ok": True}))
 
     assert response == {"protocol": 1, "request_id": "request-1", "ok": True, "result": {"ok": True}}
+
+
+def test_response_serializes_native_yunohost_values():
+    response = json.loads(
+        encode_response(
+            request_id="request-1",
+            ok=True,
+            result={"updated": datetime(2026, 9, 5, 10, 0, tzinfo=timezone.utc)},
+        )
+    )
+
+    assert response["result"]["updated"] == "2026-09-05T10:00:00+00:00"
 
 
 def test_original_body_hash_is_checked():
