@@ -993,8 +993,10 @@ class YunohostAdapter:
                 "apps": [{"id": "nextcloud", "current_version": "28.0.1~ynh1", "new_version": "28.0.2~ynh1"}],
                 "system": [],
             }
-        tools_update = _import_attr("yunohost.tools", "tools_update")
-        result = tools_update(target=target)
+        # Refreshing app/system metadata loads YunoHost's update/catalog
+        # stack, so keep it in the same system runtime as other operations
+        # that may touch LDAP or legacy YunoHost dependencies.
+        result = _call_via_system_python("yunohost.tools", "tools_update", {"target": target}, self.settings)
         return {"fake": False, "target": target, **result}
 
     def plan_app_upgrade(self, app: str) -> dict[str, Any]:
