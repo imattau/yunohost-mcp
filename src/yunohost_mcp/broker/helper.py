@@ -93,9 +93,11 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             required = Scope(operation.required_scope)
             if not identity.has_scope(required):
                 raise BrokerProtocolError("caller lacks the required operation scope")
-            self._check_operation_policy(request, operation.name, identity)
+            confirmation_id = self._check_operation_policy(request, operation.name, identity)
             audit_decision = "allowed"
             result = operation.invoke(self.server.adapter, request.arguments)
+            if confirmation_id is not None:
+                self.server.confirmation_store.finalize(confirmation_id)
             audit_result = "success"
             if isinstance(result, dict):
                 audit_operation_id = result.get("operation_id")
@@ -133,7 +135,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
     def _send(self, request_id: str, *, ok: bool, result=None, error: str | None = None) -> None:
         self.request.sendall(encode_response(request_id=request_id, ok=ok, result=result, error=error))
 
-    def _check_operation_policy(self, request, operation_name: str, identity) -> None:
+    def _check_operation_policy(self, request, operation_name: str, identity) -> str | None:
         """Re-apply hard policy and confirmation at the root boundary.
 
         The frontend's authorization response is intentionally not trusted
@@ -169,10 +171,10 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             "safe.upgrade": "apps.upgrade",
         }.get(operation_name)
         if policy_name is None:
-            return
+            return None
         rule = self.server.policy_rules.get(policy_name)
         if rule is None:
-            return
+            return None
         check_free_space(rule, free_bytes=self.server.adapter.free_space_bytes())
         # safe_upgrade creates its own fresh safety backup inside the
         # workflow, so its preflight only checks the hard free-space floor;
@@ -184,7 +186,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
                 now=time.time(),
             )
         if not rule.require_confirmation:
-            return
+            return None
         confirmation_id = request.arguments.get("confirmation_id")
         if not isinstance(confirmation_id, str) or not self.server.confirmation_store:
             raise BrokerProtocolError("confirmation is required for this operation")
@@ -230,9 +232,11 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
                 tool=policy_name,
                 arguments=confirmation_arguments,
                 require_owner_approval=rule.require_owner_signature,
+                defer=True,
             )
         except ConfirmationError as exc:
             raise BrokerProtocolError(f"invalid confirmation: {exc}") from exc
+        return confirmation_id
 
 
 def authorize_request(request, server: BrokerServer):

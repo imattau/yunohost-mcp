@@ -168,6 +168,30 @@ def test_users_list_calls_system_python(monkeypatch: pytest.MonkeyPatch):
     assert result == {"fake": False, "users": {"codex": {"fullname": "Codex"}}}
 
 
+def test_user_delete_calls_system_python(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs)
+        return {"success": ["nostrtest"]}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    result = YunohostAdapter(settings=_settings()).user_delete("nostrtest", purge=True)
+
+    assert captured == {
+        "module_name": "yunohost.user",
+        "attr": "user_delete",
+        "kwargs": {"username": "nostrtest", "purge": True},
+    }
+    assert result == {
+        "fake": False,
+        "operation_id": None,
+        "username": "nostrtest",
+        "result": {"success": ["nostrtest"]},
+    }
+
+
 @pytest.mark.parametrize(
     ("method", "attr", "expected"),
     [

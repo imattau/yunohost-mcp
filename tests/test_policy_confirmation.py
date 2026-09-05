@@ -67,6 +67,25 @@ def test_consume_valid_ticket():
     assert consumed.confirmation_id == ticket.confirmation_id
 
 
+@pytest.mark.parametrize("store_type", [ConfirmationStore, SQLiteConfirmationStore])
+def test_deferred_confirmation_survives_operation_failure(tmp_path, store_type):
+    store = store_type(tmp_path / "confirmations.sqlite") if store_type is SQLiteConfirmationStore else store_type()
+    ticket = store.create(pubkey="abc", tool="apps.remove", arguments={"app": "x"}, plan={})
+
+    checked = store.consume(
+        ticket.confirmation_id,
+        pubkey="abc",
+        tool="apps.remove",
+        arguments={"app": "x"},
+        defer=True,
+    )
+    assert checked.confirmation_id == ticket.confirmation_id
+    assert len(store) == 1
+
+    store.finalize(ticket.confirmation_id)
+    assert len(store) == 0
+
+
 def test_ticket_is_one_shot():
     store = ConfirmationStore()
     ticket = store.create(pubkey="abc", tool="apps.remove", arguments={"app": "x"}, plan={})

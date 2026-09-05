@@ -271,9 +271,21 @@ def test_diagnosis_run_receives_correct_categories_not_operation_logger(real_mod
     assert real_mode_adapter._test_calls["diagnosis_run"] == {"categories": ["ip"]}
 
 
-def test_updates_refresh_receives_correct_target_not_operation_logger(real_mode_adapter: YunohostAdapter):
+def test_updates_refresh_receives_correct_target_not_operation_logger(
+    real_mode_adapter: YunohostAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    # This call intentionally runs through the system interpreter in real
+    # mode.  The fake module above remains useful for the older in-process
+    # regression cases, but cannot be reached from the subprocess.
+    captured = {}
+
+    def fake_system_call(module_name, attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs)
+        return {"apps": [], "system": []}
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._call_via_system_python", fake_system_call)
     result = real_mode_adapter.updates_refresh(target="apps")
-    assert real_mode_adapter._test_calls["tools_update"] == {"target": "apps"}
+    assert captured == {"module_name": "yunohost.tools", "attr": "tools_update", "kwargs": {"target": "apps"}}
     assert result == {"fake": False, "target": "apps", "apps": [], "system": []}
 
 
@@ -316,9 +328,31 @@ def test_user_update_receives_correct_username_not_operation_logger(real_mode_ad
     assert real_mode_adapter._test_calls["user_update"] == {"username": "alice", "fullname": "Alice New"}
 
 
-def test_user_delete_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):
-    real_mode_adapter.user_delete("alice", purge=True)
-    assert real_mode_adapter._test_calls["user_delete"] == {"username": "alice", "purge": True}
+def test_user_delete_receives_correct_username_not_operation_logger(
+    real_mode_adapter: YunohostAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    # user_delete uses the system interpreter alongside the LDAP-backed user
+    # reads.  Assert the structured subprocess boundary instead of trying to
+    # exercise an in-process fake module that the subprocess cannot see.
+    captured = {}
+
+    def fake_system_call(module_name, attr, kwargs, settings):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs)
+        return {"success": ["alice"]}
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._call_via_system_python", fake_system_call)
+    result = real_mode_adapter.user_delete("alice", purge=True)
+    assert captured == {
+        "module_name": "yunohost.user",
+        "attr": "user_delete",
+        "kwargs": {"username": "alice", "purge": True},
+    }
+    assert result == {
+        "fake": False,
+        "operation_id": "20260903-000000-fake_op",
+        "username": "alice",
+        "result": {"success": ["alice"]},
+    }
 
 
 def test_user_group_create_receives_correct_groupname_not_operation_logger(real_mode_adapter: YunohostAdapter):

@@ -181,14 +181,17 @@ class ConfirmationStore:
         tool: str,
         arguments: dict[str, Any],
         require_owner_approval: bool = False,
+        defer: bool = False,
     ) -> ConfirmationTicket:
-        """One-shot on every outcome except "missing owner approval": every
-        other failure (expired, wrong identity, wrong tool, wrong
-        arguments) removes the ticket immediately, so a leaked/guessed
-        confirmation_id can't be brute-forced by repeated attempts. Missing
-        owner approval is not an attack signal - it's an expected, retriable
-        state - so the ticket is left in place for a later, successful
-        consume() once it's been approved.
+        """Validate a ticket, consuming it immediately unless ``defer`` is
+        true. The broker uses deferred consumption so a failed privileged
+        operation does not burn an otherwise valid approval ticket. Every
+        validation failure (expired, wrong identity, wrong tool, or wrong
+        arguments) still removes the ticket immediately, so a leaked/guessed
+        confirmation_id cannot be brute-forced by repeated attempts. Missing
+        owner approval is not an attack signal - it is an expected, retriable
+        state - so the ticket is left in place for a later successful
+        consume() once it has been approved.
         """
         ticket = self._pending.get(confirmation_id)
         if ticket is None:
@@ -209,8 +212,15 @@ class ConfirmationStore:
             raise ConfirmationError(
                 "this operation requires owner co-signature - use approve_operation() first"
             )
-        del self._pending[confirmation_id]
+        if not defer:
+            del self._pending[confirmation_id]
         return ticket
+
+    def finalize(self, confirmation_id: str) -> None:
+        """Consume a ticket previously validated with ``defer=True``."""
+        if confirmation_id not in self._pending:
+            raise ConfirmationError("unknown or already-used confirmation_id")
+        del self._pending[confirmation_id]
 
     def __len__(self) -> int:
         return len(self._pending)
@@ -279,7 +289,7 @@ class SQLiteConfirmationStore:
             self._check_live(db, ticket)
             return ticket
 
-    def consume(self, confirmation_id, *, pubkey, tool, arguments, require_owner_approval=False):
+    def consume(self, confirmation_id, *, pubkey, tool, arguments, require_owner_approval=False, defer=False):
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             ticket = self._get(db, confirmation_id)
@@ -293,9 +303,19 @@ class SQLiteConfirmationStore:
             if require_owner_approval and ticket.owner_approved_by is None:
                 db.rollback()
                 raise ConfirmationError("this operation requires owner co-signature - use approve_operation() first")
-            db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
+            if not defer:
+                db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
             db.commit()
             return ticket
+
+    def finalize(self, confirmation_id):
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM confirmations WHERE id=?", (confirmation_id,)).fetchone() is None:
+                db.rollback()
+                raise ConfirmationError("unknown or already-used confirmation_id")
+            db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
+            db.commit()
 
     def __len__(self):
         with self._connect() as db:

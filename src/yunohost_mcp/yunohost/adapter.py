@@ -640,15 +640,11 @@ class YunohostAdapter:
         # error" at the MCP boundary.
         return {"fake": False, **_call_via_system_python("yunohost.user", "user_list", {}, self.settings)}
 
-    # user_create/user_delete/user_update/user_group_create/user_group_delete/
-    # user_group_update are @is_unit_operation-decorated (yunohost.user), same
-    # no-manual-operation_logger convention as app_remove/domain_add above -
-    # called with real args only, letting the decorator prepend its own
-    # OperationLogger. None of them import yunohost.utils.form (checked
-    # against /tmp/yunohost-src at review time: neither user.py nor
-    # permission.py references it), so - unlike domain_add/app_install -
-    # there's no pydantic v1/v2 conflict requiring _call_via_system_python
-    # here; a plain in-process _import_attr call is fine.
+    # User writes are normally @is_unit_operation-decorated and must receive
+    # real args only; the decorator supplies its own OperationLogger. The
+    # delete path is deliberately routed through the system interpreter,
+    # alongside LDAP-backed reads, because the root helper's MCP venv does
+    # not reliably contain YunoHost's complete runtime.
     def user_create(
         self,
         username: str,
@@ -721,9 +717,10 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-user_delete", "username": username}
-        user_delete = _import_attr("yunohost.user", "user_delete")
-        user_delete(username=username, purge=purge)
-        return {"fake": False, "operation_id": _latest_operation_id(), "username": username}
+        result = _call_via_system_python(
+            "yunohost.user", "user_delete", {"username": username, "purge": purge}, self.settings
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
 
     def user_group_list(self) -> dict[str, Any]:
         brokered = self._broker_call("user.groups", {})
