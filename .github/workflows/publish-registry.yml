@@ -1,9 +1,10 @@
 name: Publish MCP Registry metadata
 
-on:
+"on":
   release:
-    types: [published]
-  workflow_dispatch:
+    types:
+      - published
+  workflow_dispatch: {}
 
 permissions:
   contents: read
