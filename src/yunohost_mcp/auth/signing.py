@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -66,8 +67,22 @@ class ClientIdentity:
         """Return a complete 'Nostr <base64>' Authorization header value
         for one exact request (method, absolute url, body) - a fresh event
         is signed every call, per NIP-98; nothing here is reusable across
-        requests, by design (see auth/nip98.py's replay protection)."""
-        tags = [["u", url], ["method", method.upper()]]
+        requests, by design (see auth/nip98.py's replay protection).
+
+        `created_at` only has 1-second resolution, and NIP-98 otherwise
+        binds nothing but method/url/payload - so two *independent* calls
+        here for the same request shape within the same wall-clock second
+        would otherwise produce byte-identical events (same id), and the
+        server's replay cache would reject the second one even though it
+        is not a replay at all. This matters in practice: a long-running
+        tool call's SSE stream can reconnect more than once within a
+        second, each reconnection legitimately re-signing the same GET
+        method/url. A random nonce tag makes every call's event unique
+        regardless of timing, while an actual reused header (the same
+        signed event sent twice) still collides and is still rejected -
+        the server ignores unrecognized tags, so this is invisible to it.
+        """
+        tags = [["u", url], ["method", method.upper()], ["nonce", secrets.token_hex(16)]]
         if body:
             tags.append(["payload", hashlib.sha256(body).hexdigest()])
         event = sign_event(

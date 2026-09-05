@@ -86,3 +86,20 @@ def test_signed_header_cannot_be_reused_across_requests():
 
     with pytest.raises(Nip98Error, match="already used"):
         verify_nip98_request(authorization_header=header, method="GET", url=url, body=b"", replay_cache=cache)
+
+
+def test_independent_signs_in_the_same_second_do_not_collide():
+    # Two *separate* sign_nip98() calls for the identical request shape,
+    # both landing in the same wall-clock second (e.g. a bridge's SSE
+    # stream reconnecting twice quickly) must not be indistinguishable
+    # from an actual replay - each needs its own nonce so both verify.
+    identity = ClientIdentity.from_key_string("4" * 64)
+    url = "https://mcp.example.com/mcp"
+    cache = ReplayCache()
+
+    header_a = identity.sign_nip98(method="GET", url=url)
+    header_b = identity.sign_nip98(method="GET", url=url)
+    assert header_a != header_b
+
+    verify_nip98_request(authorization_header=header_a, method="GET", url=url, body=b"", replay_cache=cache)
+    verify_nip98_request(authorization_header=header_b, method="GET", url=url, body=b"", replay_cache=cache)
