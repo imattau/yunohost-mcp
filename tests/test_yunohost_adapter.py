@@ -113,6 +113,64 @@ def test_web_logs_parses_access_and_error_records(tmp_path):
     assert "upstream timed out" in error["message"]
 
 
+def test_journal_query_kernel_unit_passes_dash_k_as_a_bare_flag(monkeypatch):
+    """-k/--dmesg takes no value; passing the unit name after it makes
+    journalctl try to parse "kernel" as a match expression and fail with
+    "Failed to add match 'kernel': Invalid argument"."""
+    captured_args: list[str] = []
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured_args.extend(args)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter.subprocess.run", fake_run)
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+
+    adapter.journal_query(["kernel"])
+
+    assert "-k" in captured_args
+    k_index = captured_args.index("-k")
+    assert k_index == len(captured_args) - 1 or captured_args[k_index + 1] != "kernel"
+
+
+def test_http_probe_reaches_the_real_network_path_without_crashing(monkeypatch):
+    """Regression for a NameError: name 'time' is not defined - http_probe's
+    elapsed-time tracking used the `time` module without importing it, so
+    every non-fake probe of a public URL crashed before making a request."""
+
+    class FakeResponse:
+        status = 200
+        headers = {"Content-Type": "text/plain"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def read(self, _n):
+            return b""
+
+        def geturl(self):
+            return "https://example.test/"
+
+    monkeypatch.setattr(
+        "yunohost_mcp.yunohost.adapter.urllib.request.urlopen", lambda *a, **k: FakeResponse()
+    )
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False, allow_private_http_probes=True))
+
+    result = adapter.http_probe("https://example.test")
+
+    assert result["reachable"] is True
+    assert result["status_code"] == 200
+    assert isinstance(result["elapsed_ms"], float)
+
+
 def test_domains_list():
     result = make_adapter().domains_list()
     assert result["main"] in result["domains"]

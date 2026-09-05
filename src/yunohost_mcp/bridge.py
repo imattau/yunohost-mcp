@@ -24,7 +24,6 @@ import os
 import secrets
 import sys
 import time
-from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Awaitable, Callable, TypeVar
 
@@ -66,18 +65,49 @@ class RemoteSession:
     local MCP handshake.  Requests made while the remote is unavailable get a
     useful per-request error (or an empty discovery result), and a later
     request retries the connection after a short cooldown.
+
+    The transport's own task group must be opened and closed by the single
+    task that runs it, for its whole lifetime (anyio requires this).  The
+    request that triggers the first connect is itself running inside a
+    per-request cancel scope - every MCP dispatcher wraps request handling in
+    `anyio.fail_after(...)` - that closes long before the connection should,
+    so the connect/hold/close cycle cannot happen inline in `_connect()`.
+    Instead it runs start to finish in one dedicated task spawned onto
+    `task_group`, a task group owned and entered once by the caller
+    (`_async_main`) outside of any request handling; `_connect()` only ever
+    calls `task_group.start_soon(...)`, which - unlike entering a task group -
+    is safe to call from any task, including from inside that request's
+    `fail_after` scope.
     """
 
     RETRY_DELAY_SECONDS = 5.0
 
-    def __init__(self, remote_url: str, http_client: httpx2.AsyncClient) -> None:
+    def __init__(self, remote_url: str, http_client: httpx2.AsyncClient, task_group: anyio.abc.TaskGroup) -> None:
         self.remote_url = remote_url
         self.http_client = http_client
+        self._task_group = task_group
         self._remote: Client | None = None
-        self._stack: AsyncExitStack | None = None
+        self._close_event: anyio.Event | None = None
         self._state_lock = asyncio.Lock()
         self._next_retry_at = 0.0
         self._last_error: str | None = None
+
+    async def _run_connection(self, ready: anyio.Event, close_event: anyio.Event) -> None:
+        """Owns the transport's connect/hold/close cycle in one task, start to finish."""
+        try:
+            transport = streamable_http_client(self.remote_url, http_client=self.http_client)
+            async with Client(transport) as remote:
+                self._remote = remote
+                self._last_error = None
+                ready.set()
+                await close_event.wait()
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate one remote from the local MCP process
+            self._last_error = str(exc) or exc.__class__.__name__
+            ready.set()
+        finally:
+            self._remote = None
 
     async def _connect(self) -> Client:
         now = time.monotonic()
@@ -95,36 +125,31 @@ class RemoteSession:
                 detail = self._last_error or "connection attempt is cooling down"
                 raise RemoteUnavailable(detail)
 
-            stack = AsyncExitStack()
-            try:
-                transport = await stack.enter_async_context(
-                    streamable_http_client(self.remote_url, http_client=self.http_client)
-                )
-                remote = await stack.enter_async_context(Client(transport))
-            except Exception as exc:  # noqa: BLE001 - isolate one remote from the local MCP process
-                await stack.aclose()
-                self._last_error = str(exc) or exc.__class__.__name__
+            ready = anyio.Event()
+            close_event = anyio.Event()
+            self._close_event = close_event
+            self._task_group.start_soon(self._run_connection, ready, close_event)
+            await ready.wait()
+
+            if self._remote is None:
+                self._close_event = None
                 self._next_retry_at = time.monotonic() + self.RETRY_DELAY_SECONDS
                 self._log_unavailable()
-                raise RemoteUnavailable(self._last_error) from exc
+                raise RemoteUnavailable(self._last_error or "unknown connection error")
 
-            self._stack = stack
-            self._remote = remote
-            self._last_error = None
             self._next_retry_at = 0.0
             print(f"yunohost-mcp-connect: connected to {self.remote_url}", file=sys.stderr)
-            return remote
+            return self._remote
 
     async def _drop(self, remote: Client) -> None:
         async with self._state_lock:
             if self._remote is not remote:
                 return
             self._remote = None
-            stack = self._stack
-            self._stack = None
             self._next_retry_at = time.monotonic() + self.RETRY_DELAY_SECONDS
-            if stack is not None:
-                await stack.aclose()
+            if self._close_event is not None:
+                self._close_event.set()
+                self._close_event = None
 
     def _log_unavailable(self) -> None:
         detail = self._last_error or "unknown connection error"
@@ -149,10 +174,9 @@ class RemoteSession:
     async def close(self) -> None:
         async with self._state_lock:
             self._remote = None
-            stack = self._stack
-            self._stack = None
-            if stack is not None:
-                await stack.aclose()
+            if self._close_event is not None:
+                self._close_event.set()
+                self._close_event = None
 
     @property
     def unavailable_message(self) -> str:
@@ -308,12 +332,13 @@ async def _async_main(args: argparse.Namespace) -> None:
     print(f"yunohost-mcp-connect: signing as {identity.npub}, connecting to {args.remote_url}", file=sys.stderr)
 
     async with httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(120.0)) as http_client:
-        remote = RemoteSession(args.remote_url, http_client)
-        local = _build_local_server(remote, name=args.name)
-        try:
-            await local.run_stdio_async()
-        finally:
-            await remote.close()
+        async with anyio.create_task_group() as task_group:
+            remote = RemoteSession(args.remote_url, http_client, task_group)
+            local = _build_local_server(remote, name=args.name)
+            try:
+                await local.run_stdio_async()
+            finally:
+                await remote.close()
 
 
 def main() -> None:

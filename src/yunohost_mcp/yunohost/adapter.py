@@ -31,6 +31,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -754,7 +755,7 @@ class YunohostAdapter:
         entries: list[dict[str, Any]] = []
         for unit in units:
             args = [self.settings.journalctl_path, "--no-pager", "-o", "json", "-n", str(capped_lines)]
-            args += ["-k" if unit == "kernel" else "-u", unit]
+            args += ["-k"] if unit == "kernel" else ["-u", unit]
             if since:
                 args += ["--since", since]
             if until:
@@ -2303,13 +2304,43 @@ class YunohostAdapter:
         relays = [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
         if relays:
             return relays
-        return self._read_nostr_catalog_ynh_env("NOSTR_YNH_RELAYS")
+        relays = self._read_nostr_catalog_ynh_env("NOSTR_YNH_RELAYS")
+        if relays:
+            return relays
+        return self._read_nostr_catalog_ynh_setting("relays")
 
     def _catalog_trusted_publishers(self) -> list[str]:
         publishers = [p.strip() for p in self.settings.catalog_trusted_publishers.split(",") if p.strip()]
         if publishers:
             return publishers
-        return self._read_nostr_catalog_ynh_env("NOSTR_YNH_TRUSTED_PUBLISHERS")
+        publishers = self._read_nostr_catalog_ynh_env("NOSTR_YNH_TRUSTED_PUBLISHERS")
+        if publishers:
+            return publishers
+        return self._read_nostr_catalog_ynh_setting("trusted_publishers")
+
+    def _read_nostr_catalog_ynh_setting(self, key: str) -> list[str]:
+        """Read the catalog app's source-of-truth setting as a last resort.
+
+        The catalog package renders these settings into an EnvironmentFile,
+        but that file is commonly mode 0640 and therefore not readable by the
+        unprivileged MCP frontend. The root broker can query YunoHost's app
+        settings directly, avoiding a duplicated relay configuration while
+        retaining the file fast path for deployments where it is readable.
+        """
+        if self.settings.fake_yunohost:
+            return []
+        try:
+            value = _call_via_system_python(
+                "yunohost.app",
+                "app_setting_get",
+                {"app": "nostr_catalog", "key": key},
+                self.settings,
+            )
+        except Exception:
+            return []
+        if not isinstance(value, str):
+            return []
+        return [item.strip() for item in re.split(r"[,\n]", value) if item.strip()]
 
     def _read_nostr_catalog_ynh_env(self, key: str) -> list[str]:
         # Falls back to nostr_catalog_ynh's own env file (written by its

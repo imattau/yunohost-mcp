@@ -8,6 +8,7 @@ from mcp.client import Client
 from yunohost_mcp.config import Settings
 from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, set_current_request
 from yunohost_mcp.server import mcp
+import yunohost_mcp.yunohost.adapter as adapter_module
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
 
@@ -56,6 +57,20 @@ def test_catalog_relays_is_empty_when_env_file_is_missing(tmp_path: Path):
         Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=tmp_path / "does-not-exist.env")
     )
     assert adapter._catalog_relays() == []
+
+
+def test_catalog_relays_fall_back_to_yunohost_app_setting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(
+        adapter_module,
+        "_call_via_system_python",
+        lambda module, attr, kwargs, settings: "wss://relay.damus.io,wss://nos.lol"
+        if kwargs["key"] == "relays"
+        else "",
+    )
+    adapter = YunohostAdapter(
+        Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=tmp_path / "missing.env")
+    )
+    assert adapter._catalog_relays() == ["wss://relay.damus.io", "wss://nos.lol"]
 
 
 def test_catalog_verify_fake_mode_never_needs_publisher_key():

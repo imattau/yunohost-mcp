@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+import anyio
 import httpx2
 import pytest
 import uvicorn
@@ -110,6 +111,29 @@ async def test_bridge_forwards_resource_reads(bridge_identity):
 
 
 @pytest.mark.anyio
+async def test_remote_session_forwards_tools_list_over_real_http(bridge_identity):
+    """RemoteSession, not just a pre-connected Client, must be able to drive a
+    real streamable_http_client transport end to end. RemoteSession._connect
+    passes the transport it builds into `Client(...)` without entering it
+    itself first - Client enters it internally - and only a real (non-mocked)
+    streamable_http_client/Client pair exercises that contract."""
+    async with _LiveServer() as live:
+        auth = Nip98BridgeAuth(bridge_identity)
+        async with httpx2.AsyncClient(auth=auth) as http_client:
+            async with anyio.create_task_group() as task_group:
+                remote = RemoteSession(live.url, http_client, task_group)
+                local = _build_local_server(remote, name="test-bridge")
+                try:
+                    async with Client(local) as local_client:
+                        tools = await local_client.list_tools()
+                        names = {t.name for t in tools.tools}
+                        assert "whoami" in names
+                        assert "apps_list" in names
+                finally:
+                    await remote.close()
+
+
+@pytest.mark.anyio
 async def test_bridge_denies_a_request_the_remote_identity_lacks_scope_for():
     identity = ClientIdentity.from_key_string("c" * 64)
     _seed_identity(identity.npub, name="readonly", roles=["readonly"])
@@ -135,18 +159,19 @@ async def test_bridge_completes_local_handshake_when_remote_is_down(monkeypatch)
         raise OSError("connection refused")
 
     monkeypatch.setattr(bridge_module, "streamable_http_client", fail_to_create_transport)
-    remote = RemoteSession("https://offline.example/mcp", http_client=None)  # type: ignore[arg-type]
-    local = _build_local_server(remote, name="offline-bridge")
+    async with anyio.create_task_group() as task_group:
+        remote = RemoteSession("https://offline.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        local = _build_local_server(remote, name="offline-bridge")
 
-    async with Client(local) as local_client:
-        tools = await local_client.list_tools()
-        assert tools.tools == []
+        async with Client(local) as local_client:
+            tools = await local_client.list_tools()
+            assert tools.tools == []
 
-        result = await local_client.call_tool("whoami", {})
-        assert result.is_error is True
-        assert "offline.example" in result.content[0].text
+            result = await local_client.call_tool("whoami", {})
+            assert result.is_error is True
+            assert "offline.example" in result.content[0].text
 
-    await remote.close()
+        await remote.close()
 
 
 @pytest.mark.anyio
@@ -170,12 +195,13 @@ async def test_remote_session_keeps_forwarding_after_successful_connection(monke
 
     monkeypatch.setattr(bridge_module, "streamable_http_client", lambda *args, **kwargs: FakeTransport())
     monkeypatch.setattr(bridge_module, "Client", lambda transport: FakeRemote())
-    remote = RemoteSession("https://online.example/mcp", http_client=None)  # type: ignore[arg-type]
+    async with anyio.create_task_group() as task_group:
+        remote = RemoteSession("https://online.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
 
-    assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
-    assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
+        assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
+        assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
 
-    await remote.close()
+        await remote.close()
 
 
 @pytest.mark.anyio
@@ -208,15 +234,16 @@ async def test_remote_session_retries_after_a_failed_connection(monkeypatch):
 
     monkeypatch.setattr(bridge_module, "streamable_http_client", eventually_connect)
     monkeypatch.setattr(bridge_module, "Client", lambda transport: FakeRemote())
-    remote = RemoteSession("https://recovering.example/mcp", http_client=None)  # type: ignore[arg-type]
-    remote.RETRY_DELAY_SECONDS = 0
+    async with anyio.create_task_group() as task_group:
+        remote = RemoteSession("https://recovering.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        remote.RETRY_DELAY_SECONDS = 0
 
-    with pytest.raises(bridge_module.RemoteUnavailable):
-        await remote.request(lambda connected: connected.list_tools())
-    assert await remote.request(lambda connected: connected.list_tools()) == "recovered"
-    assert attempts == 2
+        with pytest.raises(bridge_module.RemoteUnavailable):
+            await remote.request(lambda connected: connected.list_tools())
+        assert await remote.request(lambda connected: connected.list_tools()) == "recovered"
+        assert attempts == 2
 
-    await remote.close()
+        await remote.close()
 
 
 @pytest.fixture
