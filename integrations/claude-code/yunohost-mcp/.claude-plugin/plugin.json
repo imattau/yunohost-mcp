@@ -1,0 +1,8 @@
+{
+  "name": "yunohost-mcp",
+  "version": "0.8.3",
+  "description": "Agent-assisted setup and diagnostics for YunoHost MCP.",
+  "author": {
+    "name": "YunoHost MCP"
+  }
+}

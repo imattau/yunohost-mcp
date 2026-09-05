@@ -165,6 +165,18 @@ async def _async_main(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Keep the original flag-based bridge invocation stable for MCP clients,
+    # while exposing agent-friendly lifecycle commands as subcommands.
+    if len(sys.argv) > 1 and sys.argv[1] in {"setup", "doctor"}:
+        from yunohost_mcp.onboarding import add_doctor_parser, add_setup_parser
+
+        command_parser = argparse.ArgumentParser(prog="yunohost-mcp-connect")
+        subparsers = command_parser.add_subparsers(dest="command", required=True)
+        add_setup_parser(subparsers)
+        add_doctor_parser(subparsers)
+        args = command_parser.parse_args()
+        raise SystemExit(args.handler(args))
+
     parser = argparse.ArgumentParser(
         prog="yunohost-mcp-connect",
         description="Bridge a mainstream MCP client (stdio) to a remote yunohost-mcp server (NIP-98 over HTTP).",

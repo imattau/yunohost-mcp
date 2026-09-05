@@ -15,17 +15,49 @@ By default `fake_yunohost` is off (real mode) — set `YUNOHOST_MCP_FAKE_YUNOHOS
 
 ## Installing the client tools
 
-Once published, install the Python package with:
+The recommended client-side path is `uvx`, which creates an isolated
+environment for the command without requiring users to manage a Python virtual
+environment:
 
 ```bash
-python3 -m pip install yunohost-mcp-connect
+uvx --from yunohost-mcp-connect yunohost-mcp-connect --help
 ```
 
-This installs `yunohost-mcp`, `yunohost-mcp-connect`, `yunohost-mcp-delegate`,
-and `yunohost-mcp-approve`. For an isolated command-line installation, use:
+For a persistent command-line installation, use:
 
 ```bash
 uv tool install yunohost-mcp-connect
+```
+
+The package is also installable with `python3 -m pip install
+yunohost-mcp-connect`; that path is mainly useful for development or systems
+where `uv` is not available.
+
+## Agent-assisted setup
+
+The setup wizard is designed to be run by an AI agent on the user's local
+machine. It generates a fresh client identity, writes the selected MCP client
+configuration, and prints the one remaining security-sensitive step: granting
+the generated npub an appropriate role on the YunoHost server.
+
+```bash
+uvx --from yunohost-mcp-connect yunohost-mcp-connect setup \
+  --server https://your-yunohost-domain/mcp \
+  --client codex \
+  --format json
+```
+
+Supported clients are `codex`, `claude-desktop`, `claude-code`, and `hermes`.
+Setup is safe to rerun, refuses conflicting server definitions, backs up an
+existing configuration before changing it, and never prints the private key.
+Use `--print-only` when the agent should display configuration without writing
+it. After granting the npub and restarting the client, diagnose the connection:
+
+```bash
+uvx --from yunohost-mcp-connect yunohost-mcp-connect doctor \
+  --server https://your-yunohost-domain/mcp \
+  --key-file ~/.config/yunohost-mcp/codex.key \
+  --format json
 ```
 
 ## Connecting a client: yunohost-mcp-connect
@@ -39,7 +71,7 @@ yunohost-mcp-connect --remote-url https://your-yunohost-domain/mcp --key-file ~/
 - `--key-file` (or `$YUNOHOST_MCP_CLIENT_KEY_FILE`) points at a file holding a hex or `nsec1...` private key — preferred over `--key`/`$YUNOHOST_MCP_CLIENT_KEY`, which put the key in argv/environment where other processes on the same machine can read it.
 - `--generate-key PATH` writes a fresh private key to `PATH` (0600; refuses to overwrite an existing file), prints its npub, and exits without connecting anywhere — the way to get a `--key-file` in the first place. Use a distinct `PATH` per client; see "Give each client its own key file" below.
 - `--delegation-file` (or `$YUNOHOST_MCP_CLIENT_DELEGATION_FILE`) presents a delegation event (PLAN.md Phase 11) alongside your own signature, for a disposable agent identity an owner granted a subset of their access to.
-- Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are all forwarded verbatim; every other MCP feature and all authorization/policy/audit still happens exactly as it would if you'd signed the request yourself, because you did.
+- Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are forwarded verbatim; authorization, policy, and audit still happen on the remote server.
 
 ## Connecting Claude Desktop or Codex
 

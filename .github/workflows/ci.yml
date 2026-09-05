@@ -39,3 +39,9 @@ jobs:
 
       - name: Build package
         run: uv build
+
+      - name: Validate integration artifacts
+        run: |
+          python -m json.tool integrations/claude-code/yunohost-mcp/.claude-plugin/plugin.json >/dev/null
+          python -m json.tool integrations/claude-code/yunohost-mcp/.mcp.json >/dev/null
+          python -m json.tool integrations/codex/yunohost-mcp/.mcp.json >/dev/null

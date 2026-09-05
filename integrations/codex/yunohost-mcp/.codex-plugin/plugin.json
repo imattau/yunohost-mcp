@@ -1,0 +1,18 @@
+{
+  "name": "yunohost-mcp",
+  "version": "0.8.3",
+  "description": "Agent-assisted setup and diagnostics for YunoHost MCP.",
+  "author": {
+    "name": "YunoHost MCP"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "YunoHost MCP",
+    "shortDescription": "Connect Codex to a YunoHost MCP server.",
+    "longDescription": "Guides Codex through uvx-based setup, identity enrolment, and connection diagnostics.",
+    "developerName": "YunoHost MCP",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Set up or diagnose my YunoHost MCP connection."
+  }
+}
