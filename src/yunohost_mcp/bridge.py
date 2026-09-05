@@ -19,23 +19,145 @@ sense it did - the private key never leaves this process).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import secrets
 import sys
+import time
+from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import Awaitable, Callable, TypeVar
 
 import anyio
 import httpx2
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.mcpserver import MCPServer
-from mcp_types import CallToolRequestParams, PaginatedRequestParams, ReadResourceRequestParams
+from mcp_types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListResourcesResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ReadResourceRequestParams,
+    TextContent,
+)
 
 from yunohost_mcp.auth.signing import ClientIdentity, KeyLoadError
 
 
 class BridgeConfigError(ValueError):
     """Missing or invalid --remote-url/--key/--key-file for the bridge."""
+
+
+class RemoteUnavailable(RuntimeError):
+    """The configured remote MCP server could not be reached."""
+
+
+_T = TypeVar("_T")
+
+
+class RemoteSession:
+    """Lazily connect to one remote server without making local startup fatal.
+
+    MCP clients commonly start several stdio servers as one startup operation.
+    The remote server is an optional dependency of this process, so a failed
+    remote handshake must not prevent this process from completing its own
+    local MCP handshake.  Requests made while the remote is unavailable get a
+    useful per-request error (or an empty discovery result), and a later
+    request retries the connection after a short cooldown.
+    """
+
+    RETRY_DELAY_SECONDS = 5.0
+
+    def __init__(self, remote_url: str, http_client: httpx2.AsyncClient) -> None:
+        self.remote_url = remote_url
+        self.http_client = http_client
+        self._remote: Client | None = None
+        self._stack: AsyncExitStack | None = None
+        self._state_lock = asyncio.Lock()
+        self._next_retry_at = 0.0
+        self._last_error: str | None = None
+
+    async def _connect(self) -> Client:
+        now = time.monotonic()
+        if self._remote is not None:
+            return self._remote
+        if now < self._next_retry_at:
+            detail = self._last_error or "connection attempt is cooling down"
+            raise RemoteUnavailable(detail)
+
+        async with self._state_lock:
+            if self._remote is not None:
+                return self._remote
+            now = time.monotonic()
+            if now < self._next_retry_at:
+                detail = self._last_error or "connection attempt is cooling down"
+                raise RemoteUnavailable(detail)
+
+            stack = AsyncExitStack()
+            try:
+                transport = await stack.enter_async_context(
+                    streamable_http_client(self.remote_url, http_client=self.http_client)
+                )
+                remote = await stack.enter_async_context(Client(transport))
+            except Exception as exc:  # noqa: BLE001 - isolate one remote from the local MCP process
+                await stack.aclose()
+                self._last_error = str(exc) or exc.__class__.__name__
+                self._next_retry_at = time.monotonic() + self.RETRY_DELAY_SECONDS
+                self._log_unavailable()
+                raise RemoteUnavailable(self._last_error) from exc
+
+            self._stack = stack
+            self._remote = remote
+            self._last_error = None
+            self._next_retry_at = 0.0
+            print(f"yunohost-mcp-connect: connected to {self.remote_url}", file=sys.stderr)
+            return remote
+
+    async def _drop(self, remote: Client) -> None:
+        async with self._state_lock:
+            if self._remote is not remote:
+                return
+            self._remote = None
+            stack = self._stack
+            self._stack = None
+            self._next_retry_at = time.monotonic() + self.RETRY_DELAY_SECONDS
+            if stack is not None:
+                await stack.aclose()
+
+    def _log_unavailable(self) -> None:
+        detail = self._last_error or "unknown connection error"
+        print(
+            f"yunohost-mcp-connect: remote server unavailable at {self.remote_url}; "
+            f"will retry: {detail}",
+            file=sys.stderr,
+        )
+
+    async def request(self, operation: Callable[[Client], Awaitable[_T]]) -> _T:
+        remote = await self._connect()
+        try:
+            return await operation(remote)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a dead remote must not kill local MCP
+            self._last_error = str(exc) or exc.__class__.__name__
+            self._log_unavailable()
+            await self._drop(remote)
+            raise RemoteUnavailable(self._last_error) from exc
+
+    async def close(self) -> None:
+        async with self._state_lock:
+            self._remote = None
+            stack = self._stack
+            self._stack = None
+            if stack is not None:
+                await stack.aclose()
+
+    @property
+    def unavailable_message(self) -> str:
+        detail = self._last_error or "the connection has not been established"
+        return f"YunoHost MCP server at {self.remote_url} is unavailable: {detail}"
 
 
 class Nip98BridgeAuth(httpx2.Auth):
@@ -123,25 +245,53 @@ def _load_delegation_header(args: argparse.Namespace) -> str | None:
     return base64.b64encode(raw).decode()
 
 
-def _build_local_server(remote: Client, *, name: str) -> MCPServer:
-    """A local MCPServer whose tools/resources handlers forward verbatim to
-    the connected remote Client - see this module's own docstring for why
-    a raw handler override (not per-tool registration) is the right shape
-    for a proxy that doesn't know the remote tool list ahead of time."""
+def _build_local_server(remote: Client | RemoteSession, *, name: str) -> MCPServer:
+    """Build a local MCPServer whose handlers forward to the remote.
+
+    A raw handler override (not per-tool registration) is the right shape for
+    a proxy that does not know the remote tool list ahead of time. ``remote``
+    may be an already connected Client for compatibility, or a
+    ``RemoteSession`` that connects lazily and isolates connection failures.
+    """
     local = MCPServer(name)
     lowlevel = local._lowlevel_server  # noqa: SLF001 - add_request_handler is the documented, public override point on Server; MCPServer just doesn't re-expose it itself
 
+    async def request(operation: Callable[[Client], Awaitable[_T]]) -> _T:
+        # Keep this helper compatible with callers/tests that already pass a
+        # connected Client, while the production bridge passes RemoteSession.
+        if isinstance(remote, RemoteSession):
+            return await remote.request(operation)
+        return await operation(remote)
+
     async def handle_list_tools(ctx, params: PaginatedRequestParams | None):
-        return await remote.list_tools(cursor=params.cursor if params else None)
+        try:
+            return await request(
+                lambda connected: connected.list_tools(cursor=params.cursor if params else None)
+            )
+        except RemoteUnavailable:
+            # Discovery must still complete so this connector cannot block
+            # other independent MCP servers from starting.
+            return ListToolsResult(tools=[])
 
     async def handle_call_tool(ctx, params: CallToolRequestParams):
-        return await remote.call_tool(params.name, params.arguments or {})
+        try:
+            return await request(lambda connected: connected.call_tool(params.name, params.arguments or {}))
+        except RemoteUnavailable:
+            return CallToolResult(
+                content=[TextContent(text=remote.unavailable_message)],
+                isError=True,
+            )
 
     async def handle_list_resources(ctx, params: PaginatedRequestParams | None):
-        return await remote.list_resources(cursor=params.cursor if params else None)
+        try:
+            return await request(
+                lambda connected: connected.list_resources(cursor=params.cursor if params else None)
+            )
+        except RemoteUnavailable:
+            return ListResourcesResult(resources=[])
 
     async def handle_read_resource(ctx, params: ReadResourceRequestParams):
-        return await remote.read_resource(params.uri)
+        return await request(lambda connected: connected.read_resource(params.uri))
 
     lowlevel.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
     lowlevel.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
@@ -158,10 +308,12 @@ async def _async_main(args: argparse.Namespace) -> None:
     print(f"yunohost-mcp-connect: signing as {identity.npub}, connecting to {args.remote_url}", file=sys.stderr)
 
     async with httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(120.0)) as http_client:
-        transport = streamable_http_client(args.remote_url, http_client=http_client)
-        async with Client(transport) as remote:
-            local = _build_local_server(remote, name=args.name)
+        remote = RemoteSession(args.remote_url, http_client)
+        local = _build_local_server(remote, name=args.name)
+        try:
             await local.run_stdio_async()
+        finally:
+            await remote.close()
 
 
 def main() -> None:

@@ -21,7 +21,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from yunohost_mcp import server as server_module
 from yunohost_mcp.auth.signing import ClientIdentity
-from yunohost_mcp.bridge import Nip98BridgeAuth, _build_local_server
+from yunohost_mcp import bridge as bridge_module
+from yunohost_mcp.bridge import Nip98BridgeAuth, RemoteSession, _build_local_server
 
 
 class _LiveServer:
@@ -124,6 +125,98 @@ async def test_bridge_denies_a_request_the_remote_identity_lacks_scope_for():
                         assert result.is_error is True
     finally:
         server_module.settings.identity_file_path().unlink(missing_ok=True)
+
+
+@pytest.mark.anyio
+async def test_bridge_completes_local_handshake_when_remote_is_down(monkeypatch):
+    """One unavailable YunoHost must not block other MCP servers at startup."""
+
+    def fail_to_create_transport(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(bridge_module, "streamable_http_client", fail_to_create_transport)
+    remote = RemoteSession("https://offline.example/mcp", http_client=None)  # type: ignore[arg-type]
+    local = _build_local_server(remote, name="offline-bridge")
+
+    async with Client(local) as local_client:
+        tools = await local_client.list_tools()
+        assert tools.tools == []
+
+        result = await local_client.call_tool("whoami", {})
+        assert result.is_error is True
+        assert "offline.example" in result.content[0].text
+
+    await remote.close()
+
+
+@pytest.mark.anyio
+async def test_remote_session_keeps_forwarding_after_successful_connection(monkeypatch):
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    class FakeRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def list_tools(self, *, cursor=None):
+            return "forwarded"
+
+    monkeypatch.setattr(bridge_module, "streamable_http_client", lambda *args, **kwargs: FakeTransport())
+    monkeypatch.setattr(bridge_module, "Client", lambda transport: FakeRemote())
+    remote = RemoteSession("https://online.example/mcp", http_client=None)  # type: ignore[arg-type]
+
+    assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
+    assert await remote.request(lambda connected: connected.list_tools()) == "forwarded"
+
+    await remote.close()
+
+
+@pytest.mark.anyio
+async def test_remote_session_retries_after_a_failed_connection(monkeypatch):
+    attempts = 0
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    class FakeRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def list_tools(self, *, cursor=None):
+            return "recovered"
+
+    def eventually_connect(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("connection refused")
+        return FakeTransport()
+
+    monkeypatch.setattr(bridge_module, "streamable_http_client", eventually_connect)
+    monkeypatch.setattr(bridge_module, "Client", lambda transport: FakeRemote())
+    remote = RemoteSession("https://recovering.example/mcp", http_client=None)  # type: ignore[arg-type]
+    remote.RETRY_DELAY_SECONDS = 0
+
+    with pytest.raises(bridge_module.RemoteUnavailable):
+        await remote.request(lambda connected: connected.list_tools())
+    assert await remote.request(lambda connected: connected.list_tools()) == "recovered"
+    assert attempts == 2
+
+    await remote.close()
 
 
 @pytest.fixture

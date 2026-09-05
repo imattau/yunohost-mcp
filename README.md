@@ -76,6 +76,12 @@ yunohost-mcp-connect --remote-url https://your-yunohost-domain/mcp --key-file ~/
 - `--delegation-file` (or `$YUNOHOST_MCP_CLIENT_DELEGATION_FILE`) presents a delegation event (PLAN.md Phase 11) alongside your own signature, for a disposable agent identity an owner granted a subset of their access to.
 - Point your MCP client's config at this command (not the server directly) — `tools/list`, `tools/call`, `resources/list`, and `resources/read` are forwarded verbatim; authorization, policy, and audit still happen on the remote server.
 
+Each connector starts its local MCP endpoint independently of the remote
+YunoHost handshake. If one configured YunoHost instance is offline, that
+connector stays alive, reports no discovered tools until the instance returns,
+and retries on later requests; other configured MCP servers can still start
+and remain usable.
+
 ## Connecting Claude Desktop or Codex
 
 Both point at `yunohost-mcp-connect`, not at the server directly — the bridge is what signs each request with your Nostr key. Use the full path to `yunohost-mcp-connect` in whatever environment you installed `yunohost-mcp` into (e.g. `~/.local/pipx/venvs/yunohost-mcp/bin/yunohost-mcp-connect`, or a venv's `bin/` directory — `which yunohost-mcp-connect` after activating it will tell you).
