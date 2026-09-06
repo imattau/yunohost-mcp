@@ -446,6 +446,13 @@ class YunohostAdapter:
             "migrations_state",
             "firewall_list",
             "firewall_is_open",
+            "memory_get",
+            "memory_list_contexts",
+            "memory_recall",
+            "memory_context",
+            "memory_thread",
+            "memory_store",
+            "memory_feedback",
         }
     )
 

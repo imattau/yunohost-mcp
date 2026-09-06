@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from yunohost_mcp.config import Settings
+from yunohost_mcp.polypack import PolypackUnavailableError
 from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter, YunohostUnavailableError
 
 
@@ -22,6 +23,19 @@ def test_broker_mode_fails_closed_for_unregistered_adapter_operations(tmp_path):
 
     with pytest.raises(YunohostUnavailableError, match="not yet available through the privileged broker"):
         adapter.test_http_endpoint("https://example.test")
+
+
+def test_broker_mode_does_not_guard_the_polypack_memory_methods(tmp_path):
+    """Regression test: memory_* proxies to Polypack over loopback HTTP and
+    never touches root-privileged YunoHost operations, so broker mode must
+    not block it behind the "not yet available through the privileged
+    broker" guard the way it blocks unregistered YunoHost operations.
+    Before the fix, memory_* wasn't in _BROKERED_METHODS and every call
+    failed with that guard error regardless of Polypack configuration."""
+    adapter = YunohostAdapter(settings=Settings(broker_socket_path=tmp_path / "broker.sock"))
+
+    with pytest.raises(PolypackUnavailableError, match="Polypack integration is not configured"):
+        adapter.memory_list_contexts()
 
 
 def test_apps_list():
