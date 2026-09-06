@@ -27,6 +27,8 @@ PHASE6_WRITE_TOOLS = {
 APP_CHANGE_URL_TOOLS = {"app_change_url"}
 MIGRATIONS_TOOLS = {"migrations_list", "migrations_state", "migrations_run"}
 FIREWALL_TOOLS = {"firewall_list", "firewall_is_open", "firewall_open", "firewall_close", "firewall_reload"}
+SETTINGS_TOOLS = {"settings_list", "settings_get", "settings_set"}
+REGENCONF_TOOLS = {"regenconf_pending", "regenconf_apply"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
@@ -124,6 +126,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | APP_CHANGE_URL_TOOLS
             | MIGRATIONS_TOOLS
             | FIREWALL_TOOLS
+            | SETTINGS_TOOLS
+            | REGENCONF_TOOLS
             | PHASE7_TOOLS
             | PHASE8_TOOLS
             | PHASE10_TOOLS
@@ -165,6 +169,9 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("migrations_state", {}),
         ("firewall_list", {}),
         ("firewall_is_open", {"port": 443, "protocol": "tcp"}),
+        ("settings_list", {}),
+        ("settings_get", {"key": "example.setting"}),
+        ("regenconf_pending", {}),
     ],
 )
 async def test_phase4_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
@@ -252,6 +259,8 @@ async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
         ("firewall_open", {"port": 8080, "protocol": "tcp"}),
         ("firewall_close", {"port": 8080, "protocol": "tcp"}),
         ("firewall_reload", {}),
+        ("settings_set", {"key": "example.setting", "value": "1"}),
+        ("regenconf_apply", {}),
     ],
 )
 async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool: str, args: dict):

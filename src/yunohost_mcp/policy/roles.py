@@ -39,6 +39,8 @@ _READONLY: frozenset[Scope] = frozenset(
         Scope.CATALOG_VERIFY,
         Scope.FIREWALL_READ,
         Scope.APPS_CONFIG_READ,
+        Scope.SETTINGS_READ,
+        Scope.REGENCONF_READ,
     }
 )
 

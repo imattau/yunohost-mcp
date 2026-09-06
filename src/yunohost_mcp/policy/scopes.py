@@ -71,6 +71,26 @@ class Scope(StrEnum):
     # already gated at.
     FIREWALL_WRITE = "firewall.write"
 
+    # settings_get/settings_list - YunoHost's global settings (SSO
+    # behavior, security toggles, misc display options). Read-only, safe
+    # for every role that already gets server.read.
+    SETTINGS_READ = "settings.read"
+    # settings_set - global settings apply server-wide (e.g. disabling
+    # password auth, SSO panel behavior) - same risk class as
+    # FIREWALL_WRITE: administrator-only, owner-co-signed (policy/rules.py).
+    SETTINGS_WRITE = "settings.write"
+
+    # tools_regen_conf's list_pending mode - which system-service config
+    # files (nginx, ssowat, mysql, ...) are out of date vs. YunoHost's
+    # current internal state. Makes no changes, safe alongside the other
+    # *_READ scopes.
+    REGENCONF_READ = "regenconf.read"
+    # tools_regen_conf's apply mode - force=True can overwrite a manually-
+    # edited config file, and a bad regeneration of e.g. nginx/ssowat can
+    # lock the admin out same as FIREWALL_WRITE - administrator-only,
+    # owner-co-signed.
+    REGENCONF_WRITE = "regenconf.write"
+
     PACKAGES_INSPECT = "packages.inspect"
     PACKAGES_TEST = "packages.test"
 

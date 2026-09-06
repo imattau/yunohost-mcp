@@ -2265,6 +2265,82 @@ class YunohostAdapter:
         firewall_reload(skip_upnp=skip_upnp)
         return {"fake": False, "reloaded": True}
 
+    # -- Settings ---------------------------------------------------------
+    #
+    # yunohost.settings.settings_{list,get,set} are plain functions - not
+    # @is_unit_operation-decorated, no transitive yunohost.utils.form
+    # import - same in-process _import_attr pattern as migrations/firewall
+    # above.
+
+    def settings_list(self, full: bool = False) -> dict[str, Any]:
+        brokered = self._broker_call("settings.list", {"full": full})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "settings": {}}
+        settings_list = _import_attr("yunohost.settings", "settings_list")
+        return {"fake": False, "settings": settings_list(full=full)}
+
+    def settings_get(self, key: str, full: bool = False) -> dict[str, Any]:
+        brokered = self._broker_call("settings.get", {"key": key, "full": full})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "key": key, "value": None}
+        settings_get = _import_attr("yunohost.settings", "settings_get")
+        return {"fake": False, "key": key, "value": settings_get(key, full=full)}
+
+    def settings_set(self, key: str, value: Any, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "settings.set", {"key": key, "value": value, "confirmation_id": confirmation_id}
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "key": key, "value": value}
+        settings_set = _import_attr("yunohost.settings", "settings_set")
+        settings_set(key, value)
+        # settings_set() returns None - read the value back so the caller
+        # gets confirmation of what actually landed (e.g. a coerced type)
+        # without a separate settings_get() round trip.
+        settings_get = _import_attr("yunohost.settings", "settings_get")
+        return {"fake": False, "key": key, "value": settings_get(key)}
+
+    # -- Regen-conf ---------------------------------------------------------
+    #
+    # yunohost.regenconf.regen_conf() covers both "list pending diffs"
+    # (list_pending=True, makes no changes) and "actually apply" in a
+    # single underlying function - split into two adapter/tool calls
+    # anyway, same read/write split as firewall_list/firewall_open, so
+    # listing pending diffs never needs a scope beyond *_READ.
+
+    def regenconf_pending(self, names: list[str] | None = None, with_diff: bool = False) -> dict[str, Any]:
+        brokered = self._broker_call("regenconf.pending", {"names": names, "with_diff": with_diff})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "pending": {}}
+        regen_conf = _import_attr("yunohost.regenconf", "regen_conf")
+        result = regen_conf(names=names or [], with_diff=with_diff, list_pending=True)
+        return {"fake": False, "pending": result}
+
+    def regenconf_apply(
+        self,
+        names: list[str] | None = None,
+        force: bool = False,
+        confirmation_id: str | None = None,
+    ) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "regenconf.apply", {"names": names, "force": force, "confirmation_id": confirmation_id}
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "applied": {}}
+        regen_conf = _import_attr("yunohost.regenconf", "regen_conf")
+        result = regen_conf(names=names or [], force=force)
+        return {"fake": False, "applied": result}
+
     # -- Phase 8: package development -------------------------------------
     #
     # `source` throughout is whatever app_manifest()/app_install() already

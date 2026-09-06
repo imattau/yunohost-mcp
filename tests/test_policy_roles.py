@@ -69,6 +69,25 @@ def test_only_administrator_can_change_firewall_or_run_migrations():
     assert Scope.SYSTEM_MIGRATE in ROLE_SCOPES["administrator"]
 
 
+def test_every_role_can_read_settings_and_pending_regenconf():
+    # settings.read (settings_list/settings_get) and regenconf.read
+    # (regenconf_pending) are diagnostic, same tier as firewall.read -
+    # sit on _READONLY.
+    for role in ROLE_SCOPES:
+        assert Scope.SETTINGS_READ in ROLE_SCOPES[role], role
+        assert Scope.REGENCONF_READ in ROLE_SCOPES[role], role
+
+
+def test_only_administrator_can_write_settings_or_apply_regenconf():
+    # Same exclusivity/risk class as FIREWALL_WRITE/SYSTEM_MIGRATE above -
+    # both can change server-wide, externally-visible behavior in one call.
+    for role in ("readonly", "operator", "app-admin", "package-developer"):
+        assert Scope.SETTINGS_WRITE not in ROLE_SCOPES[role], role
+        assert Scope.REGENCONF_WRITE not in ROLE_SCOPES[role], role
+    assert Scope.SETTINGS_WRITE in ROLE_SCOPES["administrator"]
+    assert Scope.REGENCONF_WRITE in ROLE_SCOPES["administrator"]
+
+
 def test_roles_are_strictly_hierarchical_below_administrator():
     # readonly < operator < app-admin < package-developer < administrator -
     # each a strict superset of the one before, not independent branches

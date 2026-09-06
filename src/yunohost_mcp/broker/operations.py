@@ -869,6 +869,73 @@ def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
     )
 
 
+def _settings_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"full"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown settings list argument")
+    full = arguments.get("full", False)
+    if not isinstance(full, bool):
+        raise ValueError("full must be a boolean")
+    return adapter.settings_list(full=full)
+
+
+def _settings_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"key", "full"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown settings get argument")
+    key = _bounded_string(arguments, "key", 128, required=True)
+    full = arguments.get("full", False)
+    if not isinstance(full, bool):
+        raise ValueError("full must be a boolean")
+    return adapter.settings_get(key, full=full)
+
+
+def _settings_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"key", "value", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown settings set argument")
+    key = _bounded_string(arguments, "key", 128, required=True)
+    value = arguments.get("value")
+    if not isinstance(value, str) or len(value) > 8192:
+        raise ValueError("value must be a bounded string")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.settings_set(key, value, confirmation_id=confirmation_id)
+
+
+def _names_list(arguments: dict[str, Any]) -> list[str] | None:
+    names = arguments.get("names")
+    if names is None:
+        return None
+    if not isinstance(names, list) or not all(isinstance(item, str) and len(item) <= 128 for item in names):
+        raise ValueError("names must be a list of bounded strings")
+    return names
+
+
+def _regenconf_pending(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"names", "with_diff"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown regenconf pending argument")
+    with_diff = arguments.get("with_diff", False)
+    if not isinstance(with_diff, bool):
+        raise ValueError("with_diff must be a boolean")
+    return adapter.regenconf_pending(names=_names_list(arguments), with_diff=with_diff)
+
+
+def _regenconf_apply(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"names", "force", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown regenconf apply argument")
+    force = arguments.get("force", False)
+    if not isinstance(force, bool):
+        raise ValueError("force must be a boolean")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.regenconf_apply(names=_names_list(arguments), force=force, confirmation_id=confirmation_id)
+
+
 OPERATIONS: dict[str, BrokerOperation] = {
     "server.info": BrokerOperation("server.info", "server.read", _no_args(YunohostAdapter.server_info)),
     "health.check": BrokerOperation("health.check", "diagnosis.read", _no_args(YunohostAdapter.health_check)),
@@ -946,4 +1013,9 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "user.permission_remove": BrokerOperation("user.permission_remove", "users.write", _permission_remove),
     "domain.add": BrokerOperation("domain.add", "domains.write", _domain_add),
     "domain.cert_install": BrokerOperation("domain.cert_install", "domains.write", _domain_cert_install),
+    "settings.list": BrokerOperation("settings.list", "settings.read", _settings_list),
+    "settings.get": BrokerOperation("settings.get", "settings.read", _settings_get),
+    "settings.set": BrokerOperation("settings.set", "settings.write", _settings_set),
+    "regenconf.pending": BrokerOperation("regenconf.pending", "regenconf.read", _regenconf_pending),
+    "regenconf.apply": BrokerOperation("regenconf.apply", "regenconf.write", _regenconf_apply),
 }

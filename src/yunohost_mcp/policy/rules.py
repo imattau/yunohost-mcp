@@ -130,6 +130,13 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # port/rule can lock the admin out of their own server with no
     # MCP-level undo.
     "firewall.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # Global settings apply server-wide (SSO behavior, auth policy, ...) -
+    # same risk class as firewall.write.
+    "settings.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # force=True can overwrite a manually-edited config file, and a bad
+    # regeneration of e.g. nginx/ssowat can lock the admin out - same risk
+    # class as firewall.write.
+    "regenconf.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # Not a write, but owner-signature-gated for the same reason as the
     # tier above: the audit trail includes every identity's calls, not
     # just the requester's own, so app-admin (which now has Scope.

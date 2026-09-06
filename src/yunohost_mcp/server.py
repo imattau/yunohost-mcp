@@ -80,6 +80,13 @@ already in this file - no new yunohost.* call exists anywhere in Phase 14.
 They still run through the same @require_scope/@audited_write/policy-check
 machinery as the primitives they're built from, per PLAN.md's explicit
 "these workflows should still run through the same policy engine".
+Phase 15: settings_list/settings_get/settings_set (global YunoHost
+settings) and regenconf_pending/regenconf_apply (yunohost.regenconf) -
+gap-filled after auditing this tool surface against full YunoHost admin
+capability. settings_set/regenconf_apply are gated the same as
+firewall_open/close: administrator-only, confirmation + owner co-signature
+(policy/rules.py) - both can change server-wide, externally-visible
+behavior (SSO/auth policy, or a service's live config) in one call.
 """
 
 from __future__ import annotations
@@ -1622,6 +1629,99 @@ def firewall_reload(skip_upnp: bool = False, confirmation_id: str | None = None)
     this is the point at which any pending rule change actually takes
     effect."""
     return adapter.firewall_reload(skip_upnp=skip_upnp, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SETTINGS_READ)
+def settings_list(full: bool = False) -> dict[str, Any]:
+    """List YunoHost's global settings (SSO behavior, security toggles,
+    misc display options) and their current values. `full` additionally
+    returns each setting's type/description/default. Read-only."""
+    return adapter.settings_list(full=full)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SETTINGS_READ)
+def settings_get(key: str, full: bool = False) -> dict[str, Any]:
+    """Read one global setting by key (see settings_list for known keys).
+    `full` additionally returns its type/description/default. Read-only."""
+    return adapter.settings_get(key, full=full)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SETTINGS_WRITE)
+@audited_write("settings.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "settings.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda key, value, **_: {
+        "action": "set global setting",
+        "key": key,
+        "value": value,
+        "warning": "Global settings apply server-wide immediately (e.g. SSO behavior, auth "
+        "policy) - same risk tier as firewall_open/close.",
+    },
+)
+def settings_set(key: str, value: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Set one global setting (see settings_list for known keys). `value`
+    is always passed as a string - YunoHost coerces it to the setting's
+    actual type internally. Requires confirmation and owner co-signature,
+    same tier as firewall_open/firewall_close."""
+    return adapter.settings_set(key, value, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.REGENCONF_READ)
+def regenconf_pending(names: list[str] | None = None, with_diff: bool = False) -> dict[str, Any]:
+    """List system-service config files (nginx, ssowat, mysql, ...) that
+    are out of date versus YunoHost's current internal state, without
+    changing anything. `names` restricts the check to specific categories
+    (default: all); `with_diff` includes the actual diff text. Read-only -
+    call this before regenconf_apply to see what would change."""
+    return adapter.regenconf_pending(names=names, with_diff=with_diff)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.REGENCONF_WRITE)
+@audited_write("regenconf.write", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "regenconf.write",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda names=None, force=False, **_: {
+        "action": "apply pending config regeneration",
+        "names": names or [],
+        "force": force,
+        "warning": "Rewrites system-service config files (nginx, ssowat, mysql, ...) in place. "
+        "force=true additionally overwrites any file manually edited outside YunoHost - check "
+        "regenconf_pending first to see what would change.",
+    },
+)
+def regenconf_apply(
+    names: list[str] | None = None,
+    force: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Regenerate (apply) pending system-service config files. `names`
+    restricts this to specific categories (default: all pending); `force`
+    additionally overwrites manually-edited files. Requires confirmation
+    and owner co-signature, same tier as firewall_open/firewall_close - a
+    bad regeneration can lock the admin out the same way a bad firewall
+    rule can."""
+    return adapter.regenconf_apply(names=names, force=force, confirmation_id=confirmation_id)
 
 
 @mcp.tool()

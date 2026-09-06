@@ -47,11 +47,11 @@ Role names are convenience bundles over scopes and can be combined. Use `whoami`
 
 Roles are strictly hierarchical below `administrator`: `readonly` < `operator` < `app-admin` < `package-developer`, each a superset of the one before.
 
-- `readonly`: inspection, diagnosis, status, logs, update metadata, backup listing, package/catalog inspection and verification, app config-panel reads, firewall reads.
+- `readonly`: inspection, diagnosis, status, logs, update metadata, backup listing, package/catalog inspection and verification, app config-panel reads, firewall reads, global settings reads, pending config-regeneration reads.
 - `operator`: readonly plus service restarts and creating backups.
 - `app-admin`: operator plus normal app install/upgrade/remove, app config-panel writes, `app_change_url`, domain writes (including certificate install), user writes/deletion, backup restore/delete, and `system_upgrade`. High-risk actions still require policy confirmation and, where configured, owner approval.
 - `package-developer`: app-admin plus package test lifecycle, catalog publication, and the optional Polypack `memory_*` bridge (see "Memory" below). Package tests are intended for fast iteration but can mutate the server.
-- `administrator`: all scopes, including audit reads, owner co-signing, `migrations_run`, and `firewall_open`/`firewall_close`/`firewall_reload` — the only role that gets those last two categories at all, not just a stricter gate on them. This does not make unsafe requests automatically appropriate.
+- `administrator`: all scopes, including audit reads, owner co-signing, `migrations_run`, `firewall_open`/`firewall_close`/`firewall_reload`, `settings_set`, and `regenconf_apply` — the only role that gets those categories at all, not just a stricter gate on them. This does not make unsafe requests automatically appropriate.
 
 ## Common workflows
 
@@ -96,6 +96,12 @@ For identity and access changes, verify the exact resulting membership, permissi
 ### Migrations
 
 `migrations_list` (optionally filtered by `pending`/`done`) and `migrations_state` are read-only, under the same scope as `updates_check`. `migrations_run` is administrator-only, confirmation *and* owner-co-signature gated, and defaults to running every pending migration if `targets` is left empty — `skip` and `force_rerun` both require an explicit `targets` list, never applied to "all pending." A migration with a disclaimer (visible via `migrations_list`) is skipped unless `accept_disclaimer` is set; treat that disclaimer as real content to surface to the user, not boilerplate to wave through.
+
+### Settings and configuration
+
+`settings_list`/`settings_get` are read-only and available to every role; `settings_get(key, full=True)` returns a setting's type/description/default alongside its current value. `settings_set` is administrator-only, confirmation *and* owner-co-signature gated — same tier as `firewall_open`/`firewall_close`, since a global setting (SSO behavior, auth policy, ...) applies server-wide immediately. Always pass `value` as a string; YunoHost coerces it to the setting's real type internally. State the exact key and new value, get it confirmed, and re-check with `settings_get` afterward.
+
+`regenconf_pending` is read-only and available to every role — call it first to see which system-service config files (nginx, ssowat, mysql, ...) are out of date and, with `with_diff=True`, what would actually change. `regenconf_apply` is administrator-only, confirmation *and* owner-co-signature gated — same tier as `firewall_open`/`firewall_close`, since it rewrites those files in place and `force=True` additionally overwrites anything manually edited outside YunoHost. Never pass `force=True` without first showing the user what `regenconf_pending(with_diff=True)` says would be lost.
 
 ### Package development
 
