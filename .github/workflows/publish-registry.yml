@@ -42,5 +42,34 @@ jobs:
           jq --arg version "$version" '.version = $version | .packages[0].version = $version' server.json > server.json.tmp
           mv server.json.tmp server.json
 
+      - name: Wait for PyPI package to be visible
+        shell: bash
+        run: |
+          set -euo pipefail
+          identifier="$(jq -r '.packages[0].identifier' server.json)"
+          version="$(jq -r '.packages[0].version' server.json)"
+          normalized="${identifier//-/_}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS "https://pypi.org/simple/${identifier}/" | grep -qF "${normalized}-${version}"; then
+              echo "Found ${identifier} ${version} on PyPI."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: ${identifier} ${version} not yet visible on PyPI, waiting 15s..."
+            sleep 15
+          done
+          echo "Timed out waiting for ${identifier} ${version} to appear on PyPI." >&2
+          exit 1
+
       - name: Publish server.json
-        run: "$RUNNER_TEMP/mcp-publisher publish server.json"
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 5); do
+            if "$RUNNER_TEMP/mcp-publisher" publish server.json; then
+              exit 0
+            fi
+            echo "Publish attempt ${attempt} failed, retrying in 15s..."
+            sleep 15
+          done
+          echo "All publish attempts failed." >&2
+          exit 1
