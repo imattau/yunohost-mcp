@@ -436,6 +436,7 @@ async def _offer(args: argparse.Namespace) -> None:
 
 
 async def _pair(args: argparse.Namespace) -> None:
+    expected_owner_pubkey = _owner_pubkey_hex(args.owner_npub)
     session_path = Path(args.session_file)
     existing_session = ApprovalSession.load(session_path)
     if existing_session and existing_session.bunker_uri and not args.repair:
@@ -461,6 +462,10 @@ async def _pair(args: argparse.Namespace) -> None:
         signer_pubkey = await connect.get_public_key_async()
         if signer_pubkey is None:
             raise ApprovalHelperError("could not reach the signer at that bunker:// URI - check it's current and try again")
+        if signer_pubkey.to_hex() != expected_owner_pubkey:
+            raise ApprovalHelperError(
+                "the bunker signer does not match the configured owner identity; refusing to save this pairing"
+            )
         session = ApprovalSession(app_secret_key=app_keys.secret_key().to_hex(), bunker_uri=str(await connect.bunker_uri()))
         session.save(session_path)
         Path(args.offer_file).unlink(missing_ok=True)  # any pending offer is moot now
@@ -489,12 +494,35 @@ async def _pair(args: argparse.Namespace) -> None:
     signer_pubkey = await connect.get_public_key_async()
     if signer_pubkey is None:
         raise ApprovalHelperError("pairing timed out or was rejected by the signer - the same link is still valid, try again")
+    if signer_pubkey.to_hex() != expected_owner_pubkey:
+        raise ApprovalHelperError(
+            "the signer does not match the configured owner identity; refusing to save this pairing"
+        )
 
     session = ApprovalSession(app_secret_key=offer.app_secret_key, bunker_uri=str(await connect.bunker_uri()))
     session.save(session_path)
     offer_path.unlink(missing_ok=True)  # consumed - the next `offer` call generates a fresh one
     print(f"{APP_NAME}: paired with signer {signer_pubkey.to_bech32()}", file=sys.stderr)
     print(f"{APP_NAME}: session saved to {session_path}", file=sys.stderr)
+
+
+def _owner_pubkey_hex(raw: str | None) -> str:
+    """Return the required owner pubkey for a pairing operation.
+
+    Pairing must carry an explicit owner identity so a remote caller cannot
+    pair an arbitrary bunker and rely on a later approval attempt to catch it.
+    ``offer`` remains able to omit this argument because it only creates a
+    pending link; ``pair`` is the point where the signer becomes trusted.
+    """
+    if not raw:
+        raise ApprovalHelperError("pair requires --owner-npub so the signer can be bound to the configured owner")
+    try:
+        value = npub_to_hex(raw) if raw.startswith("npub1") else raw.lower()
+    except Bech32Error as exc:
+        raise ApprovalHelperError(f"{raw!r} is not a valid owner npub: {exc}") from exc
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ApprovalHelperError("--owner-npub must be a valid npub or 64-character hex pubkey")
+    return value
 
 
 def _print_status(args: argparse.Namespace) -> None:

@@ -562,6 +562,95 @@ async def test_app_change_url_requires_then_accepts_a_plain_confirmation():
 
 
 @pytest.mark.anyio
+async def test_mcp_control_plane_config_requires_owner_cosignature_and_redacts_value():
+    async with Client(mcp) as client:
+        bunker = "bunker://" + "a" * 64 + "?relay=wss://relay.example&secret=do-not-log"
+        first = await client.call_tool(
+            "app_config_set",
+            {"app": "yunohost_mcp", "key": "owner.pair.pair_bunker_uri", "value": bunker},
+        )
+        assert first.is_error is not True, first.content
+        plan = first.structured_content
+        assert plan["owner_signature_required"] is True
+        assert plan["operation_plan"]["value"] == "[REDACTED]"
+        confirmation_id = plan["confirmation_id"]
+
+        await _approve_as_second_admin(client, confirmation_id)
+        confirmed = await client.call_tool(
+            "app_config_set",
+            {
+                "app": "yunohost_mcp",
+                "key": "owner.pair.pair_bunker_uri",
+                "value": bunker,
+                "confirmation_id": confirmation_id,
+            },
+        )
+        assert confirmed.is_error is not True, confirmed.content
+
+        entries = audit_log.list()
+        relevant = [entry for entry in entries if entry["tool"] == "apps.config"]
+        assert relevant
+        assert all("do-not-log" not in json.dumps(entry) for entry in relevant)
+
+
+@pytest.mark.anyio
+async def test_mcp_control_plane_setting_requires_owner_cosignature():
+    async with Client(mcp) as client:
+        first = await client.call_tool(
+            "app_setting_set", {"app": "yunohost_mcp", "key": "admin_npub", "value": "b" * 64}
+        )
+        assert first.is_error is not True, first.content
+        assert first.structured_content["owner_signature_required"] is True
+        confirmation_id = first.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
+        confirmed = await client.call_tool(
+            "app_setting_set",
+            {
+                "app": "yunohost_mcp",
+                "key": "admin_npub",
+                "value": "b" * 64,
+                "confirmation_id": confirmation_id,
+            },
+        )
+        assert confirmed.is_error is not True, confirmed.content
+
+
+@pytest.mark.anyio
+async def test_mcp_control_plane_upgrade_requires_owner_cosignature():
+    async with Client(mcp) as client:
+        first = await client.call_tool("app_upgrade", {"app": "yunohost_mcp"})
+        assert first.is_error is not True, first.content
+        assert first.structured_content["owner_signature_required"] is True
+
+
+@pytest.mark.anyio
+async def test_mcp_control_plane_remove_and_change_url_require_owner_cosignature(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    monkeypatch.setattr(server_module, "check_recent_backup", lambda *args, **kwargs: None)
+    async with Client(mcp) as client:
+        remove = await client.call_tool("app_remove", {"app": "yunohost_mcp"})
+        assert remove.is_error is not True, remove.content
+        assert remove.structured_content["owner_signature_required"] is True
+
+        change_url = await client.call_tool(
+            "app_change_url", {"app": "yunohost_mcp", "domain": "example.com", "path": "/mcp"}
+        )
+        assert change_url.is_error is not True, change_url.content
+        assert change_url.structured_content["owner_signature_required"] is True
+
+
+@pytest.mark.anyio
+async def test_execute_plan_cannot_bypass_control_plane_upgrade_gate():
+    async with Client(mcp) as client:
+        planned = await client.call_tool("plan_app_upgrade", {"app": "yunohost_mcp"})
+        assert planned.is_error is not True, planned.content
+        result = await client.call_tool("execute_plan", {"plan_id": planned.structured_content["plan_id"]})
+        assert result.is_error is True
+        assert "must use app_upgrade" in str(result.content)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("tool", "args"),
     [

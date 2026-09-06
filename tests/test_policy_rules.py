@@ -13,6 +13,12 @@ from yunohost_mcp.policy.rules import (
     _parse_size,
     check_free_space,
     check_recent_backup,
+    app_config_policy_key,
+    app_change_url_policy_key,
+    app_remove_policy_key,
+    app_setting_policy_key,
+    app_upgrade_policy_key,
+    CONTROL_PLANE_APP_ID,
     load_policy,
     user_create_policy_key,
     user_group_update_policy_key,
@@ -75,6 +81,32 @@ def test_admin_access_policy_is_argument_sensitive():
     assert user_create_policy_key(admin=True) == "users.admin_access"
     assert user_group_update_policy_key(groupname="editors") == "users.write"
     assert user_group_update_policy_key(groupname="admins") == "users.admin_access"
+
+
+def test_control_plane_policy_selectors_owner_gate_the_mcp_app_only():
+    assert app_config_policy_key(app=CONTROL_PLANE_APP_ID, key="owner.pair.pair_bunker_uri") == "apps.control_plane_config"
+    assert app_setting_policy_key(app=CONTROL_PLANE_APP_ID, key="admin_npub") == "apps.control_plane_setting"
+    assert app_upgrade_policy_key(app=CONTROL_PLANE_APP_ID) == "apps.control_plane_upgrade"
+    assert app_upgrade_policy_key() == "apps.control_plane_upgrade"
+    assert app_remove_policy_key(app=CONTROL_PLANE_APP_ID) == "apps.control_plane_remove"
+    assert app_change_url_policy_key(app=CONTROL_PLANE_APP_ID) == "apps.control_plane_change_url"
+    assert app_config_policy_key(app="nextcloud", key="main.foo") == "apps.config"
+    assert app_setting_policy_key(app="nextcloud", key="install_dir") == "apps.setting"
+    assert app_upgrade_policy_key(app="nextcloud") == "apps.upgrade"
+    assert app_remove_policy_key(app="nextcloud") == "apps.remove"
+    assert app_change_url_policy_key(app="nextcloud") == "apps.change_url"
+
+
+def test_control_plane_rules_require_owner_signature():
+    for name in (
+        "apps.control_plane_config",
+        "apps.control_plane_setting",
+        "apps.control_plane_upgrade",
+        "apps.control_plane_remove",
+        "apps.control_plane_change_url",
+    ):
+        assert DEFAULT_POLICY[name].require_confirmation is True
+        assert DEFAULT_POLICY[name].require_owner_signature is True
 
 
 def test_missing_policy_file_yields_defaults(tmp_path: Path):

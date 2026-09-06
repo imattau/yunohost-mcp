@@ -28,7 +28,16 @@ from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.policy.confirmation import SQLiteConfirmationStore
 from yunohost_mcp.policy.confirmation import ConfirmationError
 from yunohost_mcp.policy.package_sessions import PackageTestSessionError, PackageTestSessionStore, session_path
-from yunohost_mcp.policy.rules import check_free_space, check_recent_backup, load_policy
+from yunohost_mcp.policy.rules import (
+    app_config_policy_key,
+    app_change_url_policy_key,
+    app_remove_policy_key,
+    app_setting_policy_key,
+    app_upgrade_policy_key,
+    check_free_space,
+    check_recent_backup,
+    load_policy,
+)
 from yunohost_mcp.redaction import redact_text
 from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError
 
@@ -88,6 +97,7 @@ _POLICY_NAME_BY_OPERATION: dict[str, str] = {
 # DEFAULT_POLICY entry with require_confirmation=True needs an entry.
 _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
     "app.upgrade": ("app", "force", "url"),
+    "safe.upgrade": ("app",),
     "app.remove": ("app", "purge"),
     "app.change_url": ("app", "domain", "path"),
     "app.config_set": ("app", "key", "value"),
@@ -131,6 +141,18 @@ _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
 def _policy_name_for_operation(operation_name: str, arguments: dict) -> str | None:
     """Resolve argument-sensitive policy tiers at the root boundary."""
     policy_name = _POLICY_NAME_BY_OPERATION.get(operation_name)
+    if operation_name == "app.upgrade":
+        return app_upgrade_policy_key(**arguments)
+    if operation_name == "safe.upgrade":
+        return app_upgrade_policy_key(**arguments)
+    if operation_name == "app.config_set":
+        return app_config_policy_key(**arguments)
+    if operation_name == "app.setting_set":
+        return app_setting_policy_key(**arguments)
+    if operation_name == "app.remove":
+        return app_remove_policy_key(**arguments)
+    if operation_name == "app.change_url":
+        return app_change_url_policy_key(**arguments)
     if operation_name == "user.create" and arguments.get("admin", False) is True:
         return "users.admin_access"
     if operation_name == "user.group_update" and arguments.get("groupname") == "admins":

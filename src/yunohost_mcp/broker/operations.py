@@ -435,7 +435,7 @@ def _package_remove_test(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
 
 
 def _safe_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) != {"app"}:
+    if set(arguments) - {"app", "confirmation_id"}:
         raise ValueError("app is required")
     app = arguments["app"]
     if not isinstance(app, str) or not app or len(app) > 128:

@@ -3350,7 +3350,7 @@ class YunohostAdapter:
         except Exception as exc:  # noqa: BLE001 - report as unreachable, don't crash the workflow
             return {"fake": False, "url": url, "reachable": False, "status_code": None, "error": str(exc)}
 
-    def safe_upgrade(self, app: str) -> dict[str, Any]:
+    def safe_upgrade(self, app: str, confirmation_id: str | None = None) -> dict[str, Any]:
         """PLAN.md Phase 14's flagship composite: diagnosis -> app
         inspection -> a fresh safety backup -> upgrade -> post-upgrade
         checks -> a second diagnosis -> one report. Disk-space and
@@ -3360,7 +3360,7 @@ class YunohostAdapter:
         itself. Stops at the first failing step; each later step depends on
         the previous one having actually happened.
         """
-        brokered = self._broker_call("safe.upgrade", {"app": app})
+        brokered = self._broker_call("safe.upgrade", {"app": app, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         steps: list[dict[str, Any]] = []

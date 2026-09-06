@@ -188,10 +188,10 @@ For reverse-proxy deployments, set `YUNOHOST_MCP_PUBLIC_BASE_URL` to the exact p
 One-time setup, on whatever device the owner keeps their signer app on:
 
 ```
-yunohost-mcp-approve pair
+yunohost-mcp-approve pair --owner-npub <owner-npub>
 ```
 
-Prints a `nostrconnect://` URI to open in the signer app. This persists a reconnectable session locally so later approvals don't need to re-pair. If the signer app can instead export a `bunker://` connection string itself (its own "add a connection" feature), `yunohost-mcp-approve pair --bunker-uri <uri>` connects immediately using that instead - no link to open, nothing to wait on.
+Prints a `nostrconnect://` URI to open in the signer app. This persists a reconnectable session locally so later approvals don't need to re-pair. If the signer app can instead export a `bunker://` connection string itself (its own "add a connection" feature), `yunohost-mcp-approve pair --owner-npub <owner-npub> --bunker-uri <uri>` connects immediately using that instead - no link to open, nothing to wait on. Pairing requires the explicit owner key so a transport endpoint cannot be substituted for the configured owner.
 
 To review and approve a specific pending operation:
 

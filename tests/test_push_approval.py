@@ -8,7 +8,12 @@ test_approve.py draws for approve.py's own live-network pieces).
 
 from __future__ import annotations
 
-from yunohost_mcp.push_approval import PUSH_APPROVAL_KIND, _build_push_content, _verify_and_extract
+from yunohost_mcp.push_approval import (
+    PUSH_APPROVAL_KIND,
+    _build_push_content,
+    _bunker_matches_owner,
+    _verify_and_extract,
+)
 
 
 def test_build_push_content_includes_tool_hash_and_confirmation_id():
@@ -119,6 +124,13 @@ def test_verify_and_extract_rejects_missing_tags():
 
 def test_push_approval_kind_is_distinct_from_nip98():
     assert PUSH_APPROVAL_KIND != 27235
+
+
+def test_bunker_transport_must_name_the_configured_owner():
+    owner = "a" * 64
+    assert _bunker_matches_owner(f"bunker://{owner}?relay=wss://relay.example&secret=x", owner)
+    assert not _bunker_matches_owner("bunker://" + "b" * 64 + "?relay=wss://relay.example&secret=x", owner)
+    assert not _bunker_matches_owner("not-a-bunker://" + owner, owner)
 
 
 def test_verify_and_extract_accepts_a_real_signed_nostr_sdk_event():

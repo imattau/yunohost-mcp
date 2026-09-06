@@ -213,6 +213,15 @@ def test_broker_selects_owner_cosign_policy_for_admin_grants():
     assert _policy_name_for_operation("user.group_update", {"groupname": "editors"}) == "users.write"
 
 
+def test_broker_selects_control_plane_policy_for_mcp_app_mutations():
+    assert _policy_name_for_operation("app.upgrade", {"app": "yunohost_mcp"}) == "apps.control_plane_upgrade"
+    assert _policy_name_for_operation("safe.upgrade", {"app": "yunohost_mcp"}) == "apps.control_plane_upgrade"
+    assert _policy_name_for_operation("app.config_set", {"app": "yunohost_mcp"}) == "apps.control_plane_config"
+    assert _policy_name_for_operation("app.setting_set", {"app": "yunohost_mcp"}) == "apps.control_plane_setting"
+    assert _policy_name_for_operation("app.remove", {"app": "yunohost_mcp"}) == "apps.control_plane_remove"
+    assert _policy_name_for_operation("app.change_url", {"app": "yunohost_mcp"}) == "apps.control_plane_change_url"
+
+
 def test_helper_revalidates_a_real_nip98_signature(tmp_path):
     client_key = PrivateKey()
     client_pubkey = PublicKeyXOnly.from_valid_secret(client_key.secret).format().hex()

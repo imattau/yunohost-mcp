@@ -21,6 +21,7 @@ from yunohost_mcp.approve import (
     _build_nostrconnect_uri,
     _build_parser,
     _confirm_interactively,
+    _owner_pubkey_hex,
     _parse_relay_urls_from_event_tags,
     _print_status,
     resolve_pair_relays,
@@ -32,6 +33,14 @@ def test_fresh_session_has_no_bunker_uri_yet():
     assert session.bunker_uri is None
     # A valid hex secret key, parseable back into real Keys.
     Keys.parse(session.app_secret_key)
+
+
+def test_pair_owner_pubkey_is_required_and_normalized():
+    assert _owner_pubkey_hex("A" * 64) == "a" * 64
+    with pytest.raises(Exception, match="requires --owner-npub"):
+        _owner_pubkey_hex(None)
+    with pytest.raises(Exception, match="64-character hex"):
+        _owner_pubkey_hex("not-a-pubkey")
 
 
 def test_fresh_sessions_get_distinct_app_keys():
@@ -389,5 +398,4 @@ def test_pair_subcommand_bunker_uri_defaults_to_none():
     parser = _build_parser()
     args = parser.parse_args(["pair"])
     assert args.bunker_uri is None
-
 

@@ -166,8 +166,14 @@ from yunohost_mcp.policy.package_sessions import PackageTestSessionError, Packag
 from yunohost_mcp.policy.rules import (
     PolicyRule,
     PolicyViolation,
+    CONTROL_PLANE_APP_ID,
     check_free_space,
     check_recent_backup,
+    app_config_policy_key,
+    app_change_url_policy_key,
+    app_remove_policy_key,
+    app_setting_policy_key,
+    app_upgrade_policy_key,
     load_policy,
     user_create_policy_key,
     user_group_update_policy_key,
@@ -236,6 +242,56 @@ def _notify_owner_pending(ticket: ConfirmationTicket) -> None:
         tool=ticket.tool,
         expires_at=ticket.expires_at,
     )
+
+
+def _control_plane_audit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Never persist MCP control-plane values in the audit trail.
+
+    The generic app primitives accept arbitrary strings, and the MCP config
+    panel includes bunker URIs containing channel secrets.  Redacting the
+    whole value for this app is safer than trying to predict every future
+    sensitive panel option.
+    """
+    if arguments.get("app") != CONTROL_PLANE_APP_ID:
+        return arguments
+    sanitized = dict(arguments)
+    if "value" in sanitized:
+        sanitized["value"] = "[REDACTED]"
+    return sanitized
+
+
+def _app_config_plan(app: str, key: str, value: str, **_: Any) -> dict[str, Any]:
+    return {
+        "action": "set app config",
+        "app": app,
+        "key": key,
+        "value": "[REDACTED]" if app == CONTROL_PLANE_APP_ID else value,
+        "warning": (
+            "This changes the YunoHost MCP control plane and requires the configured owner's co-signature."
+            if app == CONTROL_PLANE_APP_ID
+            else "Applies immediately and typically restarts the app's service. "
+            "Call app_config_get(app, full=True) first to confirm this is the exact key you mean."
+        ),
+    }
+
+
+def _app_setting_plan(
+    app: str, key: str, value: str | None = None, delete: bool = False, **_: Any
+) -> dict[str, Any]:
+    return {
+        "action": "delete app setting" if delete else "set app setting",
+        "app": app,
+        "key": key,
+        "value": "[REDACTED]" if app == CONTROL_PLANE_APP_ID else value,
+        "warning": (
+            "This changes the YunoHost MCP control plane, including potentially its pinned owner identity, "
+            "and requires the configured owner's co-signature."
+            if app == CONTROL_PLANE_APP_ID
+            else "There is no schema behind these keys the way app_config_get(full=True) provides for "
+            "config-panel options. Call app_setting_get first to confirm the current value and that this "
+            "is the exact key you mean."
+        ),
+    }
 
 
 def _push_owner_approval(ticket: ConfirmationTicket) -> None:
@@ -1550,7 +1606,7 @@ def app_install(
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "apps.upgrade",
+    app_upgrade_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     checks=_check_apps_upgrade,
@@ -1611,6 +1667,14 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
     state (free space, backup age) may have drifted in between."""
     request = require_current_request()
     try:
+        pending = plan_store.peek(plan_id)
+    except ConfirmationError as exc:
+        raise ConfirmationError(f"invalid plan_id: {exc}") from exc
+    if pending.pubkey == request.pubkey and pending.plan.get("app") == CONTROL_PLANE_APP_ID:
+        raise ConfirmationError(
+            "planned upgrades of yunohost_mcp must use app_upgrade(), which requires owner co-signature"
+        )
+    try:
         ticket = plan_store.consume(plan_id, pubkey=request.pubkey, tool="plan.app_upgrade", arguments={})
     except ConfirmationError as exc:
         raise ConfirmationError(f"invalid plan_id: {exc}") from exc
@@ -1626,7 +1690,7 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
 @require_scope(Scope.APPS_REMOVE)
 @audited_write("apps.remove", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "apps.remove",
+    app_remove_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     checks=_check_apps_remove,
@@ -1654,7 +1718,7 @@ def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.change_url", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "apps.change_url",
+    app_change_url_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=lambda: settings.broker_socket_path is not None,
@@ -1685,20 +1749,15 @@ def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None
 @redact_response
 @translate_known_errors
 @require_scope(Scope.APPS_CONFIG_WRITE)
-@audited_write("apps.config", lock=write_lock, audit_log=audit_log)
+@audited_write(
+    "apps.config", lock=write_lock, audit_log=audit_log, argument_sanitizer=_control_plane_audit_arguments
+)
 @require_confirmation(
-    "apps.config",
+    app_config_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=lambda: settings.broker_socket_path is not None,
-    plan_builder=lambda app, key, value, **_: {
-        "action": "set app config",
-        "app": app,
-        "key": key,
-        "value": value,
-        "warning": "Applies immediately and typically restarts the app's service. "
-        "Call app_config_get(app, full=True) first to confirm this is the exact key you mean.",
-    },
+    plan_builder=_app_config_plan,
 )
 def app_config_set(app: str, key: str, value: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Set one config-panel setting on an installed app. Requires confirmation.
@@ -1715,21 +1774,15 @@ def app_config_set(app: str, key: str, value: str, confirmation_id: str | None =
 @redact_response
 @translate_known_errors
 @require_scope(Scope.APPS_SETTING_WRITE)
-@audited_write("apps.setting", lock=write_lock, audit_log=audit_log)
+@audited_write(
+    "apps.setting", lock=write_lock, audit_log=audit_log, argument_sanitizer=_control_plane_audit_arguments
+)
 @require_confirmation(
-    "apps.setting",
+    app_setting_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=lambda: settings.broker_socket_path is not None,
-    plan_builder=lambda app, key, value=None, delete=False, **_: {
-        "action": "delete app setting" if delete else "set app setting",
-        "app": app,
-        "key": key,
-        "value": value,
-        "warning": "There is no schema behind these keys the way app_config_get(full=True) "
-        "provides for config-panel options. Call app_setting_get first to confirm the "
-        "current value and that this is the exact key you mean.",
-    },
+    plan_builder=_app_setting_plan,
 )
 def app_setting_set(
     app: str, key: str, value: str | None = None, delete: bool = False, confirmation_id: str | None = None
@@ -2527,7 +2580,20 @@ def validate_server() -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.APPS_UPGRADE)
 @audited_write("apps.upgrade", lock=write_lock, audit_log=audit_log)
-def safe_upgrade(app: str) -> dict[str, Any]:
+@require_confirmation(
+    app_upgrade_policy_key,
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, **_: {
+        "action": "safely upgrade app",
+        "app": app,
+        "warning": "This upgrades the YunoHost MCP control plane and requires the configured owner's co-signature."
+        if app == CONTROL_PLANE_APP_ID
+        else "This creates a safety backup, upgrades the app, and runs post-upgrade health checks.",
+    },
+)
+def safe_upgrade(app: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """PLAN.md Phase 14's flagship workflow: diagnosis -> inspect app ->
     create a fresh safety backup -> upgrade -> check app/HTTP endpoint ->
     re-diagnose -> one report. Runs through apps.upgrade's own policy: free
@@ -2535,9 +2601,9 @@ def safe_upgrade(app: str) -> dict[str, Any]:
     space), and the backup requirement is re-verified after this workflow's
     own backup step actually happens, not just assumed to have worked.
     """
-    rule = policy_rules.get("apps.upgrade", PolicyRule())
+    rule = policy_rules.get(app_upgrade_policy_key(app=app), PolicyRule())
     check_free_space(rule, free_bytes=adapter.free_space_bytes())
-    result = adapter.safe_upgrade(app)
+    result = adapter.safe_upgrade(app, confirmation_id=confirmation_id)
     check_recent_backup(rule, archive_created_at=adapter.backup_created_at_times(), now=time.time())
     return result
 

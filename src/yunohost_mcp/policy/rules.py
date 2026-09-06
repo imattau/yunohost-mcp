@@ -60,6 +60,48 @@ class PolicyRule:
     require_owner_signature: bool = False
 
 
+CONTROL_PLANE_APP_ID = "yunohost_mcp"
+
+
+def app_config_policy_key(**arguments: object) -> str:
+    """Select the config policy, protecting this MCP app's control plane.
+
+    The package's own config panel can edit authorization identities and the
+    owner-approval channel.  Treat every config-panel write on this app as a
+    control-plane mutation; otherwise an app-admin could use the generic
+    app_config_set primitive to rewrite the MCP's security configuration.
+    """
+    return "apps.control_plane_config" if arguments.get("app") == CONTROL_PLANE_APP_ID else "apps.config"
+
+
+def app_setting_policy_key(**arguments: object) -> str:
+    """Protect all internal settings of the MCP package.
+
+    In particular, ``admin_npub`` is consumed by the package's systemd
+    template as the pinned owner identity.  There is no safe reason for a
+    remote agent to mutate arbitrary settings of its own control-plane app.
+    """
+    return "apps.control_plane_setting" if arguments.get("app") == CONTROL_PLANE_APP_ID else "apps.setting"
+
+
+def app_upgrade_policy_key(**arguments: object) -> str:
+    """Owner-gate upgrades that can rewrite the MCP control plane.
+
+    An omitted app means "all upgradable apps" and may include this app, so
+    it is protected too.  Ordinary app upgrades retain the existing policy.
+    """
+    app = arguments.get("app")
+    return "apps.control_plane_upgrade" if app in (None, CONTROL_PLANE_APP_ID) else "apps.upgrade"
+
+
+def app_remove_policy_key(**arguments: object) -> str:
+    return "apps.control_plane_remove" if arguments.get("app") == CONTROL_PLANE_APP_ID else "apps.remove"
+
+
+def app_change_url_policy_key(**arguments: object) -> str:
+    return "apps.control_plane_change_url" if arguments.get("app") == CONTROL_PLANE_APP_ID else "apps.change_url"
+
+
 _SIZE_UNITS = {"": 1, "B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -96,6 +138,18 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     "domains.dns": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "packages.test": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "apps.upgrade": PolicyRule(require_backup=True, minimum_free_space_bytes=_parse_size("2GB")),
+    "apps.control_plane_upgrade": PolicyRule(
+        require_confirmation=True,
+        require_owner_signature=True,
+        require_backup=True,
+        minimum_free_space_bytes=_parse_size("2GB"),
+    ),
+    "apps.control_plane_remove": PolicyRule(
+        require_confirmation=True,
+        require_owner_signature=True,
+        require_backup=True,
+        max_backup_age_seconds=_parse_duration("24h"),
+    ),
     "apps.remove": PolicyRule(
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")
     ),
@@ -104,14 +158,17 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # nginx conf and app settings), so a backup isn't the safety net a
     # confirmation is for domain_add-shaped writes.
     "apps.change_url": PolicyRule(require_confirmation=True),
+    "apps.control_plane_change_url": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # An app's config-panel settings are arbitrary and app-defined -
     # bounded to one already-installed app, not system-wide, so
     # confirmation-gated like domains.write/apps.change_url rather than
     # owner-signature-gated like the Phase 13 tier below.
     "apps.config": PolicyRule(require_confirmation=True),
+    "apps.control_plane_config": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # app_setting_set - same tier as apps.config above: bounded to one
     # already-installed app's own settings.yml, not system-wide.
     "apps.setting": PolicyRule(require_confirmation=True),
+    "apps.control_plane_setting": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # service_stop, unlike service.restart (ungated - restart is atomic),
     # can leave a service down with no automatic undo until service_start
     # is called. Still scoped to named services rather than system-wide,
