@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from yunohost_mcp.broker.operations import OPERATIONS
-from yunohost_mcp.broker.helper import authorize_request
+from yunohost_mcp.broker.helper import _format_internal_broker_error, authorize_request
 from yunohost_mcp.broker.protocol import (
     BrokerProtocolError,
     BrokerRequest,
@@ -91,6 +91,16 @@ def test_response_serializes_native_yunohost_values():
     )
 
     assert response["result"]["updated"] == "2026-09-05T10:00:00+00:00"
+
+
+def test_internal_broker_error_is_actionable_bounded_and_redacted():
+    error = _format_internal_broker_error(
+        RuntimeError("Request context not initialized; authorization=secret-value" * 100)
+    )
+
+    assert error.startswith("internal broker error (RuntimeError: Request context not initialized;")
+    assert "authorization=[REDACTED]" in error
+    assert len(error) <= len("internal broker error ()") + 1025
 
 
 def test_original_body_hash_is_checked():

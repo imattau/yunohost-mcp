@@ -4,10 +4,9 @@ This sandbox has no real `yunohost` package installed, so these build fake
 `yunohost.*` modules under sys.modules whose decorated functions faithfully
 reproduce `@is_unit_operation`'s actual argument-remapping behavior (copied
 from /tmp/yunohost-src's src/log.py at review time) - the same decorator
-that wraps app_remove, tools_upgrade, and diagnosis_run in the real
-codebase (app_install/app_upgrade and backup_create/backup_restore now go
-through _call_via_system_python instead - see
-test_yunohost_adapter_system_python.py).
+that wraps tools_upgrade and diagnosis_run in the real codebase. Lifecycle
+operations that require YunoHost's request/logging context now go through
+_call_via_system_python instead - see test_yunohost_adapter_system_python.py.
 
 Why this matters: the decorator constructs its own OperationLogger
 internally and prepends it to the call - callers must NOT pass one. An
@@ -78,7 +77,7 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     yunohost_app = types.ModuleType("yunohost.app")
     yunohost_app.app_remove = app_remove
 
-    # app_install/app_upgrade and backup_create/backup_restore are NOT
+    # app_remove, app_install/app_upgrade, and backup_create/backup_restore are NOT
     # exercised here - none of them go through _import_attr at all
     # anymore (see test_yunohost_adapter_system_python.py): all four now
     # route through _call_via_system_python, a subprocess call, so
@@ -256,9 +255,24 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     return adapter
 
 
-def test_app_remove_receives_correct_app_name_not_operation_logger(real_mode_adapter: YunohostAdapter):
+def test_app_remove_receives_correct_app_name_not_operation_logger(
+    real_mode_adapter: YunohostAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    captured = {}
+
+    def fake_system_call(module_name, attr, kwargs, settings, *, interface_type="api"):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs, interface_type=interface_type)
+        return None
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._call_via_system_python", fake_system_call)
     real_mode_adapter.app_remove("nextcloud", purge=True)
-    assert real_mode_adapter._test_calls["app_remove"] == {"app": "nextcloud", "purge": True}
+
+    assert captured == {
+        "module_name": "yunohost.app",
+        "attr": "app_remove",
+        "kwargs": {"app": "nextcloud", "purge": True},
+        "interface_type": "cli",
+    }
 
 
 def test_system_upgrade_receives_correct_target_not_operation_logger(real_mode_adapter: YunohostAdapter):

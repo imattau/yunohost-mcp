@@ -133,6 +133,38 @@ def test_app_install_calls_call_via_system_python_with_correct_kwargs(monkeypatc
     }
 
 
+def test_app_remove_uses_cli_context_in_system_python(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings, *, interface_type="api"):
+        captured.update(
+            module_name=module_name,
+            attr=attr,
+            kwargs=kwargs,
+            interface_type=interface_type,
+        )
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260906-000000-app_remove")
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.app_remove("polypack_mcp", purge=True)
+
+    assert captured == {
+        "module_name": "yunohost.app",
+        "attr": "app_remove",
+        "kwargs": {"app": "polypack_mcp", "purge": True},
+        "interface_type": "cli",
+    }
+    assert result == {
+        "fake": False,
+        "operation_id": "20260906-000000-app_remove",
+        "app": "polypack_mcp",
+        "result": None,
+    }
+
+
 def test_app_upgrade_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 

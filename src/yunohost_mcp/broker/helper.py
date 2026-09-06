@@ -27,10 +27,28 @@ from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.policy.confirmation import SQLiteConfirmationStore
 from yunohost_mcp.policy.confirmation import ConfirmationError
 from yunohost_mcp.policy.rules import check_free_space, check_recent_backup, load_policy
+from yunohost_mcp.redaction import redact_text
 from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError
 
 logger = logging.getLogger("yunohost_mcp.broker")
 _UCRED_FORMAT = "3i"
+
+
+def _format_internal_broker_error(exc: Exception) -> str:
+    """Return a bounded, redacted error suitable for an MCP response.
+
+    The full traceback remains in the helper journal. Returning the exception
+    class and a redacted message gives callers enough context to distinguish a
+    broker/runtime defect from a normal YunoHost operation error without
+    exposing an unbounded traceback or secret-shaped values.
+    """
+    detail = redact_text(str(exc)).strip()
+    if len(detail) > 1000:
+        detail = detail[:1000] + "..."
+    error = "internal broker error"
+    if detail:
+        error += f" ({type(exc).__name__}: {detail})"
+    return error
 
 
 def peer_uid(conn: socket.socket) -> int:
@@ -113,10 +131,11 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             # diagnose from an MCP client.
             audit_error = str(exc)
             self._send(request_id, ok=False, error=str(exc))
-        except Exception:
+        except Exception as exc:
             logger.exception("unexpected broker failure for request %s", request_id)
-            audit_error = "internal broker error"
-            self._send(request_id, ok=False, error="internal broker error")
+            error = _format_internal_broker_error(exc)
+            audit_error = error
+            self._send(request_id, ok=False, error=error)
         finally:
             try:
                 self.server.audit_log.record(

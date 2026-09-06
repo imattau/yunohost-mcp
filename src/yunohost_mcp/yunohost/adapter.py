@@ -264,7 +264,7 @@ try:
     from moulinette import Moulinette
 
     class _HeadlessInterface:
-        type = "api"
+        type = {interface_type!r}
 
     if Moulinette.interface is None:
         Moulinette._interface = _HeadlessInterface()
@@ -278,7 +278,14 @@ json.dump(result, sys.stdout, default=str)
 """
 
 
-def _call_via_system_python(module_name: str, attr: str, kwargs: dict[str, Any], settings: Settings) -> Any:
+def _call_via_system_python(
+    module_name: str,
+    attr: str,
+    kwargs: dict[str, Any],
+    settings: Settings,
+    *,
+    interface_type: str = "api",
+) -> Any:
     """Call a real yunohost.* function in a subprocess using the *system*
     python3 rather than importing it in-process.
 
@@ -298,8 +305,19 @@ def _call_via_system_python(module_name: str, attr: str, kwargs: dict[str, Any],
 
     kwargs must be JSON-serializable; the target function's return value
     must be too (or json.dump(..., default=str)-representable).
+
+    ``interface_type`` selects the headless Moulinette mode used inside the
+    subprocess. ``api`` preserves structured API return values; ``cli`` is
+    for lifecycle operations whose YunoHost operation logger requires a CLI
+    context rather than a Bottle request context.
     """
-    script = _SYSTEM_PYTHON_CALL_SCRIPT.format(module_name=module_name, attr=attr)
+    if interface_type not in {"api", "cli"}:
+        raise ValueError("interface_type must be 'api' or 'cli'")
+    script = _SYSTEM_PYTHON_CALL_SCRIPT.format(
+        module_name=module_name,
+        attr=attr,
+        interface_type=interface_type,
+    )
     proc = subprocess.run(
         [settings.system_python, "-c", script],
         input=json.dumps(kwargs),
@@ -1840,8 +1858,21 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "operation_id": "20260903-000000-app_remove", "app": app, "purged": purge}
-        app_remove = _import_attr("yunohost.app", "app_remove")
-        result = app_remove(app, purge=purge)
+        # YunoHost's @is_unit_operation wrapper creates an OperationLogger
+        # whose registration path expects a real Moulinette/Bottle request
+        # context when the interface is "api". The privileged broker is a
+        # local worker, not an HTTP request, so invoke this lifecycle write in
+        # a clean system-python subprocess with a CLI-style headless context.
+        # This keeps the YunoHost operation logger on its supported CLI path
+        # and prevents the secondary `NoneType.removeHandler` failure from
+        # masking the original missing-request-context error.
+        result = _call_via_system_python(
+            "yunohost.app",
+            "app_remove",
+            {"app": app, "purge": purge},
+            self.settings,
+            interface_type="cli",
+        )
         return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
 
     def app_change_url(
@@ -2478,6 +2509,10 @@ class YunohostAdapter:
         if brokered is not None:
             return brokered
         steps: list[dict[str, Any]] = []
+        install_ok = False
+        remove_ok = False
+        restore_attempted = False
+        restore_ok = False
 
         def run_step(step_name: str, fn, *args, **kwargs) -> bool:
             try:
@@ -2497,22 +2532,27 @@ class YunohostAdapter:
         if isinstance(installed_app_id, list):
             installed_app_id = installed_app_id[0]
 
-        if not run_step("install", self.package_install_test, source):
-            return {"fake": self.settings.fake_yunohost, "passed": False, "steps": steps}
+        try:
+            install_ok = run_step("install", self.package_install_test, source)
+            if not install_ok:
+                return {"fake": self.settings.fake_yunohost, "passed": False, "steps": steps}
 
-        backup_ok = run_step("backup", self.package_backup_test, installed_app_id)
-        archive_name = steps[-1]["result"].get("name") if backup_ok else None
+            backup_ok = run_step("backup", self.package_backup_test, installed_app_id)
+            archive_name = steps[-1]["result"].get("name") if backup_ok else None
 
-        remove_ok = run_step("remove", self.package_remove_test, installed_app_id, True)
+            remove_ok = run_step("remove", self.package_remove_test, installed_app_id, True)
 
-        restore_ok = False
-        if backup_ok and remove_ok and archive_name:
-            restore_ok = run_step("restore", self.package_restore_test, installed_app_id, archive_name)
-
-        # Final cleanup: if restore re-installed the app, remove it again so
-        # this doesn't leave test apps behind on the server either way.
-        if restore_ok:
-            run_step("cleanup_remove", self.package_remove_test, installed_app_id, True)
+            if backup_ok and remove_ok and archive_name:
+                restore_attempted = True
+                restore_ok = run_step("restore", self.package_restore_test, installed_app_id, archive_name)
+        finally:
+            # Final cleanup: a failed remove may have left the installed app
+            # in place, and a failed restore may have left a partial
+            # installation. Always attempt cleanup when installation
+            # succeeded and the app may still exist. Keep cleanup failures as
+            # a separate step so they do not hide the primary test failure.
+            if install_ok and (not remove_ok or (restore_attempted and not restore_ok) or restore_ok):
+                run_step("cleanup_remove", self.package_remove_test, installed_app_id, True)
 
         passed = all(step["passed"] for step in steps)
         return {"fake": self.settings.fake_yunohost, "passed": passed, "steps": steps}

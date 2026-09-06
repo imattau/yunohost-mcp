@@ -120,6 +120,39 @@ def test_package_run_tests_stops_after_backup_failure(monkeypatch: pytest.Monkey
     assert backup_step["passed"] is False
 
 
+def test_package_run_tests_attempts_cleanup_after_remove_failure(monkeypatch: pytest.MonkeyPatch):
+    adapter = make_adapter()
+    remove_calls = []
+
+    monkeypatch.setattr(adapter, "package_install_test", lambda *args, **kwargs: {"app": "example"})
+    monkeypatch.setattr(adapter, "package_backup_test", lambda *args, **kwargs: {"name": "package-test-example"})
+
+    def remove_with_first_failure(*args, **kwargs):
+        remove_calls.append((args, kwargs))
+        if len(remove_calls) == 1:
+            raise RuntimeError("remove operation failed")
+        return {"app": "example", "purged": True}
+
+    monkeypatch.setattr(adapter, "package_remove_test", remove_with_first_failure)
+    monkeypatch.setattr(
+        adapter,
+        "package_restore_test",
+        lambda *args, **kwargs: pytest.fail("restore must not run after remove failure"),
+    )
+
+    result = adapter.package_run_tests("/path/to/example_ynh", app_id="example")
+
+    assert result["passed"] is False
+    assert [step["step"] for step in result["steps"]] == [
+        "install",
+        "backup",
+        "remove",
+        "cleanup_remove",
+    ]
+    assert result["steps"][2] == {"step": "remove", "passed": False, "error": "remove operation failed"}
+    assert len(remove_calls) == 2
+
+
 @pytest.mark.skipif(
     not REAL_LINTER_PATH.exists() or not REAL_APP_TO_LINT.exists(),
     reason="requires a local package_linter checkout and a real _ynh app to lint",
