@@ -164,14 +164,14 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     yunohost_service.service_restart = service_restart
     yunohost_service.service_stop = service_stop
 
-    # None of firewall_{list,is_open,open,close,reload} are
-    # @is_unit_operation-decorated either - same "must not receive an
-    # operation_logger" check as service_restart.
-    def firewall_open(port, protocol, comment, **_):
-        calls["firewall_open"] = {"port": port, "protocol": protocol, "comment": comment}
-
+    # firewall_open/close/reload are NOT exercised here - like
+    # settings_set/domain_add, they transitively import yunohost.utils.form
+    # (pydantic v1 @validator(field=..., config=...) conflict - see
+    # _call_via_system_python's docstring) and now route through that
+    # subprocess instead (see test_yunohost_adapter_system_python.py).
+    # firewall_list/firewall_is_open are read-only and unaffected - not
+    # exercised in this stub module either since nothing here calls them.
     yunohost_firewall = types.ModuleType("yunohost.firewall")
-    yunohost_firewall.firewall_open = firewall_open
 
     # domain_add is NOT exercised here either - like app_install/
     # app_upgrade and backup_create/backup_restore, it now routes through
@@ -418,13 +418,6 @@ def test_migrations_run_unaffected(real_mode_adapter: YunohostAdapter):
     # of check as service_restart above, not the argument-remapping bug.
     real_mode_adapter.migrations_run(targets=["0027_migrate_to_bookworm"])
     assert real_mode_adapter._test_calls["tools_migrations_run"] == {"targets": ["0027_migrate_to_bookworm"]}
-
-
-def test_firewall_open_unaffected(real_mode_adapter: YunohostAdapter):
-    # firewall_open is NOT @is_unit_operation-decorated - same class of
-    # check as service_restart above, not the argument-remapping bug.
-    real_mode_adapter.firewall_open(8080, "tcp", comment="test")
-    assert real_mode_adapter._test_calls["firewall_open"] == {"port": 8080, "protocol": "tcp", "comment": "test"}
 
 
 def test_user_create_receives_correct_username_not_operation_logger(real_mode_adapter: YunohostAdapter):

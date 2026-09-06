@@ -2610,8 +2610,23 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "port": port, "protocol": protocol}
-        firewall_open = _import_attr("yunohost.firewall", "firewall_open")
-        firewall_open(port, protocol, comment, upnp=upnp, no_reload=no_reload)
+        # yunohost.firewall transitively imports yunohost.utils.form (the
+        # same ConfigPanel/pydantic-v1-@validator(field=..., config=...)
+        # machinery as settings_set/domain_add - see
+        # _call_via_system_python's docstring) via its regenconf hook.
+        # Live-tested 2026-09-07: firewall_open raised the exact
+        # "field and config parameters are not available in Pydantic V2"
+        # error through plain in-process _import_attr despite the
+        # test_firewall_open_unaffected stub assuming otherwise - same
+        # class of wrong-sibling-assumption bug as service_start (see
+        # yunohost_mcp_new_tool_sync_points memory). Routed through the
+        # system-python subprocess like the other affected writes.
+        _call_via_system_python(
+            "yunohost.firewall",
+            "firewall_open",
+            {"port": port, "protocol": protocol, "comment": comment, "upnp": upnp, "no_reload": no_reload},
+            self.settings,
+        )
         return {"fake": False, "port": port, "protocol": protocol}
 
     def firewall_close(
@@ -2630,8 +2645,13 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "port": port, "protocol": protocol}
-        firewall_close = _import_attr("yunohost.firewall", "firewall_close")
-        firewall_close(port, protocol, upnp_only=upnp_only, no_reload=no_reload)
+        # Same pydantic v1/v2 conflict as firewall_open - see there.
+        _call_via_system_python(
+            "yunohost.firewall",
+            "firewall_close",
+            {"port": port, "protocol": protocol, "upnp_only": upnp_only, "no_reload": no_reload},
+            self.settings,
+        )
         return {"fake": False, "port": port, "protocol": protocol}
 
     def firewall_reload(self, skip_upnp: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
@@ -2642,8 +2662,10 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "reloaded": True}
-        firewall_reload = _import_attr("yunohost.firewall", "firewall_reload")
-        firewall_reload(skip_upnp=skip_upnp)
+        # Same pydantic v1/v2 conflict as firewall_open - see there.
+        _call_via_system_python(
+            "yunohost.firewall", "firewall_reload", {"skip_upnp": skip_upnp}, self.settings
+        )
         return {"fake": False, "reloaded": True}
 
     # -- Settings ---------------------------------------------------------

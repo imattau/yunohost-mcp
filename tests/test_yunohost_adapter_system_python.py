@@ -432,3 +432,76 @@ def test_package_inspect_calls_call_via_system_python_with_correct_kwargs(monkey
     assert captured["kwargs"] == {"app": "my_webapp"}
     assert result["id"] == "my_webapp"
     assert result["fake"] is False
+
+
+def test_firewall_open_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # yunohost.firewall transitively imports yunohost.utils.form via its
+    # regenconf hook - same pydantic v1/v2 conflict as settings_set/
+    # domain_add, live-tested 2026-09-07 (a prior stub test wrongly
+    # assumed firewall_open was unaffected - see
+    # test_yunohost_adapter_real_mode.py's history).
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.firewall_open(49222, "tcp", comment="new ssh port")
+
+    assert captured["module_name"] == "yunohost.firewall"
+    assert captured["attr"] == "firewall_open"
+    assert captured["kwargs"] == {
+        "port": 49222,
+        "protocol": "tcp",
+        "comment": "new ssh port",
+        "upnp": False,
+        "no_reload": False,
+    }
+    assert result == {"fake": False, "port": 49222, "protocol": "tcp"}
+
+
+def test_firewall_close_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # Same pydantic v1/v2 conflict as firewall_open - see there.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.firewall_close(22, "tcp")
+
+    assert captured["module_name"] == "yunohost.firewall"
+    assert captured["attr"] == "firewall_close"
+    assert captured["kwargs"] == {"port": 22, "protocol": "tcp", "upnp_only": False, "no_reload": False}
+    assert result == {"fake": False, "port": 22, "protocol": "tcp"}
+
+
+def test_firewall_reload_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # Same pydantic v1/v2 conflict as firewall_open - see there.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.firewall_reload()
+
+    assert captured["module_name"] == "yunohost.firewall"
+    assert captured["attr"] == "firewall_reload"
+    assert captured["kwargs"] == {"skip_upnp": False}
+    assert result == {"fake": False, "reloaded": True}
