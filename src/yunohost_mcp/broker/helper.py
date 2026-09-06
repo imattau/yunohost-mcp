@@ -16,6 +16,7 @@ from pathlib import Path
 from yunohost_mcp.broker.operations import OPERATIONS
 from yunohost_mcp.broker.protocol import BrokerProtocolError, decode_original_body, decode_request, encode_response
 from yunohost_mcp.auth.groups import identity_store_for_settings
+from yunohost_mcp.auth.identity import set_current_request
 from yunohost_mcp.auth.middleware import NostrAuthMiddleware
 from yunohost_mcp.auth.nip98 import Nip98Error, verify_nip98_request
 from yunohost_mcp.auth.replay import ReplayCache
@@ -114,6 +115,11 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
                 raise BrokerProtocolError("caller lacks the required operation scope")
             confirmation_id = self._check_operation_policy(request, operation.name, identity)
             audit_decision = "allowed"
+            # Published for the duration of the adapter call only (cleared
+            # in the finally below) - e.g. _catalog_relays() consults this
+            # to widen a catalog search with the *calling* identity's own
+            # NIP-65 relays, if nostr_auth reports them as linked.
+            set_current_request(identity)
             result = operation.invoke(self.server.adapter, request.arguments)
             if confirmation_id is not None:
                 self.server.confirmation_store.finalize(confirmation_id)
@@ -137,6 +143,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             audit_error = error
             self._send(request_id, ok=False, error=error)
         finally:
+            set_current_request(None)
             try:
                 self.server.audit_log.record(
                     tool=operation_name,

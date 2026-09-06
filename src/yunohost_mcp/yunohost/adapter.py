@@ -2349,12 +2349,42 @@ class YunohostAdapter:
 
     def _catalog_relays(self) -> list[str]:
         relays = [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
-        if relays:
+        if not relays:
+            relays = self._read_nostr_catalog_ynh_env("NOSTR_YNH_RELAYS")
+        if not relays:
+            relays = self._read_nostr_catalog_ynh_setting("relays")
+        return self._widen_with_caller_relays(relays)
+
+    def _widen_with_caller_relays(self, relays: list[str]) -> list[str]:
+        """Merge in the *calling* identity's own NIP-65 relay list, if
+        nostr_auth reports that pubkey as linked - lets a linked user's
+        own relay preferences widen catalog visibility for their own
+        calls, on top of (never instead of) the server's fixed
+        admin-configured list. Disabled by default
+        (nostr_auth_relay_lookup_socket is None); best-effort even when
+        enabled - any failure (socket unreachable, unlinked pubkey, no
+        relay list published, stdio's synthetic identity) just means no
+        widening, never an error surfaced to the caller.
+        """
+        if self.settings.nostr_auth_relay_lookup_socket is None:
             return relays
-        relays = self._read_nostr_catalog_ynh_env("NOSTR_YNH_RELAYS")
-        if relays:
+        from yunohost_mcp.auth.identity import LOCAL_STDIO_IDENTITY, get_current_request
+        from yunohost_mcp.auth.nostr_auth_relay_lookup import NostrAuthRelayLookupError, lookup_linked_relays
+
+        request = get_current_request()
+        if request is None or request.pubkey == LOCAL_STDIO_IDENTITY.pubkey:
             return relays
-        return self._read_nostr_catalog_ynh_setting("relays")
+        try:
+            caller_relays = lookup_linked_relays(request.pubkey, settings=self.settings)
+        except NostrAuthRelayLookupError:
+            return relays
+        if not caller_relays:
+            return relays
+        merged = list(relays)
+        for url in caller_relays:
+            if url not in merged:
+                merged.append(url)
+        return merged
 
     def _catalog_trusted_publishers(self) -> list[str]:
         publishers = [p.strip() for p in self.settings.catalog_trusted_publishers.split(",") if p.strip()]

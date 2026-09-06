@@ -116,6 +116,17 @@ class Settings(BaseSettings):
     nostr_auth_lookup_socket: Path | None = None
     nostr_auth_lookup_timeout_seconds: int = 5
 
+    # _catalog_relays()'s optional fourth fallback: widen a catalog search
+    # with the *calling* identity's own NIP-65 relay list, via nostr_auth's
+    # relay-lookup socket, if it reports that pubkey as linked. None (the
+    # default) disables this entirely - same opt-in shape as
+    # nostr_auth_lookup_socket above, and deliberately a separate socket
+    # setting even though nostr_auth's own default deployment points both
+    # at the same shared consumer group, since they're independent
+    # services with their own lifecycles.
+    nostr_auth_relay_lookup_socket: Path | None = None
+    nostr_auth_relay_lookup_timeout_seconds: int = 5
+
     # service_logs(): structured systemd journal entries for one
     # YunoHost-managed service (see adapter.py). journalctl_path lets a
     # deployment point at a non-default binary; the other two bound a

@@ -204,3 +204,85 @@ def test_helper_revalidates_a_real_nip98_signature(tmp_path):
 
     assert authenticated.pubkey == client_pubkey
     assert authenticated.has_scope(next(iter(record.scopes)))
+
+
+def test_handle_publishes_the_caller_identity_for_the_adapter_call_only(monkeypatch):
+    """_catalog_relays() (and anything else) reads the calling identity via
+    auth.identity.get_current_request() - handle() must publish it for the
+    exact duration of operation.invoke() and clear it again afterwards, so
+    a later request on a reused thread never sees a stale identity."""
+    import os
+    import socket
+
+    from yunohost_mcp.auth.identity import get_current_request
+    from yunohost_mcp.broker.helper import BrokerRequestHandler
+    from yunohost_mcp.broker.operations import BrokerOperation
+
+    client_key = PrivateKey()
+    client_pubkey = PublicKeyXOnly.from_valid_secret(client_key.secret).format().hex()
+    body = b"{}"
+    url = "https://example.test/mcp"
+    event = sign_event(
+        client_key,
+        pubkey=client_pubkey,
+        kind=27235,
+        tags=[["u", url], ["method", "POST"], ["payload", hashlib.sha256(body).hexdigest()]],
+        created_at=int(time.time()),
+    )
+    authorization = "Nostr " + base64.b64encode(json.dumps(event.model_dump()).encode()).decode()
+    server_key = PrivateKey()
+    server_pubkey = PublicKeyXOnly.from_valid_secret(server_key.secret).format().hex()
+    record = IdentityRecord(
+        pubkey=client_pubkey, name="test-agent", roles=("readonly",), scopes=scopes_for_roles(("readonly",))
+    )
+
+    observed_during_call = []
+    observed_during_call.append(get_current_request())  # sanity: None before this request
+
+    def fake_invoke(adapter, arguments):
+        observed_during_call.append(get_current_request())
+        return {"ok": True}
+
+    monkeypatch.setitem(OPERATIONS, "app.info", BrokerOperation("app.info", "apps.read", fake_invoke))
+
+    request = BrokerRequest(
+        request_id="request-1",
+        operation="app.info",
+        arguments={},
+        authorization=authorization,
+        method="POST",
+        url=url,
+        body_sha256=hashlib.sha256(body).hexdigest(),
+        body_b64=base64.b64encode(body).decode(),
+    )
+
+    class _FakeAuditLog:
+        def record(self, **kwargs):
+            pass
+
+    fake_server = SimpleNamespace(
+        allowed_uid=os.getuid(),
+        identity_store=IdentityStore({client_pubkey: record}),
+        replay_cache=ReplayCache(),
+        server_identity=ServerIdentity(server_key, server_pubkey),
+        revocation_store=SimpleNamespace(is_revoked=lambda _event_id: False),
+        adapter=SimpleNamespace(),
+        confirmation_store=None,
+        audit_log=_FakeAuditLog(),
+    )
+
+    server_conn, client_conn = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client_conn.sendall(request.encode())
+        client_conn.shutdown(socket.SHUT_WR)
+        BrokerRequestHandler(server_conn, ("test", 0), fake_server)
+        response = json.loads(client_conn.recv(65536))
+    finally:
+        server_conn.close()
+        client_conn.close()
+
+    assert response["ok"] is True
+    assert observed_during_call[0] is None  # nothing published before the request
+    assert observed_during_call[1] is not None  # published for the adapter call
+    assert observed_during_call[1].pubkey == client_pubkey
+    assert get_current_request() is None  # cleared again afterwards

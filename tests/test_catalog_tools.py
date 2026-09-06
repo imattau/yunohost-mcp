@@ -6,10 +6,13 @@ import pytest
 from mcp.client import Client
 
 from yunohost_mcp.config import Settings
-from yunohost_mcp.auth.identity import LOCAL_STDIO_REQUEST, set_current_request
+from yunohost_mcp.auth.identity import AuthenticatedRequest, LOCAL_STDIO_REQUEST, set_current_request
 from yunohost_mcp.server import mcp
 import yunohost_mcp.yunohost.adapter as adapter_module
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
+
+CALLER_PUBKEY = "b" * 64
+CALLER_REQUEST = AuthenticatedRequest(pubkey=CALLER_PUBKEY, event_id="e" * 64, event_created_at=0)
 
 
 def test_catalog_plan_fake_mode_requires_a_local_source(tmp_path: Path):
@@ -71,6 +74,99 @@ def test_catalog_relays_fall_back_to_yunohost_app_setting(monkeypatch: pytest.Mo
         Settings(fake_yunohost=False, catalog_relays="", catalog_relays_env_path=tmp_path / "missing.env")
     )
     assert adapter._catalog_relays() == ["wss://relay.damus.io", "wss://nos.lol"]
+
+
+def test_catalog_relays_disabled_caller_widening_by_default(monkeypatch: pytest.MonkeyPatch):
+    # nostr_auth_relay_lookup_socket is None by default - the widening
+    # fallback must not even look at the current request, let alone touch
+    # a socket, unless a deployment opts in.
+    import yunohost_mcp.auth.nostr_auth_relay_lookup as relay_lookup_module
+
+    def _must_not_be_called(pubkey, *, settings):
+        raise AssertionError("lookup_linked_relays must not be called when disabled")
+
+    monkeypatch.setattr(relay_lookup_module, "lookup_linked_relays", _must_not_be_called)
+    set_current_request(CALLER_REQUEST)
+    try:
+        adapter = YunohostAdapter(Settings(fake_yunohost=False, catalog_relays="wss://relay.test"))
+        assert adapter._catalog_relays() == ["wss://relay.test"]
+    finally:
+        set_current_request(None)
+
+
+def test_catalog_relays_widened_with_the_calling_identitys_own_relays(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import yunohost_mcp.auth.nostr_auth_relay_lookup as relay_lookup_module
+
+    monkeypatch.setattr(
+        relay_lookup_module,
+        "lookup_linked_relays",
+        lambda pubkey, *, settings: ["wss://mine.example"] if pubkey == CALLER_PUBKEY else [],
+    )
+    set_current_request(CALLER_REQUEST)
+    try:
+        adapter = YunohostAdapter(
+            Settings(
+                fake_yunohost=False,
+                catalog_relays="wss://relay.test",
+                nostr_auth_relay_lookup_socket=tmp_path / "relays.sock",
+            )
+        )
+        assert adapter._catalog_relays() == ["wss://relay.test", "wss://mine.example"]
+    finally:
+        set_current_request(None)
+
+
+def test_catalog_relays_widening_deduplicates_and_ignores_local_stdio(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import yunohost_mcp.auth.nostr_auth_relay_lookup as relay_lookup_module
+
+    monkeypatch.setattr(
+        relay_lookup_module,
+        "lookup_linked_relays",
+        lambda pubkey, *, settings: ["wss://relay.test"],  # already in the base list
+    )
+    adapter = YunohostAdapter(
+        Settings(
+            fake_yunohost=False,
+            catalog_relays="wss://relay.test",
+            nostr_auth_relay_lookup_socket=tmp_path / "relays.sock",
+        )
+    )
+
+    # LOCAL_STDIO_REQUEST's synthetic pubkey must never trigger a lookup.
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        assert adapter._catalog_relays() == ["wss://relay.test"]
+    finally:
+        set_current_request(None)
+
+    # A real caller whose own relay is already in the base list must not
+    # produce a duplicate.
+    set_current_request(CALLER_REQUEST)
+    try:
+        assert adapter._catalog_relays() == ["wss://relay.test"]
+    finally:
+        set_current_request(None)
+
+
+def test_catalog_relays_widening_is_best_effort_on_lookup_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import yunohost_mcp.auth.nostr_auth_relay_lookup as relay_lookup_module
+
+    def _raise(pubkey, *, settings):
+        raise relay_lookup_module.NostrAuthRelayLookupError("could not reach nostr_auth relay-lookup service")
+
+    monkeypatch.setattr(relay_lookup_module, "lookup_linked_relays", _raise)
+    set_current_request(CALLER_REQUEST)
+    try:
+        adapter = YunohostAdapter(
+            Settings(
+                fake_yunohost=False,
+                catalog_relays="wss://relay.test",
+                nostr_auth_relay_lookup_socket=tmp_path / "relays.sock",
+            )
+        )
+        assert adapter._catalog_relays() == ["wss://relay.test"]
+    finally:
+        set_current_request(None)
 
 
 def test_catalog_verify_fake_mode_never_needs_publisher_key():
