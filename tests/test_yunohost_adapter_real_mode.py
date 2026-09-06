@@ -74,8 +74,16 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
         calls["app_remove"] = {"app": app, "purge": purge}
         return None
 
+    # app_setting is NOT @is_unit_operation-decorated either - it's a plain
+    # settings.yml read/write helper, same "must not receive an
+    # operation_logger" check as service_restart above.
+    def app_setting(app, key, value=None, delete=False, **_):
+        calls["app_setting"] = {"app": app, "key": key, "value": value, "delete": delete}
+        return None if (value is not None or delete) else "stored-value"
+
     yunohost_app = types.ModuleType("yunohost.app")
     yunohost_app.app_remove = app_remove
+    yunohost_app.app_setting = app_setting
 
     # app_remove, app_install/app_upgrade, and backup_create/backup_restore are NOT
     # exercised here - none of them go through _import_attr at all
@@ -141,8 +149,18 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     def service_restart(names, **_):
         calls["service_restart"] = {"names": names}
 
+    # service_stop/service_start are NOT @is_unit_operation-decorated either
+    # - same "must not receive an operation_logger" check as service_restart.
+    def service_stop(names, **_):
+        calls["service_stop"] = {"names": names}
+
+    def service_start(names, **_):
+        calls["service_start"] = {"names": names}
+
     yunohost_service = types.ModuleType("yunohost.service")
     yunohost_service.service_restart = service_restart
+    yunohost_service.service_stop = service_stop
+    yunohost_service.service_start = service_start
 
     # None of firewall_{list,is_open,open,close,reload} are
     # @is_unit_operation-decorated either - same "must not receive an
@@ -310,6 +328,66 @@ def test_service_restart_unaffected(real_mode_adapter: YunohostAdapter):
     # correct.
     real_mode_adapter.service_restart(["nginx"])
     assert real_mode_adapter._test_calls["service_restart"] == {"names": ["nginx"]}
+
+
+def test_service_stop_unaffected(real_mode_adapter: YunohostAdapter):
+    # service_stop is NOT @is_unit_operation-decorated - same class of
+    # check as service_restart above, not the argument-remapping bug.
+    real_mode_adapter.service_stop(["nginx"])
+    assert real_mode_adapter._test_calls["service_stop"] == {"names": ["nginx"]}
+
+
+def test_service_start_unaffected(real_mode_adapter: YunohostAdapter):
+    real_mode_adapter.service_start(["nginx"])
+    assert real_mode_adapter._test_calls["service_start"] == {"names": ["nginx"]}
+
+
+def test_app_setting_get_unaffected(real_mode_adapter: YunohostAdapter):
+    # app_setting is NOT @is_unit_operation-decorated - same class of check
+    # as service_restart above, not the argument-remapping bug.
+    result = real_mode_adapter.app_setting_get("nextcloud", "install_dir")
+    assert real_mode_adapter._test_calls["app_setting"] == {
+        "app": "nextcloud",
+        "key": "install_dir",
+        "value": None,
+        "delete": False,
+    }
+    assert result == {"fake": False, "app": "nextcloud", "key": "install_dir", "value": "stored-value"}
+
+
+def test_app_setting_set_unaffected(real_mode_adapter: YunohostAdapter):
+    result = real_mode_adapter.app_setting_set("nextcloud", "install_dir", value="/var/www/nextcloud")
+    assert real_mode_adapter._test_calls["app_setting"] == {
+        "app": "nextcloud",
+        "key": "install_dir",
+        "value": "/var/www/nextcloud",
+        "delete": False,
+    }
+    assert result == {
+        "fake": False,
+        "app": "nextcloud",
+        "key": "install_dir",
+        "value": "/var/www/nextcloud",
+        "deleted": False,
+    }
+
+
+def test_app_setting_delete_unaffected(real_mode_adapter: YunohostAdapter):
+    result = real_mode_adapter.app_setting_set("nextcloud", "stale_key", delete=True)
+    assert real_mode_adapter._test_calls["app_setting"] == {
+        "app": "nextcloud",
+        "key": "stale_key",
+        "value": None,
+        "delete": True,
+    }
+    assert result == {"fake": False, "app": "nextcloud", "key": "stale_key", "value": None, "deleted": True}
+
+
+def test_app_setting_set_requires_exactly_one_of_value_or_delete(real_mode_adapter: YunohostAdapter):
+    with pytest.raises(ValueError):
+        real_mode_adapter.app_setting_set("nextcloud", "install_dir")
+    with pytest.raises(ValueError):
+        real_mode_adapter.app_setting_set("nextcloud", "install_dir", value="x", delete=True)
 
 
 def test_migrations_run_unaffected(real_mode_adapter: YunohostAdapter):

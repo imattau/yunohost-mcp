@@ -39,6 +39,7 @@ _READONLY: frozenset[Scope] = frozenset(
         Scope.CATALOG_VERIFY,
         Scope.FIREWALL_READ,
         Scope.APPS_CONFIG_READ,
+        Scope.APPS_SETTING_READ,
         Scope.SETTINGS_READ,
         Scope.REGENCONF_READ,
     }
@@ -46,6 +47,8 @@ _READONLY: frozenset[Scope] = frozenset(
 
 _OPERATOR: frozenset[Scope] = _READONLY | {
     Scope.SERVICES_RESTART,
+    Scope.SERVICES_STOP,
+    Scope.SERVICES_START,
     Scope.BACKUPS_CREATE,
 }
 
@@ -54,6 +57,7 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.APPS_UPGRADE,
     Scope.APPS_REMOVE,
     Scope.APPS_CONFIG_WRITE,
+    Scope.APPS_SETTING_WRITE,
     Scope.BACKUPS_RESTORE,
     Scope.BACKUPS_DELETE,
     Scope.DOMAINS_WRITE,

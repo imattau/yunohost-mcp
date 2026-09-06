@@ -110,6 +110,15 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # confirmation-gated like domains.write/apps.change_url rather than
     # owner-signature-gated like the Phase 13 tier below.
     "apps.config": PolicyRule(require_confirmation=True),
+    # app_setting_set - same tier as apps.config above: bounded to one
+    # already-installed app's own settings.yml, not system-wide.
+    "apps.setting": PolicyRule(require_confirmation=True),
+    # service_stop, unlike service.restart (ungated - restart is atomic),
+    # can leave a service down with no automatic undo until service_start
+    # is called. Still scoped to named services rather than system-wide,
+    # so confirmation-gated like apps.config/domains.write rather than
+    # owner-signature-gated like firewall.write.
+    "services.stop": PolicyRule(require_confirmation=True),
     # PLAN.md Phase 13's highest-risk candidates get owner co-signing by
     # default - "app removal with data" would need argument-conditional
     # policy (require_owner_signature only when purge=true) this dataclass

@@ -395,6 +395,8 @@ class YunohostAdapter:
             "app_remove",
             "app_change_url",
             "app_config_set",
+            "app_setting_get",
+            "app_setting_set",
             "backup_restore",
             "system_upgrade",
             "migrations_run",
@@ -428,6 +430,8 @@ class YunohostAdapter:
             "http_probe",
             "incident_snapshot",
             "service_restart",
+            "service_stop",
+            "service_start",
             "domains_list",
             "users_list",
             "backups_list",
@@ -767,6 +771,60 @@ class YunohostAdapter:
             "yunohost.app", "app_config_set", {"app": app, "key": key, "value": value}, self.settings
         )
         return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "key": key, "value": value}
+
+    def app_setting_get(self, app: str, key: str) -> dict[str, Any]:
+        """Read one key from an installed app's settings.yml (yunohost.app.app_setting).
+
+        Narrower than app_config_get: this reads whatever an app's install/
+        upgrade scripts stashed in settings.yml directly (e.g. install_dir,
+        a generated port, a leftover value from a botched change_url) - not
+        limited to keys a config_panel.toml declares, since most apps don't
+        declare one for their internal settings at all.
+        """
+        brokered = self._broker_call("app.setting_get", {"app": app, "key": key})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "app": app, "key": key, "value": None}
+        app_setting = _import_attr("yunohost.app", "app_setting")
+        return {"fake": False, "app": app, "key": key, "value": app_setting(app, key)}
+
+    def app_setting_set(
+        self,
+        app: str,
+        key: str,
+        value: str | None = None,
+        delete: bool = False,
+        confirmation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Write or delete one key in an installed app's settings.yml (yunohost.app.app_setting).
+
+        Exactly one of `value` or `delete=True` must be given. There is no
+        schema behind these keys the way app_config_get(full=True) provides
+        for config-panel options - call app_setting_get first to see the
+        current value, and know which app-specific setting you mean before
+        changing it.
+        """
+        if (value is None) == (not delete):
+            raise ValueError("exactly one of value or delete=True must be given")
+        brokered = self._broker_call(
+            "app.setting_set",
+            {"app": app, "key": key, "value": value, "delete": delete, "confirmation_id": confirmation_id},
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "app": app, "key": key, "value": value, "deleted": delete}
+        app_setting = _import_attr("yunohost.app", "app_setting")
+        # app_setting() isn't @is_unit_operation-wrapped like app_config_set
+        # is, so there's no operation log entry to recover an id for here -
+        # unlike app_config_set/user_create/etc above, this response
+        # carries no operation_id.
+        if delete:
+            app_setting(app, key, delete=True)
+        else:
+            app_setting(app, key, value)
+        return {"fake": False, "app": app, "key": key, "value": value, "deleted": delete}
 
     def diagnosis_run(self, categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
         brokered = self._broker_call("diagnosis.run", {"categories": categories, "force": force})
@@ -2105,6 +2163,32 @@ class YunohostAdapter:
         service_restart = _import_attr("yunohost.service", "service_restart")
         service_restart(names)
         return {"fake": False, "restarted": names}
+
+    def service_stop(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+        """Stop one or more services (yunohost.service.service_stop).
+
+        Unlike service_restart, this is not atomic - the service stays
+        down until something calls service_start.
+        """
+        brokered = self._broker_call("service.stop", {"names": names, "confirmation_id": confirmation_id})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "stopped": names}
+        service_stop = _import_attr("yunohost.service", "service_stop")
+        service_stop(names)
+        return {"fake": False, "stopped": names}
+
+    def service_start(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+        """Start one or more stopped services (yunohost.service.service_start)."""
+        brokered = self._broker_call("service.start", {"names": names, "confirmation_id": confirmation_id})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "started": names}
+        service_start = _import_attr("yunohost.service", "service_start")
+        service_start(names)
+        return {"fake": False, "started": names}
 
     def backup_create(
         self,

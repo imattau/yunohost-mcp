@@ -121,6 +121,35 @@ def test_app_config_set_has_operation_id():
     assert "operation_id" in result
 
 
+def test_app_setting_get_fake_mode():
+    result = make_adapter().app_setting_get("nextcloud", "install_dir")
+    assert result == {"fake": True, "app": "nextcloud", "key": "install_dir", "value": None}
+
+
+def test_app_setting_set_fake_mode():
+    result = make_adapter().app_setting_set("nextcloud", "install_dir", value="/var/www/nextcloud")
+    assert result == {
+        "fake": True,
+        "app": "nextcloud",
+        "key": "install_dir",
+        "value": "/var/www/nextcloud",
+        "deleted": False,
+    }
+    assert "operation_id" not in result
+
+
+def test_app_setting_set_delete_fake_mode():
+    result = make_adapter().app_setting_set("nextcloud", "stale_key", delete=True)
+    assert result == {"fake": True, "app": "nextcloud", "key": "stale_key", "value": None, "deleted": True}
+
+
+def test_app_setting_set_requires_exactly_one_of_value_or_delete():
+    with pytest.raises(ValueError):
+        make_adapter().app_setting_set("nextcloud", "install_dir")
+    with pytest.raises(ValueError):
+        make_adapter().app_setting_set("nextcloud", "install_dir", value="x", delete=True)
+
+
 def test_diagnosis_run_and_get():
     adapter = make_adapter()
     run_result = adapter.diagnosis_run(categories=["ip"])
@@ -410,6 +439,16 @@ def test_plan_app_upgrade_for_non_upgradable_app():
 def test_service_restart():
     result = make_adapter().service_restart(["nginx", "postgresql"])
     assert result["restarted"] == ["nginx", "postgresql"]
+
+
+def test_service_stop():
+    result = make_adapter().service_stop(["nginx", "postgresql"])
+    assert result["stopped"] == ["nginx", "postgresql"]
+
+
+def test_service_start():
+    result = make_adapter().service_start(["nginx", "postgresql"])
+    assert result["started"] == ["nginx", "postgresql"]
 
 
 def test_backup_create_has_operation_id():

@@ -20,7 +20,9 @@ from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOC
 from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
-PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
+PHASE5_WRITE_TOOLS = {"service_restart", "service_start", "backup_create", "app_install", "app_upgrade"}
+SERVICE_STOP_TOOLS = {"service_stop"}
+APP_SETTING_TOOLS = {"app_setting_get", "app_setting_set"}
 PHASE6_WRITE_TOOLS = {
     "app_remove", "backup_restore", "backup_delete", "system_upgrade", "domain_add", "domain_cert_install"
 }
@@ -128,6 +130,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
             {"server_info", "health_check", "whoami"}
             | PHASE4_TOOLS
             | PHASE5_WRITE_TOOLS
+            | SERVICE_STOP_TOOLS
+            | APP_SETTING_TOOLS
             | PHASE6_WRITE_TOOLS
             | APP_CHANGE_URL_TOOLS
             | MIGRATIONS_TOOLS
@@ -242,6 +246,7 @@ async def test_memory_store_audit_does_not_persist_memory_content(monkeypatch: p
     ("tool", "args"),
     [
         ("service_restart", {"names": ["nginx"]}),
+        ("service_start", {"names": ["nginx"]}),
         ("backup_create", {"name": "test-backup"}),
         ("app_install", {"app": "nextcloud"}),
         ("app_upgrade", {"app": "nextcloud"}),
@@ -398,6 +403,25 @@ async def test_domain_cert_install_rejects_staging():
 
 
 @pytest.mark.anyio
+async def test_service_stop_requires_then_accepts_a_plain_confirmation():
+    # services.stop has require_confirmation but not require_owner_signature
+    # (unlike backup_restore/system_upgrade above) - a stopped service isn't
+    # atomic like restart, but it's scoped to named services, same tier as
+    # domains.write/app_config_set.
+    async with Client(mcp) as client:
+        first = await client.call_tool("service_stop", {"names": ["nginx"]})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool("service_stop", {"names": ["nginx"], "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+
+
+@pytest.mark.anyio
 async def test_app_config_get_is_read_only_no_confirmation_needed():
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -449,6 +473,61 @@ async def test_app_config_set_denied_without_apps_config_write_scope():
         async with Client(mcp) as client:
             result = await client.call_tool(
                 "app_config_set", {"app": "quantumrelay", "key": "peer_mesh.mesh.peers", "value": "wss://x:8443"}
+            )
+            assert result.is_error is True
+    finally:
+        set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_app_setting_get_is_read_only_no_confirmation_needed():
+    async with Client(mcp) as client:
+        result = await client.call_tool("app_setting_get", {"app": "nextcloud", "key": "install_dir"})
+        assert result.is_error is not True, result.content
+        assert result.structured_content["app"] == "nextcloud"
+
+
+@pytest.mark.anyio
+async def test_app_setting_set_requires_then_accepts_a_plain_confirmation():
+    # apps.setting has require_confirmation but not require_owner_signature -
+    # same tier as apps.config above.
+    async with Client(mcp) as client:
+        first = await client.call_tool(
+            "app_setting_set", {"app": "nextcloud", "key": "install_dir", "value": "/var/www/nextcloud"}
+        )
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "app_setting_set",
+            {
+                "app": "nextcloud",
+                "key": "install_dir",
+                "value": "/var/www/nextcloud",
+                "confirmation_id": confirmation_id,
+            },
+        )
+        assert confirmed.is_error is not True, confirmed.content
+
+
+@pytest.mark.anyio
+async def test_app_setting_set_denied_without_apps_setting_write_scope():
+    readonly_identity = AuthenticatedRequest(
+        pubkey="readonly-pubkey-2",
+        event_id="f" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="readonly-pubkey-2", name="readonly-agent", roles=("readonly",), scopes=scopes_for_roles(("readonly",))
+        ),
+    )
+    set_current_request(readonly_identity)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "app_setting_set", {"app": "nextcloud", "key": "install_dir", "value": "/var/www/nextcloud"}
             )
             assert result.is_error is True
     finally:

@@ -121,6 +121,8 @@ def test_registry_contains_only_explicit_operations():
     assert OPERATIONS["app.remove"].required_scope == "apps.remove"
     assert OPERATIONS["app.change_url"].required_scope == "apps.upgrade"
     assert OPERATIONS["app.config_set"].required_scope == "apps.config.write"
+    assert OPERATIONS["app.setting_get"].required_scope == "apps.setting.read"
+    assert OPERATIONS["app.setting_set"].required_scope == "apps.setting.write"
     assert OPERATIONS["backup.restore"].required_scope == "backups.restore"
     assert OPERATIONS["backup.delete"].required_scope == "backups.delete"
     assert OPERATIONS["system.upgrade"].required_scope == "system.upgrade"
@@ -172,6 +174,8 @@ def test_registry_contains_only_explicit_operations():
     assert OPERATIONS["app.install"].required_scope == "apps.install"
     assert OPERATIONS["backup.create"].required_scope == "backups.create"
     assert OPERATIONS["service.restart"].required_scope == "services.restart"
+    assert OPERATIONS["service.stop"].required_scope == "services.stop"
+    assert OPERATIONS["service.start"].required_scope == "services.start"
     assert all("shell" not in name and "exec" not in name for name in OPERATIONS)
 
 

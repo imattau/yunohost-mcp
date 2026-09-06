@@ -139,3 +139,26 @@ def test_only_app_admin_and_above_can_write_app_config():
     assert Scope.APPS_CONFIG_WRITE not in ROLE_SCOPES["operator"]
     for role in ("app-admin", "package-developer", "administrator"):
         assert Scope.APPS_CONFIG_WRITE in ROLE_SCOPES[role], role
+
+
+def test_every_role_can_read_app_settings():
+    # apps.setting.read is bounded to one app's own settings.yml, same
+    # tier as apps.config.read - sits on _READONLY.
+    for role in ROLE_SCOPES:
+        assert Scope.APPS_SETTING_READ in ROLE_SCOPES[role], role
+
+
+def test_only_app_admin_and_above_can_write_app_settings():
+    assert Scope.APPS_SETTING_WRITE not in ROLE_SCOPES["readonly"]
+    assert Scope.APPS_SETTING_WRITE not in ROLE_SCOPES["operator"]
+    for role in ("app-admin", "package-developer", "administrator"):
+        assert Scope.APPS_SETTING_WRITE in ROLE_SCOPES[role], role
+
+
+def test_only_operator_and_above_can_stop_or_start_services():
+    # Same tier as services.restart - operator already has that.
+    assert Scope.SERVICES_STOP not in ROLE_SCOPES["readonly"]
+    assert Scope.SERVICES_START not in ROLE_SCOPES["readonly"]
+    for role in ("operator", "app-admin", "package-developer", "administrator"):
+        assert Scope.SERVICES_STOP in ROLE_SCOPES[role], role
+        assert Scope.SERVICES_START in ROLE_SCOPES[role], role

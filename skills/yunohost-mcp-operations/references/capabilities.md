@@ -4,15 +4,15 @@ This is a reviewed snapshot of the upstream tool inventory and policy model (che
 
 ## Scopes and roles
 
-Scopes: `server.read`, `diagnosis.read`, `apps.read`, `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.read`, `apps.config.write`, `services.read`, `services.restart`, `logs.read`, `backups.read`, `backups.create`, `backups.restore`, `backups.delete`, `users.read`, `users.write`, `users.delete`, `domains.read`, `domains.write`, `system.update`, `system.upgrade`, `system.migrate`, `system.power`, `firewall.read`, `firewall.write`, `settings.read`, `settings.write`, `regenconf.read`, `regenconf.write`, `packages.inspect`, `packages.test`, `catalog.inspect`, `catalog.verify`, `catalog.publish`, `audit.read`, `owner.approve`, `memory.read`, `memory.write`, and `memory.feedback` (the last three gate the optional Polypack bridge - see "Memory" below, and are deliberately kept separate from all YunoHost administration scopes).
+Scopes: `server.read`, `diagnosis.read`, `apps.read`, `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.read`, `apps.config.write`, `apps.setting.read`, `apps.setting.write`, `services.read`, `services.restart`, `services.stop`, `services.start`, `logs.read`, `backups.read`, `backups.create`, `backups.restore`, `backups.delete`, `users.read`, `users.write`, `users.delete`, `domains.read`, `domains.write`, `system.update`, `system.upgrade`, `system.migrate`, `system.power`, `firewall.read`, `firewall.write`, `settings.read`, `settings.write`, `regenconf.read`, `regenconf.write`, `packages.inspect`, `packages.test`, `catalog.inspect`, `catalog.verify`, `catalog.publish`, `audit.read`, `owner.approve`, `memory.read`, `memory.write`, and `memory.feedback` (the last three gate the optional Polypack bridge - see "Memory" below, and are deliberately kept separate from all YunoHost administration scopes).
 
 Role bundles:
 
 | Role | Capability |
 |---|---|
-| `readonly` | `server.read`, `diagnosis.read`, `system.update`, `apps.read`, `apps.config.read`, `services.read`, `logs.read`, `backups.read`, `users.read`, `domains.read`, `packages.inspect`, `catalog.inspect`, `catalog.verify`, `firewall.read`, `settings.read`, `regenconf.read` |
-| `operator` | `readonly` plus `services.restart`, `backups.create` |
-| `app-admin` | `operator` plus `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.write`, `backups.restore`, `backups.delete`, `domains.write`, `users.write`, `users.delete`, `system.upgrade`, `audit.read` (audit reads still additionally require owner co-signature per call - the scope only lets an identity *ask*) |
+| `readonly` | `server.read`, `diagnosis.read`, `system.update`, `apps.read`, `apps.config.read`, `apps.setting.read`, `services.read`, `logs.read`, `backups.read`, `users.read`, `domains.read`, `packages.inspect`, `catalog.inspect`, `catalog.verify`, `firewall.read`, `settings.read`, `regenconf.read` |
+| `operator` | `readonly` plus `services.restart`, `services.stop`, `services.start`, `backups.create` |
+| `app-admin` | `operator` plus `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.write`, `apps.setting.write`, `backups.restore`, `backups.delete`, `domains.write`, `users.write`, `users.delete`, `system.upgrade`, `audit.read` (audit reads still additionally require owner co-signature per call - the scope only lets an identity *ask*) |
 | `package-developer` | `app-admin` plus `packages.test`, `catalog.publish`, `memory.read`, `memory.write`, `memory.feedback` |
 | `administrator` | Every scope, including `system.migrate`, `firewall.write`, `settings.write`, `regenconf.write`, `system.power`, and `owner.approve` |
 
@@ -36,6 +36,8 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 - `diagnosis_run`, `diagnosis_get`, `diagnose_app` — `diagnosis.read`.
 - `operations_list`, `operation_status`, `operation_logs`
 - `services_list`, `service_status`, `service_logs`, `service_restart`
+- `service_stop` — `services.stop`, confirmation-gated (not owner-signature-gated). Unlike `service_restart` this is not atomic - the service stays down until `service_start` is called.
+- `service_start` — `services.start`, no confirmation gate (same tier as `service_restart` - pure recovery action). Brings a stopped service back up.
 - `system_snapshot`, `network_snapshot` — `server.read`. Host uptime/resources/processes/disk/OOM evidence, and local addresses/routes/listening sockets, respectively.
 - `service_history` — `services.read`. Per-service state, exit details, restart counts, timestamps (distinct from `service_logs`' raw log lines).
 - `journal_query`, `web_logs` — `logs.read`. `journal_query` reads a deliberately allowlisted set of system journals (kernel, OOM, SSH, fail2ban, firewall, systemd, and specific app units) - not a generic journalctl passthrough; `web_logs` reads bounded, structured Nginx access/error logs.
@@ -48,6 +50,8 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 - `apps_list`, `app_info`, `app_resources` — `apps.read`.
 - `app_config_get` — `apps.config.read`. Read an installed app's config-panel schema and current values; call with `full=True` first to get the exact dotted `<panel>.<section>.<option>` id `app_config_set` needs - a shortened or guessed key can silently target the wrong setting if a panel reuses a bare option name across sections.
 - `app_config_set` — `apps.config.write`. Confirmation-gated, not owner-signature-gated (bounded to one already-installed app's own declared options, not system-wide).
+- `app_setting_get` — `apps.setting.read`. Reads one key straight from an installed app's `settings.yml` (e.g. `install_dir`, a generated port, a leftover value from a botched `app_change_url`) - narrower and more primitive than `app_config_get`, not limited to keys a `config_panel.toml` declares (most apps have no config panel at all).
+- `app_setting_set` — `apps.setting.write`. Confirmation-gated, not owner-signature-gated - same tier as `app_config_set`. Exactly one of `value` or `delete=True` must be given; there is no schema behind these keys, so call `app_setting_get` first to confirm the current value and the exact key.
 - `app_install`, `app_upgrade`, `app_remove` — `apps.install`/`apps.upgrade`/`apps.remove`.
 - `app_change_url` — `apps.upgrade`, confirmation-gated. Moves an app in place via its own `scripts/change_url`, preserving data/settings - prefer over remove-and-reinstall; fails if the app ships no such script.
 - `plan_app_upgrade`, `execute_plan`, `safe_upgrade`, `repair_app`
@@ -135,6 +139,8 @@ The built-in policy requires:
 | `domain_dns_push` | confirmation |
 | `app_change_url` | confirmation |
 | `app_config_set` | confirmation |
+| `app_setting_set` | confirmation |
+| `service_stop` | confirmation |
 | `app_upgrade` / `execute_plan` / `safe_upgrade` | recent backup and at least 2 GB free; hard blockers, not confirmable overrides |
 | `app_remove` | confirmation and backup within 24 hours by default |
 | `backup_restore` | confirmation plus different administrator identity co-signature |

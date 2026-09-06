@@ -550,6 +550,22 @@ def app_config_get(app: str, key: str = "", full: bool = False, export: bool = F
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.APPS_SETTING_READ)
+def app_setting_get(app: str, key: str) -> dict[str, Any]:
+    """Read one key from an installed app's settings.yml.
+
+    Narrower and more primitive than app_config_get: this reads whatever
+    an app's install/upgrade scripts stashed directly in settings.yml
+    (e.g. install_dir, a generated port, a leftover value from a botched
+    change_url) - not limited to keys a config_panel.toml declares, which
+    most apps don't have at all.
+    """
+    return adapter.app_setting_get(app, key)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.DIAGNOSIS_READ)
 def diagnosis_run(categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
     """Trigger a fresh YunoHost diagnosis run. Can take real time (network/port checks)."""
@@ -1392,6 +1408,44 @@ def service_restart(names: list[str], confirmation_id: str | None = None) -> dic
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.SERVICES_STOP)
+@audited_write("services.stop", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "services.stop",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda names, **_: {
+        "action": "stop services",
+        "services": names,
+        "warning": "Unlike restart this is not atomic - the service stays down "
+        "until service_start is called.",
+    },
+)
+def service_stop(names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+    """Stop one or more YunoHost services. Call service_start to bring them back up."""
+    return adapter.service_stop(names, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SERVICES_START)
+@audited_write("services.start", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "services.start",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+)
+def service_start(names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
+    """Start one or more stopped YunoHost services."""
+    return adapter.service_start(names, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_CREATE)
 @audited_write("backups.create", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
@@ -1646,6 +1700,36 @@ def app_config_set(app: str, key: str, value: str, confirmation_id: str | None =
     the wrong setting. Applying typically restarts the app's service.
     """
     return adapter.app_config_set(app, key=key, value=value, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.APPS_SETTING_WRITE)
+@audited_write("apps.setting", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "apps.setting",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, key, value=None, delete=False, **_: {
+        "action": "delete app setting" if delete else "set app setting",
+        "app": app,
+        "key": key,
+        "value": value,
+        "warning": "There is no schema behind these keys the way app_config_get(full=True) "
+        "provides for config-panel options. Call app_setting_get first to confirm the "
+        "current value and that this is the exact key you mean.",
+    },
+)
+def app_setting_set(
+    app: str, key: str, value: str | None = None, delete: bool = False, confirmation_id: str | None = None
+) -> dict[str, Any]:
+    """Write or delete one key in an installed app's settings.yml. Requires confirmation.
+
+    Exactly one of `value` or `delete=True` must be given.
+    """
+    return adapter.app_setting_set(app, key, value=value, delete=delete, confirmation_id=confirmation_id)
 
 
 @mcp.tool()

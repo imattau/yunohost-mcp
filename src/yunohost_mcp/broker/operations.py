@@ -72,6 +72,18 @@ def _app_config_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     return adapter.app_config_get(app, **values)
 
 
+def _app_setting_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"app", "key"}:
+        raise ValueError("unknown app setting argument")
+    app = arguments.get("app")
+    key = arguments.get("key")
+    if not isinstance(app, str) or not app or len(app) > 128:
+        raise ValueError("app must be a non-empty string")
+    if not isinstance(key, str) or not key or len(key) > 512:
+        raise ValueError("key must be a non-empty bounded string")
+    return adapter.app_setting_get(app, key)
+
+
 def _free_space(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     path = arguments.get("path", "/")
     if not isinstance(path, str) or path not in {"/", "/home", "/var"}:
@@ -471,6 +483,30 @@ def _service_restart(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
     return adapter.service_restart(names, confirmation_id=confirmation_id)
 
 
+def _service_stop(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"names", "confirmation_id"}:
+        raise ValueError("unknown service stop argument")
+    names = arguments.get("names")
+    if not isinstance(names, list) or not names or len(names) > 16 or not all(isinstance(name, str) and name for name in names):
+        raise ValueError("names must contain 1 to 16 non-empty service names")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.service_stop(names, confirmation_id=confirmation_id)
+
+
+def _service_start(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) - {"names", "confirmation_id"}:
+        raise ValueError("unknown service start argument")
+    names = arguments.get("names")
+    if not isinstance(names, list) or not names or len(names) > 16 or not all(isinstance(name, str) and name for name in names):
+        raise ValueError("names must contain 1 to 16 non-empty service names")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.service_start(names, confirmation_id=confirmation_id)
+
+
 def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "description", "apps", "system", "confirmation_id"}
     if set(arguments) - allowed:
@@ -614,6 +650,28 @@ def _app_config_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
         raise ValueError("confirmation_id must be a string")
     return adapter.app_config_set(
         arguments["app"], arguments["key"], arguments["value"], confirmation_id=confirmation_id
+    )
+
+
+def _app_setting_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"app", "key", "value", "delete", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown app setting argument")
+    for name, max_length in (("app", 128), ("key", 512)):
+        value = arguments.get(name)
+        if not isinstance(value, str) or not value or len(value) > max_length:
+            raise ValueError(f"{name} must be a non-empty bounded string")
+    value = arguments.get("value")
+    if value is not None and (not isinstance(value, str) or len(value) > 8192):
+        raise ValueError("value must be a bounded string")
+    delete = arguments.get("delete", False)
+    if not isinstance(delete, bool):
+        raise ValueError("delete must be a boolean")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.app_setting_set(
+        arguments["app"], arguments["key"], value=value, delete=delete, confirmation_id=confirmation_id
     )
 
 
@@ -1070,6 +1128,7 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "app.info": BrokerOperation("app.info", "apps.read", _app_info),
     "app.resources": BrokerOperation("app.resources", "apps.read", _app_resources),
     "app.config_get": BrokerOperation("app.config_get", "apps.config.read", _app_config_get),
+    "app.setting_get": BrokerOperation("app.setting_get", "apps.setting.read", _app_setting_get),
     "services.status": BrokerOperation("services.status", "services.read", _service_status),
     "domains.list": BrokerOperation("domains.list", "domains.read", _no_args(YunohostAdapter.domains_list)),
     "users.list": BrokerOperation("users.list", "users.read", _no_args(YunohostAdapter.users_list)),
@@ -1099,6 +1158,8 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "firewall.list": BrokerOperation("firewall.list", "firewall.read", _firewall_list),
     "firewall.is_open": BrokerOperation("firewall.is_open", "firewall.read", _firewall_is_open),
     "service.restart": BrokerOperation("service.restart", "services.restart", _service_restart),
+    "service.stop": BrokerOperation("service.stop", "services.stop", _service_stop),
+    "service.start": BrokerOperation("service.start", "services.start", _service_start),
     "backup.create": BrokerOperation("backup.create", "backups.create", _backup_create),
     "backup.info": BrokerOperation("backup.info", "backups.read", _backup_info),
     "backup.delete": BrokerOperation("backup.delete", "backups.delete", _backup_delete),
@@ -1107,6 +1168,7 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "app.remove": BrokerOperation("app.remove", "apps.remove", _app_remove),
     "app.change_url": BrokerOperation("app.change_url", "apps.upgrade", _app_change_url),
     "app.config_set": BrokerOperation("app.config_set", "apps.config.write", _app_config_set),
+    "app.setting_set": BrokerOperation("app.setting_set", "apps.setting.write", _app_setting_set),
     "backup.restore": BrokerOperation("backup.restore", "backups.restore", _backup_restore),
     "system.upgrade": BrokerOperation("system.upgrade", "system.upgrade", _system_upgrade),
     "system.reboot": BrokerOperation("system.reboot", "system.power", _system_reboot),

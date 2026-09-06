@@ -31,8 +31,25 @@ class Scope(StrEnum):
     # not owner-signature-gated.
     APPS_CONFIG_WRITE = "apps.config.write"
 
+    # app_setting_get/app_setting_set - one key in an already-installed
+    # app's settings.yml (yunohost.app.app_setting), narrower and more
+    # primitive than the config-panel-scoped keys above: most apps have no
+    # config_panel.toml at all, so this is the only bounded way to read or
+    # fix e.g. a stuck install_dir or a leftover value from a botched
+    # change_url. Same read/write split and same risk tiers as
+    # APPS_CONFIG_READ/APPS_CONFIG_WRITE - bounded to one app's own
+    # settings, not system-wide.
+    APPS_SETTING_READ = "apps.setting.read"
+    APPS_SETTING_WRITE = "apps.setting.write"
+
     SERVICES_READ = "services.read"
     SERVICES_RESTART = "services.restart"
+    # service_stop/service_start - split out from SERVICES_RESTART because
+    # stop isn't atomic like restart: a service stays down until something
+    # calls start, which is the actual outage risk (see policy/rules.py's
+    # "services.stop" entry for why stop, not start, is confirmation-gated).
+    SERVICES_STOP = "services.stop"
+    SERVICES_START = "services.start"
 
     LOGS_READ = "logs.read"
 
