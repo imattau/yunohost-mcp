@@ -840,7 +840,16 @@ def domain_dns_push_preview(domain: str, force: bool = False, purge: bool = Fals
     created; `force=True` extends that to any matching record regardless
     of origin, matching what domain_dns_push would do with the same flag.
     Always call this before domain_dns_push, especially with
-    force=True/purge=True."""
+    force=True/purge=True.
+
+    Exception: for a domain whose registrar is YunoHost itself (a
+    *.nohost.me/*.noho.st/*.ynh.fr DynDNS domain), upstream YunoHost's own
+    domain_dns_push short-circuits to a live (idempotent, harmless) DynDNS
+    IP re-registration before it ever reaches its own dry-run check -
+    confirmed against a real deployment, not just by reading the source.
+    An empty `changes: {}` response for such a domain reflects that
+    short-circuit having actually run, not "nothing to do" - there is no
+    real preview available for this registrar type."""
     return adapter.domain_dns_push_preview(domain, force=force, purge=purge)
 
 
@@ -884,7 +893,15 @@ def domain_dns_push(
     syncing them - almost always combined with removing the domain
     itself, not a normal sync. Requires confirmation, same tier as
     domain_add/domain_cert_install (not owner-signature-gated - scoped to
-    one domain, not system-wide)."""
+    one domain, not system-wide).
+
+    For a *.nohost.me/*.noho.st/*.ynh.fr domain (registrar is YunoHost
+    itself), this performs a live DynDNS IP re-registration instead of
+    any create/update/delete against a third-party registrar - the same
+    thing YunoHost's own automatic DynDNS refresh already does
+    periodically, so harmless, but not the "sync arbitrary DNS records"
+    behavior the rest of this docstring describes for an actual
+    third-party registrar."""
     return adapter.domain_dns_push(domain, force=force, purge=purge, confirmation_id=confirmation_id)
 
 

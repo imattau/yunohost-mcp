@@ -1983,6 +1983,16 @@ class YunohostAdapter:
     # not a write, and @require_confirmation gates a tool call as a whole,
     # not per-argument - same reasoning as the plan_app_upgrade/
     # execute_plan and regenconf_pending/regenconf_apply splits.
+    #
+    # That "domain_dns_push_preview is a read" premise has one confirmed
+    # exception: for a *.nohost.me/*.noho.st/*.ynh.fr domain (registrar ==
+    # "yunohost"), domain_dns_push() itself calls dyndns_update() and
+    # returns {} *before* its own dry_run branch is ever reached - so
+    # dry_run=True still performs a live (idempotent, harmless) DynDNS IP
+    # re-registration. Confirmed against a real deployment (lostcause.
+    # nohost.me), not just by reading upstream source. Not worth adding a
+    # separate registrar-detection call here just to special-case it -
+    # documented loudly on both tools' docstrings instead.
 
     def domain_dns_suggest(self, domain: str) -> dict[str, Any]:
         brokered = self._broker_call("domain.dns_suggest", {"domain": domain})
@@ -2517,10 +2527,12 @@ class YunohostAdapter:
 
     # -- Settings ---------------------------------------------------------
     #
-    # yunohost.settings.settings_{list,get,set} are plain functions - not
-    # @is_unit_operation-decorated, no transitive yunohost.utils.form
-    # import - same in-process _import_attr pattern as migrations/firewall
-    # above.
+    # yunohost.settings.settings_{list,get,set} looked like plain functions
+    # with no transitive yunohost.utils.form import - that assumption was
+    # wrong: live testing hit the exact pydantic v1/v2 conflict
+    # _call_via_system_python's docstring describes ("field"/"config" not
+    # valid in Pydantic V2) via plain in-process _import_attr. Routed
+    # through the subprocess instead, same as domain_add/domain_dns_*.
 
     def settings_list(self, full: bool = False) -> dict[str, Any]:
         brokered = self._broker_call("settings.list", {"full": full})
@@ -2528,8 +2540,8 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "settings": {}}
-        settings_list = _import_attr("yunohost.settings", "settings_list")
-        return {"fake": False, "settings": settings_list(full=full)}
+        result = _call_via_system_python("yunohost.settings", "settings_list", {"full": full}, self.settings)
+        return {"fake": False, "settings": result}
 
     def settings_get(self, key: str, full: bool = False) -> dict[str, Any]:
         brokered = self._broker_call("settings.get", {"key": key, "full": full})
@@ -2537,8 +2549,10 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "key": key, "value": None}
-        settings_get = _import_attr("yunohost.settings", "settings_get")
-        return {"fake": False, "key": key, "value": settings_get(key, full=full)}
+        value = _call_via_system_python(
+            "yunohost.settings", "settings_get", {"key": key, "full": full}, self.settings
+        )
+        return {"fake": False, "key": key, "value": value}
 
     def settings_set(self, key: str, value: Any, confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call(
@@ -2548,13 +2562,14 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "key": key, "value": value}
-        settings_set = _import_attr("yunohost.settings", "settings_set")
-        settings_set(key, value)
+        _call_via_system_python("yunohost.settings", "settings_set", {"key": key, "value": value}, self.settings)
         # settings_set() returns None - read the value back so the caller
         # gets confirmation of what actually landed (e.g. a coerced type)
         # without a separate settings_get() round trip.
-        settings_get = _import_attr("yunohost.settings", "settings_get")
-        return {"fake": False, "key": key, "value": settings_get(key)}
+        new_value = _call_via_system_python(
+            "yunohost.settings", "settings_get", {"key": key, "full": False}, self.settings
+        )
+        return {"fake": False, "key": key, "value": new_value}
 
     # -- Regen-conf ---------------------------------------------------------
     #
@@ -2562,7 +2577,9 @@ class YunohostAdapter:
     # (list_pending=True, makes no changes) and "actually apply" in a
     # single underlying function - split into two adapter/tool calls
     # anyway, same read/write split as firewall_list/firewall_open, so
-    # listing pending diffs never needs a scope beyond *_READ.
+    # listing pending diffs never needs a scope beyond *_READ. Same
+    # pydantic v1/v2 conflict as settings above (confirmed live, not just
+    # by inspection) - routed through _call_via_system_python too.
 
     def regenconf_pending(self, names: list[str] | None = None, with_diff: bool = False) -> dict[str, Any]:
         brokered = self._broker_call("regenconf.pending", {"names": names, "with_diff": with_diff})
@@ -2570,8 +2587,12 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "pending": {}}
-        regen_conf = _import_attr("yunohost.regenconf", "regen_conf")
-        result = regen_conf(names=names or [], with_diff=with_diff, list_pending=True)
+        result = _call_via_system_python(
+            "yunohost.regenconf",
+            "regen_conf",
+            {"names": names or [], "with_diff": with_diff, "list_pending": True},
+            self.settings,
+        )
         return {"fake": False, "pending": result}
 
     def regenconf_apply(
@@ -2587,8 +2608,9 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "applied": {}}
-        regen_conf = _import_attr("yunohost.regenconf", "regen_conf")
-        result = regen_conf(names=names or [], force=force)
+        result = _call_via_system_python(
+            "yunohost.regenconf", "regen_conf", {"names": names or [], "force": force}, self.settings
+        )
         return {"fake": False, "applied": result}
 
     # -- Phase 8: package development -------------------------------------
