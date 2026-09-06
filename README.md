@@ -181,6 +181,10 @@ yunohost-mcp-delegate --key-file ~/.config/yunohost-mcp/key \
 
 Some operations (`system_upgrade`, `backup_restore`, `backup_delete`, `system_migrate`, `user_delete`, permission changes, firewall changes) require owner co-signature on top of the requester's own confirmation (PLAN.md Phase 13, `solo` profile - see `docs/owner-approval-plan.md` in the packaging repo for the full design). The requester's call pauses with a `confirmation_id`; the configured owner reviews and approves it with `yunohost-mcp-approve`, signing through their own [NIP-46](https://nips.nostr.com/46) remote signer app (Amber, nsec.app, ...) - their private key never touches this server or the requesting agent's machine.
 
+DNS publishing, catalogue publication, and package-test lifecycle operations also require owner co-signature. Package-test writes must first use `package_test_prepare`; the returned short-lived session binds the operation to one requester, candidate source, and app id. Treat package testing as privileged because candidate package scripts execute with YunoHost privileges.
+
+For reverse-proxy deployments, set `YUNOHOST_MCP_PUBLIC_BASE_URL` to the exact public origin used in NIP-98 signatures (for example `https://mcp.example.org`). Requests with an unexpected `Host` header are rejected. Keep the local stdio transport restricted to trusted local clients: it intentionally grants the local process full administrator scope.
+
 One-time setup, on whatever device the owner keeps their signer app on:
 
 ```

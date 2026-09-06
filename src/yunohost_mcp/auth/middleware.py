@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from urllib.parse import urlsplit
 
 import anyio
 
@@ -62,6 +63,7 @@ class NostrAuthMiddleware:
         max_request_body_bytes: int = 1_048_576,
         request_timeout_seconds: int = 120,
         max_concurrent_requests: int = 8,
+        public_base_url: str | None = None,
     ) -> None:
         self.app = app
         self.identity_store = identity_store
@@ -73,6 +75,7 @@ class NostrAuthMiddleware:
         self.max_request_body_bytes = max_request_body_bytes
         self.request_timeout_seconds = request_timeout_seconds
         self._request_slots = anyio.Semaphore(max_concurrent_requests)
+        self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http" or scope["path"] in self.exempt_paths:
@@ -86,8 +89,12 @@ class NostrAuthMiddleware:
             return
 
         method = scope["method"]
-        url = _reconstruct_url(scope)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        try:
+            url = _reconstruct_url(scope, public_base_url=self.public_base_url)
+        except ValueError as exc:
+            await _send_error(send, 400, str(exc))
+            return
         authorization = headers.get("authorization")
 
         try:
@@ -191,7 +198,19 @@ async def _buffer_body(receive, *, max_bytes: int):
     return body, replay_receive
 
 
-def _reconstruct_url(scope) -> str:
+def _reconstruct_url(scope, *, public_base_url: str | None = None) -> str:
+    if public_base_url:
+        parsed_base = urlsplit(public_base_url)
+        if parsed_base.scheme not in {"http", "https"} or not parsed_base.netloc:
+            raise ValueError("public_base_url must be an absolute HTTP(S) origin")
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        host = headers.get("host")
+        if host and host.lower() != parsed_base.netloc.lower():
+            raise ValueError("request Host does not match configured public_base_url")
+        path = scope.get("root_path", "") + scope["path"]
+        query = scope.get("query_string", b"").decode("latin-1")
+        url = f"{parsed_base.scheme}://{parsed_base.netloc}{path}"
+        return f"{url}?{query}" if query else url
     scheme = scope.get("scheme", "http")
     headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
     host = headers.get("host")

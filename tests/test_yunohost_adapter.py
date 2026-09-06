@@ -247,9 +247,7 @@ def test_http_probe_reaches_the_real_network_path_without_crashing(monkeypatch):
         def geturl(self):
             return "https://example.test/"
 
-    monkeypatch.setattr(
-        "yunohost_mcp.yunohost.adapter.urllib.request.urlopen", lambda *a, **k: FakeResponse()
-    )
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._SAFE_PROBE_OPENER.open", lambda *a, **k: FakeResponse())
     adapter = YunohostAdapter(settings=Settings(fake_yunohost=False, allow_private_http_probes=True))
 
     result = adapter.http_probe("https://example.test")

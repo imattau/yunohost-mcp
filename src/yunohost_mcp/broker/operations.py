@@ -348,7 +348,7 @@ def _package_lint(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
 
 
 def _package_run_tests(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"source", "app_id", "confirmation_id"}
+    allowed = {"source", "app_id", "confirmation_id", "session_id"}
     if set(arguments) - allowed:
         raise ValueError("unknown package test argument")
     source = arguments.get("source")
@@ -360,11 +360,14 @@ def _package_run_tests(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     confirmation_id = arguments.get("confirmation_id")
     if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
         raise ValueError("confirmation_id must be a string")
-    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id)
+    session_id = arguments.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id, session_id=session_id)
 
 
 def _package_install_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"source", "label", "args"}
+    allowed = {"source", "label", "args", "session_id", "confirmation_id"}
     if set(arguments) - allowed:
         raise ValueError("unknown package install-test argument")
     source = arguments.get("source")
@@ -373,52 +376,62 @@ def _package_install_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     for key in ("label", "args"):
         if arguments.get(key) is not None and (not isinstance(arguments[key], str) or len(arguments[key]) > 8192):
             raise ValueError(f"{key} must be a bounded string")
-    return adapter.package_install_test(source, label=arguments.get("label"), args=arguments.get("args"))
+    return adapter.package_install_test(source, label=arguments.get("label"), args=arguments.get("args"), session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_upgrade_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"app", "source"}
+    allowed = {"app", "source", "session_id", "confirmation_id"}
     if set(arguments) != allowed:
         raise ValueError("app and source are required")
     app, source = arguments["app"], arguments["source"]
     if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(source, str) or not source or len(source) > 8192:
         raise ValueError("app and source must be bounded non-empty strings")
-    return adapter.package_upgrade_test(app, source)
+    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
+        raise ValueError("session_id is required")
+    return adapter.package_upgrade_test(app, source, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_backup_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) != {"app"}:
+    if set(arguments) - {"app", "session_id", "confirmation_id"} or "app" not in arguments:
         raise ValueError("app is required")
     app = arguments["app"]
     if not isinstance(app, str) or not app or len(app) > 128:
         raise ValueError("app must be a bounded non-empty string")
-    return adapter.package_backup_test(app)
+    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
+        raise ValueError("session_id is required")
+    return adapter.package_backup_test(app, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_restore_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) != {"app", "archive_name"}:
+    if set(arguments) - {"app", "archive_name", "session_id", "confirmation_id"} or not {"app", "archive_name"}.issubset(arguments):
         raise ValueError("app and archive_name are required")
     app, archive = arguments["app"], arguments["archive_name"]
     if not all(isinstance(value, str) and value and len(value) <= 256 for value in (app, archive)):
         raise ValueError("app and archive_name must be bounded non-empty strings")
-    return adapter.package_restore_test(app, archive)
+    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
+        raise ValueError("session_id is required")
+    return adapter.package_restore_test(app, archive, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_change_url_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) != {"app", "domain", "path"}:
+    if set(arguments) - {"app", "domain", "path", "session_id", "confirmation_id"} or not {"app", "domain", "path"}.issubset(arguments):
         raise ValueError("app, domain, and path are required")
     if not all(isinstance(arguments[key], str) and arguments[key] and len(arguments[key]) <= 8192 for key in arguments):
         raise ValueError("package change-url arguments must be bounded non-empty strings")
-    return adapter.package_change_url_test(arguments["app"], arguments["domain"], arguments["path"])
+    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
+        raise ValueError("session_id is required")
+    return adapter.package_change_url_test(arguments["app"], arguments["domain"], arguments["path"], session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_remove_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"app", "purge"}:
+    if set(arguments) - {"app", "purge", "session_id", "confirmation_id"}:
         raise ValueError("unknown package remove-test argument")
     app, purge = arguments.get("app"), arguments.get("purge", True)
     if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(purge, bool):
         raise ValueError("app and purge are invalid")
-    return adapter.package_remove_test(app, purge=purge)
+    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
+        raise ValueError("session_id is required")
+    return adapter.package_remove_test(app, purge=purge, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _safe_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:

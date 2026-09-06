@@ -30,10 +30,9 @@ Phase 8: package-development tools (v0.3) - package_inspect/package_lint
 package_upgrade_test/package_backup_test/package_restore_test/
 package_change_url_test/package_remove_test/package_run_tests (writes,
 packages.test), all operating on a local path/git URL rather than the app
-catalog. No confirmation step: this scope exists specifically for a fast
-dev-iteration loop, so friction is scope (who may call these at all, i.e.
-the package-developer role) rather than a per-call confirmation - see
-yunohost/adapter.py's Phase 8 section for why.
+catalog. Package-test writes require a short-lived source/app-bound session,
+confirmation, and owner co-signature because candidate scripts run with
+YunoHost privileges.
 Phase 9: every tool's response passes through @redact_response
 (redaction.py) before it reaches the caller - a second, key-name-matching
 layer on top of what YunoHost's own OperationLogger already redacts in its
@@ -97,10 +96,8 @@ tools unreachable by any agent identity that isn't separately granted
 Phase 16: domain_dns_suggest/domain_dns_push_preview/domain_dns_push
 (yunohost.dns) - the last of the gap-filled tools from the same admin-
 capability audit. Reuses DOMAINS_READ/DOMAINS_WRITE rather than new
-scopes (same choice as domain_cert_info/domain_cert_install), and
-"domains.dns" is confirmation-gated but not owner-signature-gated - scoped
-to one domain's already-configured registrar, same tier as domains.write/
-domains.cert, not system-wide. Split into a suggest/preview/push trio
+scopes and requires confirmation plus owner co-signature because registrar
+changes are externally visible. Split into a suggest/preview/push trio
 (rather than exposing domain_dns_push's own `dry_run` argument) for the
 same reason as regenconf_pending/regenconf_apply: a dry-run diff against
 the live registrar is a read, and @require_confirmation gates a whole
@@ -165,6 +162,7 @@ from yunohost_mcp.policy.enforcement import (
     translate_known_errors,
 )
 from yunohost_mcp.policy.locks import WriteLock
+from yunohost_mcp.policy.package_sessions import PackageTestSessionError, PackageTestSessionStore, session_path
 from yunohost_mcp.policy.rules import (
     PolicyRule,
     PolicyViolation,
@@ -197,6 +195,9 @@ confirmation_store = (
 )
 plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
 catalog_plan_store = ConfirmationStore(ttl_seconds=settings.confirmation_ttl_seconds)
+package_test_sessions = PackageTestSessionStore(
+    session_path(settings.config_dir), ttl_seconds=settings.package_test_session_ttl_seconds
+)
 # Shared with create_http_app() below (not just constructed there) so
 # get_owner_pubkey() can resolve the bootstrap-administrator fallback
 # (auth/owner.py) against the same live-reloaded identity.toml the HTTP
@@ -915,9 +916,9 @@ def domain_dns_push(
     `force=True` extends that to any matching record regardless of
     origin. `purge=True` deletes every YunoHost-managed record instead of
     syncing them - almost always combined with removing the domain
-    itself, not a normal sync. Requires confirmation, same tier as
-    domain_add/domain_cert_install (not owner-signature-gated - scoped to
-    one domain, not system-wide).
+    itself, not a normal sync. Requires confirmation and owner co-signature
+    because it changes an external registrar, even though it is scoped to
+    one domain.
 
     For a *.nohost.me/*.noho.st/*.ynh.fr domain (registrar is YunoHost
     itself), this performs a live DynDNS IP re-registration instead of
@@ -2140,11 +2141,61 @@ def package_lint(source: str) -> dict[str, Any]:
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.PACKAGES_INSPECT)
+def package_test_prepare(source: str, app: str | None = None) -> dict[str, Any]:
+    """Prepare a short-lived package-test session without changing the host.
+
+    The returned session binds later package-test writes to this exact source,
+    app id, and requester identity. ``app`` is required when preparing a test
+    against an already-installed app; otherwise it is read from the candidate
+    manifest.
+    """
+    manifest = adapter.package_inspect(source)
+    app_id = app or manifest.get("id")
+    if not isinstance(app_id, str) or not app_id.strip():
+        raise ToolInputError("package manifest did not provide an app id; pass app explicitly")
+    session = package_test_sessions.create(pubkey=require_current_request().pubkey, source=source, app_id=app_id)
+    return {
+        "package_test_id": session.session_id,
+        "app": session.app_id,
+        "source": session.source,
+        "expires_at": session.expires_at,
+        "manifest": manifest,
+    }
+
+
+def _package_session(session_id: str, *, source: str | None = None, app: str | None = None):
+    if not isinstance(session_id, str) or not session_id:
+        raise ToolInputError("session_id is required; call package_test_prepare first")
+    try:
+        return package_test_sessions.get(
+            session_id, pubkey=require_current_request().pubkey, source=source, app_id=app
+        )
+    except PackageTestSessionError as exc:
+        raise ToolInputError(str(exc)) from exc
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_install_test(source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda source, session_id, label=None, args=None, **_: {
+        "action": "install candidate package for testing", "source": source,
+        "package_test_id": session_id, "label": label, "has_custom_args": args is not None,
+        "warning": "Package installation runs candidate scripts with YunoHost privileges and requires owner approval.",
+    },
+)
+def package_install_test(
+    source: str, session_id: str, label: str | None = None, args: str | None = None,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
     """Install a candidate package from a local path/git URL, for testing."""
-    return adapter.package_install_test(source, label=label, args=args)
+    _package_session(session_id, source=source)
+    return adapter.package_install_test(source, label=label, args=args, session_id=session_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -2152,9 +2203,18 @@ def package_install_test(source: str, label: str | None = None, args: str | None
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_upgrade_test(app: str, source: str) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, source, session_id, **_: {
+        "action": "upgrade test app from candidate package", "app": app, "source": source, "package_test_id": session_id,
+        "warning": "Candidate upgrade scripts run with YunoHost privileges and require owner approval.",
+    },
+)
+def package_upgrade_test(app: str, source: str, session_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Upgrade an already-installed `app` from a candidate local path/tarball, for testing."""
-    return adapter.package_upgrade_test(app, source)
+    _package_session(session_id, source=source, app=app)
+    return adapter.package_upgrade_test(app, source, session_id=session_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -2162,9 +2222,15 @@ def package_upgrade_test(app: str, source: str) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_backup_test(app: str) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, session_id, **_: {"action": "backup test app", "app": app, "package_test_id": session_id},
+)
+def package_backup_test(app: str, session_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Create a backup of an installed test app, to verify its backup script works."""
-    return adapter.package_backup_test(app)
+    _package_session(session_id, app=app)
+    return adapter.package_backup_test(app, session_id=session_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -2172,9 +2238,18 @@ def package_backup_test(app: str) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_restore_test(app: str, archive_name: str) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, archive_name, session_id, **_: {
+        "action": "restore test app", "app": app, "archive_name": archive_name, "package_test_id": session_id,
+        "warning": "Restoring an archive changes application state and requires owner approval.",
+    },
+)
+def package_restore_test(app: str, archive_name: str, session_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Restore a test app from a backup archive, to verify its restore script works."""
-    return adapter.package_restore_test(app, archive_name)
+    _package_session(session_id, app=app)
+    return adapter.package_restore_test(app, archive_name, session_id=session_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -2182,9 +2257,18 @@ def package_restore_test(app: str, archive_name: str) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_change_url_test(app: str, domain: str, path: str) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, domain, path, session_id, **_: {
+        "action": "change test app URL", "app": app, "domain": domain, "path": path, "package_test_id": session_id,
+        "warning": "URL changes alter reverse-proxy and app configuration and require owner approval.",
+    },
+)
+def package_change_url_test(app: str, domain: str, path: str, session_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
     """Move a test app to a new domain/path, to verify its change_url script works."""
-    return adapter.package_change_url_test(app, domain, path)
+    _package_session(session_id, app=app)
+    return adapter.package_change_url_test(app, domain, path, session_id=session_id, confirmation_id=confirmation_id)
 
 
 @mcp.tool()
@@ -2192,9 +2276,20 @@ def package_change_url_test(app: str, domain: str, path: str) -> dict[str, Any]:
 @translate_known_errors
 @require_scope(Scope.PACKAGES_TEST)
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
-def package_remove_test(app: str, purge: bool = True) -> dict[str, Any]:
+@require_confirmation(
+    "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda app, purge=True, session_id=None, **_: {
+        "action": "remove test app", "app": app, "purge": purge, "package_test_id": session_id,
+        "warning": "This removes application state and requires owner approval.",
+    },
+)
+def package_remove_test(app: str, session_id: str, purge: bool = True, confirmation_id: str | None = None) -> dict[str, Any]:
     """Remove a test app, to verify its remove script works. Purges data by default."""
-    return adapter.package_remove_test(app, purge=purge)
+    _package_session(session_id, app=app)
+    result = adapter.package_remove_test(app, purge=purge, session_id=session_id, confirmation_id=confirmation_id)
+    package_test_sessions.delete(session_id, pubkey=require_current_request().pubkey)
+    return result
 
 
 @mcp.tool()
@@ -2206,6 +2301,22 @@ def package_logs(operation: str, tail_lines: int | None = None) -> dict[str, Any
     for the package-development workflow (PLAN.md Phase 8). See that
     tool's docstring for the default tail size and log-text redaction."""
     return adapter.operation_logs(operation, tail_lines=tail_lines)
+
+
+def _execute_package_test_cycle(source: str, app_id: str | None, confirmation_id: str | None) -> dict[str, Any]:
+    manifest = adapter.package_inspect(source)
+    resolved_app = app_id or manifest.get("id")
+    if not isinstance(resolved_app, str) or not resolved_app:
+        raise ToolInputError("package manifest did not provide an app id; pass app_id explicitly")
+    session = package_test_sessions.create(
+        pubkey=require_current_request().pubkey, source=source, app_id=resolved_app
+    )
+    try:
+        return adapter.package_run_tests(
+            source, app_id=resolved_app, confirmation_id=confirmation_id, session_id=session.session_id
+        )
+    finally:
+        package_test_sessions.delete(session.session_id, pubkey=require_current_request().pubkey)
 
 
 @mcp.tool()
@@ -2233,7 +2344,7 @@ def package_run_tests(
     failing step; see yunohost/adapter.py's package_run_tests for exactly
     what each step does and why this isn't package_check's full CI matrix.
     """
-    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id)
+    return _execute_package_test_cycle(source, app_id, confirmation_id)
 
 
 @mcp.tool()
@@ -2470,7 +2581,7 @@ def test_package(
     install -> backup -> remove -> restore cycle; see
     yunohost/adapter.py's package_run_tests for what each step does.
     """
-    return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id)
+    return _execute_package_test_cycle(source, app_id, confirmation_id)
 
 
 @mcp.tool()
@@ -2624,6 +2735,7 @@ def create_http_app():
         max_request_body_bytes=settings.max_request_body_bytes,
         request_timeout_seconds=settings.request_timeout_seconds,
         max_concurrent_requests=settings.max_concurrent_requests,
+        public_base_url=settings.public_base_url,
     )
 
 

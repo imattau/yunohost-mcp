@@ -88,6 +88,50 @@ _NGINX_ACCESS_RE = re.compile(
     r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<user_agent>[^"]*)")?'
     r'(?P<rest>.*)$'
 )
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not let diagnostic probes cross an unvalidated redirect boundary."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_SAFE_PROBE_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _validate_probe_url(url: str, *, allow_private: bool) -> None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ToolInputError(f"invalid probe URL: {exc}") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ToolInputError("url must be an HTTP(S) URL without embedded credentials")
+    if len(url) > 4096 or parsed.fragment:
+        raise ToolInputError("url is too long or contains a fragment")
+    effective_port = port if port is not None else (443 if parsed.scheme == "https" else 80)
+    if not 1 <= effective_port <= 65535:
+        raise ToolInputError("URL port is out of range")
+    if allow_private:
+        return
+    try:
+        addresses = {
+            ipaddress.ip_address(result[4][0])
+            for result in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ToolInputError(f"could not resolve probe host: {exc}") from exc
+    if any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+        for address in addresses
+    ):
+        raise ToolInputError("private, loopback, link-local, reserved, unspecified, and multicast probe targets are disabled")
 _NGINX_ERROR_RE = re.compile(r'^(?P<timestamp>[^ ]+\s+[^ ]+)\s+\[(?P<level>[^]]+)\]\s+(?P<message>.*)$')
 
 
@@ -1309,27 +1353,14 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "url": url, "reachable": True, "status_code": 200, "elapsed_ms": 1}
+        _validate_probe_url(url, allow_private=self.settings.allow_private_http_probes)
         parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-            raise ToolInputError("url must be an HTTP(S) URL without embedded credentials")
-        if len(url) > 4096 or parsed.fragment:
-            raise ToolInputError("url is too long or contains a fragment")
         if not 0.1 <= timeout_seconds <= 60:
             raise ToolInputError("timeout_seconds must be between 0.1 and 60")
-        if not self.settings.allow_private_http_probes:
-            try:
-                addresses = {
-                    ipaddress.ip_address(result[4][0])
-                    for result in socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
-                }
-            except socket.gaierror as exc:
-                raise ToolInputError(f"could not resolve probe host: {exc}") from exc
-            if any(address.is_private or address.is_loopback or address.is_link_local or address.is_reserved for address in addresses):
-                raise ToolInputError("private, loopback, link-local, and reserved HTTP probe targets are disabled")
         started = time.monotonic()
         request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/http-probe"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - explicit diagnostic probe
+            with _SAFE_PROBE_OPENER.open(request, timeout=timeout_seconds) as response:
                 response.read(4096)
                 return {
                     "fake": False,
@@ -3132,27 +3163,27 @@ class YunohostAdapter:
             raise YunohostUnavailableError("catalog CLI JSON result must be an object")
         return result
 
-    def package_install_test(self, source: str, label: str | None = None, args: str | None = None) -> dict[str, Any]:
+    def package_install_test(self, source: str, label: str | None = None, args: str | None = None, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
         """app_install() already accepts a local path/git URL as `source` -
         force=True so an experimental/low-quality-flagged candidate package
         doesn't get stuck on the confirmation prompt real install would show
         interactively; that prompt exists for end users installing from the
         catalog, not for a developer iterating on their own package."""
-        brokered = self._broker_call("package.install_test", {"source": source, "label": label, "args": args})
+        brokered = self._broker_call("package.install_test", {"source": source, "label": label, "args": args, "session_id": session_id, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         return self.app_install(source, label=label, args=args, force=True)
 
-    def package_upgrade_test(self, app: str, source: str) -> dict[str, Any]:
+    def package_upgrade_test(self, app: str, source: str, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
         """Upgrade an already-installed `app` from a candidate `source`
         (local path/tarball) instead of the catalog."""
-        brokered = self._broker_call("package.upgrade_test", {"app": app, "source": source})
+        brokered = self._broker_call("package.upgrade_test", {"app": app, "source": source, "session_id": session_id, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         return self.app_upgrade(app=app, file=source, force=True)
 
-    def package_backup_test(self, app: str) -> dict[str, Any]:
-        brokered = self._broker_call("package.backup_test", {"app": app})
+    def package_backup_test(self, app: str, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("package.backup_test", {"app": app, "session_id": session_id, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         # A fixed name makes a later test fail before the package lifecycle
@@ -3161,28 +3192,28 @@ class YunohostAdapter:
         name = f"package-test-{app}-{time.time_ns()}"
         return self.backup_create(name=name, apps=[app])
 
-    def package_restore_test(self, app: str, archive_name: str) -> dict[str, Any]:
-        brokered = self._broker_call("package.restore_test", {"app": app, "archive_name": archive_name})
+    def package_restore_test(self, app: str, archive_name: str, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("package.restore_test", {"app": app, "archive_name": archive_name, "session_id": session_id, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         return self.backup_restore(archive_name, apps=[app], force=True)
 
-    def package_change_url_test(self, app: str, domain: str, path: str) -> dict[str, Any]:
+    def package_change_url_test(self, app: str, domain: str, path: str, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call(
-            "package.change_url_test", {"app": app, "domain": domain, "path": path}
+            "package.change_url_test", {"app": app, "domain": domain, "path": path, "session_id": session_id, "confirmation_id": confirmation_id}
         )
         if brokered is not None:
             return brokered
         return self.app_change_url(app, domain, path)
 
-    def package_remove_test(self, app: str, purge: bool = True) -> dict[str, Any]:
-        brokered = self._broker_call("package.remove_test", {"app": app, "purge": purge})
+    def package_remove_test(self, app: str, purge: bool = True, *, session_id: str | None = None, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("package.remove_test", {"app": app, "purge": purge, "session_id": session_id, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         return self.app_remove(app, purge=purge)
 
     def package_run_tests(
-        self, source: str, app_id: str | None = None, confirmation_id: str | None = None
+        self, source: str, app_id: str | None = None, confirmation_id: str | None = None, session_id: str | None = None
     ) -> dict[str, Any]:
         """Run the standard install -> backup -> remove -> restore -> remove
         cycle against `source` in one call (PLAN.md Phase 8's "removes the
@@ -3196,7 +3227,7 @@ class YunohostAdapter:
         always attempts a final cleanup removal if install succeeded.
         """
         brokered = self._broker_call(
-            "package.run_tests", {"source": source, "app_id": app_id, "confirmation_id": confirmation_id}
+            "package.run_tests", {"source": source, "app_id": app_id, "confirmation_id": confirmation_id, "session_id": session_id}
         )
         if brokered is not None:
             return brokered
@@ -3225,18 +3256,18 @@ class YunohostAdapter:
             installed_app_id = installed_app_id[0]
 
         try:
-            install_ok = run_step("install", self.package_install_test, source)
+            install_ok = run_step("install", self.package_install_test, source, session_id=session_id, confirmation_id=confirmation_id)
             if not install_ok:
                 return {"fake": self.settings.fake_yunohost, "passed": False, "steps": steps}
 
-            backup_ok = run_step("backup", self.package_backup_test, installed_app_id)
+            backup_ok = run_step("backup", self.package_backup_test, installed_app_id, session_id=session_id, confirmation_id=confirmation_id)
             archive_name = steps[-1]["result"].get("name") if backup_ok else None
 
-            remove_ok = run_step("remove", self.package_remove_test, installed_app_id, True)
+            remove_ok = run_step("remove", self.package_remove_test, installed_app_id, True, session_id=session_id, confirmation_id=confirmation_id)
 
             if backup_ok and remove_ok and archive_name:
                 restore_attempted = True
-                restore_ok = run_step("restore", self.package_restore_test, installed_app_id, archive_name)
+                restore_ok = run_step("restore", self.package_restore_test, installed_app_id, archive_name, session_id=session_id, confirmation_id=confirmation_id)
         finally:
             # Final cleanup: a failed remove may have left the installed app
             # in place, and a failed restore may have left a partial
@@ -3244,7 +3275,7 @@ class YunohostAdapter:
             # succeeded and the app may still exist. Keep cleanup failures as
             # a separate step so they do not hide the primary test failure.
             if install_ok and (not remove_ok or (restore_attempted and not restore_ok) or restore_ok):
-                run_step("cleanup_remove", self.package_remove_test, installed_app_id, True)
+                run_step("cleanup_remove", self.package_remove_test, installed_app_id, True, session_id=session_id, confirmation_id=confirmation_id)
 
         passed = all(step["passed"] for step in steps)
         return {"fake": self.settings.fake_yunohost, "passed": passed, "steps": steps}
@@ -3303,12 +3334,14 @@ class YunohostAdapter:
         if self.settings.fake_yunohost:
             return {"fake": True, "url": url, "reachable": True, "status_code": 200, "error": None}
 
+        _validate_probe_url(url, allow_private=self.settings.allow_private_http_probes)
+
         import urllib.error
         import urllib.request
 
         request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/safe_upgrade"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured domain, not user input
+            with _SAFE_PROBE_OPENER.open(request, timeout=timeout_seconds) as response:
                 return {"fake": False, "url": url, "reachable": True, "status_code": response.status, "error": None}
         except urllib.error.HTTPError as exc:
             # Any HTTP response at all - even 4xx/5xx - means the app is
@@ -3386,10 +3419,23 @@ class YunohostAdapter:
             return brokered
         if strategy != "conservative":
             raise ToolInputError(f"unknown repair strategy {strategy!r}; only 'conservative' is implemented")
+        if not isinstance(app, str) or not app.strip() or any(char.isspace() for char in app):
+            raise ToolInputError("app must be a non-empty app id")
 
         before = self.diagnose_app(app)
         services = self.services_list().get("services", {})
-        matching_services = [name for name in services if app in name]
+        info = self.app_info(app, full=True)
+        declared = set()
+        for container in (info.get("services"), info.get("manifest", {}).get("services")):
+            if isinstance(container, dict):
+                declared.update(str(name) for name in container)
+            elif isinstance(container, list):
+                declared.update(str(name) for name in container if isinstance(name, str))
+        # YunoHost app metadata does not expose service declarations uniformly
+        # across releases. The exact app unit is safe as a compatibility
+        # fallback; substring matching is deliberately forbidden.
+        candidates = declared or {app}
+        matching_services = [name for name in services if name in candidates]
 
         if matching_services:
             self.service_restart(matching_services)

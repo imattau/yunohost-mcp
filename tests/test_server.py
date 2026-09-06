@@ -36,6 +36,7 @@ PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
     "package_lint",
+    "package_test_prepare",
     "package_install_test",
     "package_upgrade_test",
     "package_backup_test",
@@ -366,16 +367,20 @@ async def test_domain_cert_install_requires_then_accepts_a_plain_confirmation():
 
 @pytest.mark.anyio
 async def test_domain_dns_push_requires_then_accepts_a_plain_confirmation():
-    # domains.dns has require_confirmation but not require_owner_signature -
-    # same single-caller confirmation shape as domain_add above.
+    # DNS changes are externally visible and now require owner co-signing.
     async with Client(mcp) as client:
         first = await client.call_tool("domain_dns_push", {"domain": "example.com"})
         assert first.is_error is not True, first.content
         plan_response = first.structured_content
         assert plan_response["confirmation_required"] is True
-        assert plan_response["owner_signature_required"] is False
+        assert plan_response["owner_signature_required"] is True
         confirmation_id = plan_response["confirmation_id"]
 
+        pending = await client.call_tool(
+            "domain_dns_push", {"domain": "example.com", "confirmation_id": confirmation_id}
+        )
+        assert pending.is_error is True
+        await _approve_as_second_admin(client, confirmation_id)
         confirmed = await client.call_tool(
             "domain_dns_push", {"domain": "example.com", "confirmation_id": confirmation_id}
         )
@@ -1169,7 +1174,10 @@ async def test_phase14_repair_app_rejects_unknown_strategy():
 @pytest.mark.anyio
 async def test_phase14_test_package_matches_package_run_tests():
     async with Client(mcp) as client:
-        result = await client.call_tool("test_package", {"source": "/tmp/example_ynh"})
+        pending = await client.call_tool("test_package", {"source": "/tmp/example_ynh"})
+        confirmation_id = pending.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
+        result = await client.call_tool("test_package", {"source": "/tmp/example_ynh", "confirmation_id": confirmation_id})
         assert result.is_error is not True, result.content
         assert result.structured_content["passed"] is True
 
@@ -1353,17 +1361,10 @@ async def test_phase6_write_tool_denied_for_identity_without_scope():
     [
         ("package_inspect", {"source": "/tmp/example_ynh"}),
         ("package_lint", {"source": "/tmp/example_ynh"}),
-        ("package_install_test", {"source": "/tmp/example_ynh"}),
-        ("package_upgrade_test", {"app": "example", "source": "/tmp/example_ynh"}),
-        ("package_backup_test", {"app": "example"}),
-        ("package_restore_test", {"app": "example", "archive_name": "package-test-example"}),
-        ("package_change_url_test", {"app": "example", "domain": "new.example.com", "path": "/"}),
-        ("package_remove_test", {"app": "example"}),
         ("package_logs", {"operation": "20260901-120000-app_install"}),
-        ("package_run_tests", {"source": "/tmp/example_ynh"}),
     ],
 )
-async def test_phase8_package_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
+async def test_phase8_package_read_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
     async with Client(mcp) as client:
         result = await client.call_tool(tool, args)
         assert result.is_error is not True, result.content
@@ -1372,16 +1373,47 @@ async def test_phase8_package_tool_succeeds_for_local_stdio_identity(tool: str, 
 
 
 @pytest.mark.anyio
+async def test_phase8_package_test_prepare_binds_a_session():
+    async with Client(mcp) as client:
+        result = await client.call_tool("package_test_prepare", {"source": "/tmp/example_ynh"})
+        assert result.is_error is not True, result.content
+        assert result.structured_content["package_test_id"].startswith("ptest-")
+        assert result.structured_content["app"] == "example"
+
+
+@pytest.mark.anyio
+async def test_phase8_package_write_requires_session_and_owner_cosign():
+    async with Client(mcp) as client:
+        missing = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh"})
+        assert missing.is_error is True
+        prepared = await client.call_tool("package_test_prepare", {"source": "/tmp/example_ynh"})
+        session_id = prepared.structured_content["package_test_id"]
+        first = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh", "session_id": session_id})
+        assert first.is_error is not True, first.content
+        assert first.structured_content["owner_signature_required"] is True
+        confirmation_id = first.structured_content["confirmation_id"]
+        blocked = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh", "session_id": session_id, "confirmation_id": confirmation_id})
+        assert blocked.is_error is True
+        await _approve_as_second_admin(client, confirmation_id)
+        confirmed = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh", "session_id": session_id, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content["fake"] is True
+
+
+@pytest.mark.anyio
 async def test_phase8_package_run_tests_writes_one_audit_entry_for_the_whole_cycle():
     existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
     async with Client(mcp) as client:
-        result = await client.call_tool("package_run_tests", {"source": "/tmp/example_ynh"})
+        pending = await client.call_tool("package_run_tests", {"source": "/tmp/example_ynh"})
+        confirmation_id = pending.structured_content["confirmation_id"]
+        await _approve_as_second_admin(client, confirmation_id)
+        result = await client.call_tool("package_run_tests", {"source": "/tmp/example_ynh", "confirmation_id": confirmation_id})
         assert result.is_error is not True
         assert result.structured_content["passed"] is True
 
     new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
-    assert len(new_lines) == 1
-    entry = json.loads(new_lines[0])
+    assert len(new_lines) == 3  # pending request, owner approval, execution
+    entry = json.loads(new_lines[-1])
     assert entry["tool"] == "packages.test"
     assert entry["result"] == "success"
 
@@ -1413,7 +1445,7 @@ async def test_phase8_package_developer_role_can_request_but_not_execute_system_
     set_current_request(developer)
     async with Client(mcp) as client:
         install = await client.call_tool("package_install_test", {"source": "/tmp/example_ynh"})
-        assert install.is_error is not True, install.content
+        assert install.is_error is True
 
         # package-developer inherits system.upgrade from app-admin, but the
         # scope only lets it *request* the operation - require_owner_signature

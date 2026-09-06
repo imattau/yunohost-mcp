@@ -86,6 +86,7 @@ EXPECTED_TOOLS = frozenset(
         "regenconf_apply",
         "package_inspect",
         "package_lint",
+        "package_test_prepare",
         "package_install_test",
         "package_upgrade_test",
         "package_backup_test",

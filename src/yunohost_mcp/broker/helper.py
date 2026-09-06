@@ -27,6 +27,7 @@ from yunohost_mcp.config import Settings
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.policy.confirmation import SQLiteConfirmationStore
 from yunohost_mcp.policy.confirmation import ConfirmationError
+from yunohost_mcp.policy.package_sessions import PackageTestSessionError, PackageTestSessionStore, session_path
 from yunohost_mcp.policy.rules import check_free_space, check_recent_backup, load_policy
 from yunohost_mcp.redaction import redact_text
 from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError
@@ -63,6 +64,7 @@ _POLICY_NAME_BY_OPERATION: dict[str, str] = {
     "user.permission_remove": "users.permissions",
     "domain.add": "domains.write",
     "domain.cert_install": "domains.cert",
+    "domain.dns_push": "domains.dns",
     "app.install": "apps.install",
     "backup.create": "backups.create",
     "backup.delete": "backups.delete",
@@ -70,6 +72,12 @@ _POLICY_NAME_BY_OPERATION: dict[str, str] = {
     "service.stop": "services.stop",
     "catalog.publish": "catalog.publish",
     "package.run_tests": "packages.test",
+    "package.install_test": "packages.test",
+    "package.upgrade_test": "packages.test",
+    "package.backup_test": "packages.test",
+    "package.restore_test": "packages.test",
+    "package.change_url_test": "packages.test",
+    "package.remove_test": "packages.test",
     "safe.upgrade": "apps.upgrade",
 }
 
@@ -103,6 +111,7 @@ _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
     "user.permission_remove": ("permission", "names"),
     "domain.add": ("domain", "install_letsencrypt_cert"),
     "domain.cert_install": ("domain", "letsencrypt", "staging"),
+    "domain.dns_push": ("domain", "force", "purge"),
     "app.install": ("app", "label", "args", "force"),
     "backup.create": ("name", "description", "apps", "system"),
     "backup.delete": ("name",),
@@ -110,6 +119,12 @@ _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
     "service.stop": ("names",),
     "catalog.publish": ("plan_id",),
     "package.run_tests": ("source", "app_id"),
+    "package.install_test": ("source", "session_id", "label", "args"),
+    "package.upgrade_test": ("app", "source", "session_id"),
+    "package.backup_test": ("app", "session_id"),
+    "package.restore_test": ("app", "archive_name", "session_id"),
+    "package.change_url_test": ("app", "domain", "path", "session_id"),
+    "package.remove_test": ("app", "purge", "session_id"),
 }
 
 
@@ -172,6 +187,9 @@ class BrokerServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             if self.settings.confirmation_store_file
             else None
         )
+        self.package_test_sessions = PackageTestSessionStore(
+            session_path(self.settings.config_dir), ttl_seconds=self.settings.package_test_session_ttl_seconds
+        )
         self.policy_rules = load_policy(self.settings.policy_file_path())
         self.audit_log = AuditLog(path=self.settings.audit_log_path())
         super().__init__(str(socket_path), BrokerRequestHandler)
@@ -205,6 +223,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             if not identity.has_scope(required):
                 raise BrokerProtocolError("caller lacks the required operation scope")
             confirmation_id = self._check_operation_policy(request, operation.name, identity)
+            self._check_package_test_session(request, identity)
             audit_decision = "allowed"
             # Published for the duration of the adapter call only (cleared
             # in the finally below) - e.g. _catalog_relays() consults this
@@ -297,6 +316,21 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
         except ConfirmationError as exc:
             raise BrokerProtocolError(f"invalid confirmation: {exc}") from exc
         return confirmation_id
+
+    def _check_package_test_session(self, request, identity) -> None:
+        if not request.operation.startswith("package.") or request.operation in {"package.inspect", "package.lint"}:
+            return
+        session_id = request.arguments.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise BrokerProtocolError("package-test session_id is required")
+        source = request.arguments.get("source")
+        app = request.arguments.get("app") or request.arguments.get("app_id")
+        try:
+            self.server.package_test_sessions.get(
+                session_id, pubkey=identity.pubkey, source=source, app_id=app
+            )
+        except PackageTestSessionError as exc:
+            raise BrokerProtocolError(str(exc)) from exc
 
 
 def authorize_request(request, server: BrokerServer):

@@ -133,6 +133,24 @@ async def test_valid_signed_get_request_from_known_identity_passes_through():
 
 
 @pytest.mark.anyio
+async def test_configured_public_origin_rejects_untrusted_host():
+    sk, pubkey = new_keypair()
+    app = NostrAuthMiddleware(
+        echo_identity_app,
+        identity_store=_store_with(pubkey),
+        public_base_url="https://public.example/mcp",
+    )
+    header = make_nip98_authorization_header(
+        sk, pubkey, method="GET", url="https://public.example/mcp"
+    )
+    scope = _make_scope(
+        method="GET", path="/mcp", headers={"host": "attacker.example", "authorization": header}
+    )
+    status, _ = await _call(app, scope)
+    assert status == 400
+
+
+@pytest.mark.anyio
 async def test_valid_signed_post_with_body_passes_body_through_unchanged():
     sk, pubkey = new_keypair()
     store = _store_with(pubkey)

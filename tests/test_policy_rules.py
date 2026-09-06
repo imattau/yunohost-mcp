@@ -58,7 +58,9 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["regenconf.write"].require_confirmation is True
     assert DEFAULT_POLICY["regenconf.write"].require_owner_signature is True
     assert DEFAULT_POLICY["domains.dns"].require_confirmation is True
-    assert DEFAULT_POLICY["domains.dns"].require_owner_signature is False
+    assert DEFAULT_POLICY["domains.dns"].require_owner_signature is True
+    assert DEFAULT_POLICY["packages.test"].require_confirmation is True
+    assert DEFAULT_POLICY["packages.test"].require_owner_signature is True
     assert DEFAULT_POLICY["domains.remove"].require_confirmation is True
     assert DEFAULT_POLICY["domains.remove"].require_owner_signature is True
     assert DEFAULT_POLICY["system.power"].require_confirmation is True

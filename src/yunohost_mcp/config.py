@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Confirmation tickets (Phase 6) expire after this long if unused.
     confirmation_ttl_seconds: int = 300
     confirmation_store_file: Path | None = None
+    package_test_session_ttl_seconds: int = 1800
 
     # Owner co-signing (Phase 13; owner-approval-plan.md, v1 `solo` only).
     # owner_npub: an explicit owner identity (npub or hex pubkey). A
@@ -192,6 +193,9 @@ class Settings(BaseSettings):
     max_request_body_bytes: int = 1_048_576
     request_timeout_seconds: int = 120
     max_concurrent_requests: int = 8
+    # Canonical externally visible origin for NIP-98 URL binding. Set this
+    # behind a reverse proxy so an attacker cannot choose the signed Host.
+    public_base_url: str | None = None
 
     def identity_file_path(self) -> Path:
         """pubkey -> role mapping (Phase 3). A missing file means an empty

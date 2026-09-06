@@ -6,7 +6,8 @@ import pytest
 from mcp.client import Client
 
 from yunohost_mcp.config import Settings
-from yunohost_mcp.auth.identity import AuthenticatedRequest, LOCAL_STDIO_REQUEST, set_current_request
+from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOCAL_STDIO_REQUEST, set_current_request
+from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import mcp
 import yunohost_mcp.yunohost.adapter as adapter_module
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
@@ -216,7 +217,12 @@ async def test_catalog_list_tool_is_read_only_no_confirmation_needed():
 
 
 @pytest.mark.anyio
-async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Path):
+async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    owner = AuthenticatedRequest(
+        pubkey="catalog-owner", event_id="o" * 64, event_created_at=0,
+        identity=IdentityRecord(pubkey="catalog-owner", name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
+    )
+    monkeypatch.setattr("yunohost_mcp.server.get_owner_pubkey", lambda: owner.pubkey)
     set_current_request(LOCAL_STDIO_REQUEST)
     try:
         async with Client(mcp) as client:
@@ -227,6 +233,12 @@ async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Pat
             pending = await client.call_tool("catalog_publish", {"plan_id": plan_id})
             assert pending.is_error is not True
             assert pending.structured_content["confirmation_required"] is True
+            assert pending.structured_content["owner_signature_required"] is True
+
+            set_current_request(owner)
+            approved = await client.call_tool("approve_operation", {"confirmation_id": pending.structured_content["confirmation_id"]})
+            assert approved.is_error is not True
+            set_current_request(LOCAL_STDIO_REQUEST)
 
             published = await client.call_tool(
                 "catalog_publish",
