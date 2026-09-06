@@ -302,6 +302,70 @@ def test_domain_cert_install_rejects_staging():
         make_adapter().domain_cert_install("example.com", staging=True)
 
 
+def test_domain_cert_install_reports_the_silent_acme_readiness_skip(monkeypatch):
+    """Regression: yunohost.certificate._certificate_install_letsencrypt()
+    catches _check_domain_is_ready_for_ACME() failures with `except
+    Exception: logger.error(e); continue` - it never adds the domain to
+    failed_cert_install, so certificate_install() returns normally with NO
+    exception at all (it only raises when failed_cert_install is
+    non-empty). Confirmed live against a freshly domain_add'd nohost.me
+    subdomain: two consecutive real domain_cert_install calls each came
+    back acme_error=None with the certificate still selfsigned, while the
+    root helper's own log carried "There is no diagnosis result for domain
+    ... yet" both times. Before this fix, that silent no-op was reported
+    to the caller as an unqualified success."""
+
+    def fake_import_attr(module_name: str, attr: str):
+        if (module_name, attr) == ("yunohost.certificate", "certificate_install"):
+            # The real function under this exact failure mode: it runs to
+            # completion and returns None, having merely logged the
+            # readiness-check failure and skipped the domain.
+            return lambda domains, **kwargs: None
+        if (module_name, attr) == ("yunohost.utils.error", "YunohostError"):
+            return Exception
+        if (module_name, attr) == ("yunohost.certificate", "certificate_status"):
+            return lambda domains, full=False: {
+                "certificates": {domains[0]: {"CA_type": "selfsigned", "summary": "selfsigned"}}
+            }
+        raise AssertionError(f"unexpected _import_attr({module_name!r}, {attr!r})")
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._import_attr", fake_import_attr)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._latest_operation_id", lambda: "op-1")
+
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+    result = adapter.domain_cert_install("clips.example.com")
+
+    assert result["certificate"]["CA_type"] == "selfsigned"
+    assert result["acme_error"] is not None
+    assert "diagnosis" in result["acme_error"]
+
+
+def test_domain_cert_install_selfsigned_request_is_not_flagged_as_a_skip(monkeypatch):
+    """The new post-hoc check must only fire when letsencrypt was actually
+    requested - a deliberate self-signed install ending up selfsigned is
+    the expected, successful outcome, not a silent-skip false positive."""
+
+    def fake_import_attr(module_name: str, attr: str):
+        if (module_name, attr) == ("yunohost.certificate", "certificate_install"):
+            return lambda domains, **kwargs: None
+        if (module_name, attr) == ("yunohost.utils.error", "YunohostError"):
+            return Exception
+        if (module_name, attr) == ("yunohost.certificate", "certificate_status"):
+            return lambda domains, full=False: {
+                "certificates": {domains[0]: {"CA_type": "selfsigned", "summary": "selfsigned"}}
+            }
+        raise AssertionError(f"unexpected _import_attr({module_name!r}, {attr!r})")
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._import_attr", fake_import_attr)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._latest_operation_id", lambda: "op-1")
+
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+    result = adapter.domain_cert_install("clips.example.com", letsencrypt=False)
+
+    assert result["certificate"]["CA_type"] == "selfsigned"
+    assert result["acme_error"] is None
+
+
 def test_free_space_bytes_reports_a_large_fake_figure_regardless_of_real_disk():
     # fake_yunohost must never touch the real filesystem of whatever
     # machine happens to be running this process - a disk-constrained CI

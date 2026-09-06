@@ -2012,6 +2012,32 @@ class YunohostAdapter:
             acme_error = str(exc)
         certificate_status = _import_attr("yunohost.certificate", "certificate_status")
         certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+        # yunohost.certificate._certificate_install_letsencrypt() runs a
+        # pre-ACME readiness check (_check_domain_is_ready_for_ACME) per
+        # domain and, on failure, just logs the error and `continue`s to the
+        # next domain - it does NOT add the domain to failed_cert_install.
+        # certificate_install() only raises YunohostError if
+        # failed_cert_install ends up non-empty, so a domain that fails that
+        # readiness check (most commonly: no diagnosis result yet exists for
+        # its 'DNS records'/'Web' categories, which is always true for a
+        # domain added in the same session) is silently skipped - no
+        # exception, no trace, nothing to catch above. Confirmed live: two
+        # consecutive real calls against a freshly-added domain each
+        # returned acme_error=None with the certificate still selfsigned,
+        # while yunohost_mcp-helper's own log carried "There is no diagnosis
+        # result for domain ... yet" both times. Detect that silent no-op
+        # here by comparing what was requested against what actually
+        # resulted, rather than trusting the absence of an exception.
+        if acme_error is None and letsencrypt and certificate.get("CA_type") != "letsencrypt":
+            acme_error = (
+                "certificate_install() returned without raising, but the certificate is still "
+                f"{certificate.get('CA_type', 'unknown')!r}. YunoHost's certmanager silently skips "
+                "a domain that fails its pre-ACME readiness check "
+                "(yunohost.certificate._check_domain_is_ready_for_ACME) instead of raising - most "
+                "commonly because no diagnosis result yet exists for that domain's 'DNS records' "
+                "and 'Web' categories (always true right after domain_add). Run diagnosis_run for "
+                "those categories (or wait for the next scheduled diagnosis) and retry."
+            )
         return {
             "fake": False,
             "operation_id": _latest_operation_id(),
