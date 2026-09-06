@@ -31,6 +31,87 @@ from yunohost_mcp.policy.rules import check_free_space, check_recent_backup, loa
 from yunohost_mcp.redaction import redact_text
 from yunohost_mcp.yunohost.adapter import YunohostAdapter, YunohostUnavailableError
 
+# Broker operation name -> DEFAULT_POLICY key, re-checked at the root
+# boundary (see _check_operation_policy below - the frontend's own
+# authorization response is not trusted here). Module-level so
+# test_broker_protocol.py can assert every confirmation-gated policy key
+# reachable through a broker operation also has an _CONFIRMATION_ARGUMENT_
+# KEYS entry - the class of bug this pair caught live: service.stop and
+# app.setting_set were both added to this map without also being added to
+# the one below, so every call failed with "no confirmation argument
+# binding" despite being fully wired everywhere else (scopes, roles,
+# _BROKERED_METHODS, tool registration).
+_POLICY_NAME_BY_OPERATION: dict[str, str] = {
+    "app.upgrade": "apps.upgrade",
+    "app.remove": "apps.remove",
+    "app.change_url": "apps.change_url",
+    "app.config_set": "apps.config",
+    "app.setting_set": "apps.setting",
+    "backup.restore": "backups.restore",
+    "system.upgrade": "system.upgrade",
+    "migrations.run": "system.migrate",
+    "firewall.open": "firewall.write",
+    "firewall.close": "firewall.write",
+    "firewall.reload": "firewall.write",
+    "user.create": "users.write",
+    "user.update": "users.write",
+    "user.delete": "users.delete",
+    "user.group_create": "users.write",
+    "user.group_update": "users.write",
+    "user.group_delete": "users.delete",
+    "user.permission_add": "users.permissions",
+    "user.permission_remove": "users.permissions",
+    "domain.add": "domains.write",
+    "domain.cert_install": "domains.cert",
+    "app.install": "apps.install",
+    "backup.create": "backups.create",
+    "backup.delete": "backups.delete",
+    "service.restart": "services.restart",
+    "service.stop": "services.stop",
+    "catalog.publish": "catalog.publish",
+    "package.run_tests": "packages.test",
+    "safe.upgrade": "apps.upgrade",
+}
+
+# Broker operation name -> the exact tool-call kwargs (excluding
+# confirmation_id) whose hash a confirmation ticket was issued against -
+# must match what server.py's @require_confirmation hashed for the same
+# tool. Every key here that maps (via _POLICY_NAME_BY_OPERATION) to a
+# DEFAULT_POLICY entry with require_confirmation=True needs an entry.
+_CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
+    "app.upgrade": ("app", "force", "url"),
+    "app.remove": ("app", "purge"),
+    "app.change_url": ("app", "domain", "path"),
+    "app.config_set": ("app", "key", "value"),
+    "app.setting_set": ("app", "key", "value", "delete"),
+    "backup.restore": ("name", "apps", "system", "force"),
+    "system.upgrade": (),
+    "migrations.run": ("targets", "skip", "auto", "force_rerun", "accept_disclaimer", "skip_postmigrations"),
+    "firewall.open": ("port", "protocol", "comment", "upnp", "no_reload"),
+    "firewall.close": ("port", "protocol", "upnp_only", "no_reload"),
+    "firewall.reload": ("skip_upnp",),
+    "user.create": ("username", "domain", "password", "fullname", "mailbox_quota", "admin"),
+    "user.update": (
+        "username", "mail", "change_password", "add_mailforward", "remove_mailforward",
+        "add_mailalias", "remove_mailalias", "mailbox_quota", "fullname",
+    ),
+    "user.delete": ("username", "purge"),
+    "user.group_create": ("groupname",),
+    "user.group_update": ("groupname", "add", "remove"),
+    "user.group_delete": ("groupname",),
+    "user.permission_add": ("permission", "names"),
+    "user.permission_remove": ("permission", "names"),
+    "domain.add": ("domain", "install_letsencrypt_cert"),
+    "domain.cert_install": ("domain", "letsencrypt", "staging"),
+    "app.install": ("app", "label", "args", "force"),
+    "backup.create": ("name", "description", "apps", "system"),
+    "backup.delete": ("name",),
+    "service.restart": ("names",),
+    "service.stop": ("names",),
+    "catalog.publish": ("plan_id",),
+    "package.run_tests": ("source", "app_id"),
+}
+
 logger = logging.getLogger("yunohost_mcp.broker")
 _UCRED_FORMAT = "3i"
 
@@ -169,37 +250,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
         here.  The helper owns the final check immediately before invoking
         the root-side adapter.
         """
-        policy_name = {
-            "app.upgrade": "apps.upgrade",
-            "app.remove": "apps.remove",
-            "app.change_url": "apps.change_url",
-            "app.config_set": "apps.config",
-            "app.setting_set": "apps.setting",
-            "backup.restore": "backups.restore",
-            "system.upgrade": "system.upgrade",
-            "migrations.run": "system.migrate",
-            "firewall.open": "firewall.write",
-            "firewall.close": "firewall.write",
-            "firewall.reload": "firewall.write",
-            "user.create": "users.write",
-            "user.update": "users.write",
-            "user.delete": "users.delete",
-            "user.group_create": "users.write",
-            "user.group_update": "users.write",
-            "user.group_delete": "users.delete",
-            "user.permission_add": "users.permissions",
-            "user.permission_remove": "users.permissions",
-            "domain.add": "domains.write",
-            "domain.cert_install": "domains.cert",
-            "app.install": "apps.install",
-            "backup.create": "backups.create",
-            "backup.delete": "backups.delete",
-            "service.restart": "services.restart",
-            "service.stop": "services.stop",
-            "catalog.publish": "catalog.publish",
-            "package.run_tests": "packages.test",
-            "safe.upgrade": "apps.upgrade",
-        }.get(operation_name)
+        policy_name = _POLICY_NAME_BY_OPERATION.get(operation_name)
         if policy_name is None:
             return None
         rule = self.server.policy_rules.get(policy_name)
@@ -220,39 +271,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
         confirmation_id = request.arguments.get("confirmation_id")
         if not isinstance(confirmation_id, str) or not self.server.confirmation_store:
             raise BrokerProtocolError("confirmation is required for this operation")
-        argument_keys = {
-            "app.upgrade": ("app", "force", "url"),
-            "app.remove": ("app", "purge"),
-            "app.change_url": ("app", "domain", "path"),
-            "app.config_set": ("app", "key", "value"),
-            "backup.restore": ("name", "apps", "system", "force"),
-            "system.upgrade": (),
-            "migrations.run": (
-                "targets", "skip", "auto", "force_rerun", "accept_disclaimer", "skip_postmigrations"
-            ),
-            "firewall.open": ("port", "protocol", "comment", "upnp", "no_reload"),
-            "firewall.close": ("port", "protocol", "upnp_only", "no_reload"),
-            "firewall.reload": ("skip_upnp",),
-            "user.create": ("username", "domain", "password", "fullname", "mailbox_quota", "admin"),
-            "user.update": (
-                "username", "mail", "change_password", "add_mailforward", "remove_mailforward",
-                "add_mailalias", "remove_mailalias", "mailbox_quota", "fullname",
-            ),
-            "user.delete": ("username", "purge"),
-            "user.group_create": ("groupname",),
-            "user.group_update": ("groupname", "add", "remove"),
-            "user.group_delete": ("groupname",),
-            "user.permission_add": ("permission", "names"),
-            "user.permission_remove": ("permission", "names"),
-            "domain.add": ("domain", "install_letsencrypt_cert"),
-            "domain.cert_install": ("domain", "letsencrypt", "staging"),
-            "app.install": ("app", "label", "args", "force"),
-            "backup.create": ("name", "description", "apps", "system"),
-            "backup.delete": ("name",),
-            "service.restart": ("names",),
-            "catalog.publish": ("plan_id",),
-            "package.run_tests": ("source", "app_id"),
-        }.get(operation_name)
+        argument_keys = _CONFIRMATION_ARGUMENT_KEYS.get(operation_name)
         if argument_keys is None:
             raise BrokerProtocolError(f"no confirmation argument binding for {operation_name!r}")
         confirmation_arguments = {key: request.arguments.get(key) for key in argument_keys}

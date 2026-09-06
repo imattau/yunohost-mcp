@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from yunohost_mcp.broker.operations import OPERATIONS
-from yunohost_mcp.broker.helper import _format_internal_broker_error, authorize_request
+from yunohost_mcp.broker.helper import (
+    _CONFIRMATION_ARGUMENT_KEYS,
+    _POLICY_NAME_BY_OPERATION,
+    _format_internal_broker_error,
+    authorize_request,
+)
+from yunohost_mcp.policy.rules import DEFAULT_POLICY, PolicyRule
 from yunohost_mcp.broker.protocol import (
     BrokerProtocolError,
     BrokerRequest,
@@ -177,6 +183,26 @@ def test_registry_contains_only_explicit_operations():
     assert OPERATIONS["service.stop"].required_scope == "services.stop"
     assert OPERATIONS["service.start"].required_scope == "services.start"
     assert all("shell" not in name and "exec" not in name for name in OPERATIONS)
+
+
+def test_confirmation_argument_keys_covers_every_confirmable_broker_operation():
+    """Regression test for the bug class this session found live:
+    service.stop and app.setting_set were both added to
+    _POLICY_NAME_BY_OPERATION without also being added to
+    _CONFIRMATION_ARGUMENT_KEYS, so every real (broker-mode) call to
+    either failed with "no confirmation argument binding for ..." despite
+    being fully wired everywhere else (scopes, roles, _BROKERED_METHODS,
+    server.py tool registration, fake-mode and real-mode adapter tests).
+    Fake-mode/local-stdio tests never catch this because
+    _check_operation_policy is only reached through the privileged broker.
+    """
+    confirmable_operations = {
+        operation_name
+        for operation_name, policy_name in _POLICY_NAME_BY_OPERATION.items()
+        if DEFAULT_POLICY.get(policy_name, PolicyRule()).require_confirmation
+    }
+    missing = sorted(confirmable_operations - _CONFIRMATION_ARGUMENT_KEYS.keys())
+    assert missing == [], f"operations missing from _CONFIRMATION_ARGUMENT_KEYS: {missing}"
 
 
 def test_helper_revalidates_a_real_nip98_signature(tmp_path):
