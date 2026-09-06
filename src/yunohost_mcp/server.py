@@ -105,6 +105,26 @@ domains.cert, not system-wide. Split into a suggest/preview/push trio
 same reason as regenconf_pending/regenconf_apply: a dry-run diff against
 the live registrar is a read, and @require_confirmation gates a whole
 tool call, not one argument's value.
+Phase 17: the remaining smaller items from the same admin-capability
+audit - domain_remove, user_permission_info/user_permission_update,
+backup_info, and system_reboot/system_shutdown. Two corrections made
+along the way after checking upstream source rather than assuming:
+permission_create/permission_delete/permission_url (the originally-listed
+gap) turned out to be internal-only helpers with no actionsmap entry -
+app install/remove's own lifecycle owns permission creation/deletion, so
+exposing them directly risked orphaning a permission outside that
+lifecycle; user_permission_info/user_permission_update were the real,
+actionsmap-exposed gap instead. backup_download similarly turned out to
+return a raw Bottle HTTPResponse (static_file(...)) tied to the REST
+API's own file-serving path, not JSON-serializable data - backup_info's
+own `path` field is the actual answer to "where is this archive," an
+admin fetches the bytes over SSH/SCP/SFTP from there. system_reboot/
+system_shutdown always pass tools_reboot/tools_shutdown's own `force=True`
+(never exposed) since force=False's interactive y/N prompt silently no-ops
+under our headless API interface - our own @require_confirmation +
+owner-co-signature is the real gate, same pattern as domain_add always
+setting ignore_dyndns=True. New Scope.SYSTEM_POWER sits at app-admin, same
+as SYSTEM_UPGRADE - not administrator-only, per Phase 15's fix.
 """
 
 from __future__ import annotations
@@ -871,6 +891,48 @@ def domain_dns_push(
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.DOMAINS_WRITE)
+@audited_write("domains.remove", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "domains.remove",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda domain, remove_apps=False, force=False, **_: {
+        "action": "remove domain",
+        "domain": domain,
+        "remove_apps": remove_apps,
+        "warning": "Irreversible: deletes the domain's LDAP entry, certs, and DNS/nginx/mail "
+        "config. remove_apps=true additionally removes every app installed on this domain "
+        "(each app's own removal, with its own data loss) in the same call - list them first "
+        "(apps_list) and confirm that's really intended. Fails cleanly instead if apps remain "
+        "installed and remove_apps=false.",
+    },
+)
+def domain_remove(
+    domain: str,
+    remove_apps: bool = False,
+    force: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Remove a registered domain. Refuses to run - and lists the
+    offending apps - if any app is still installed on this domain, unless
+    `remove_apps=True`, which removes those apps too as part of the same
+    call (each one via its own app_remove-equivalent path, with the same
+    data loss that implies - check apps_list for this domain first).
+    Cannot remove the main domain while any other domain still exists.
+    `force` skips YunoHost's own domain-existence assertion (only
+    meaningful for cleaning up a domain left in a broken half-added
+    state, per domain_add's own `force` semantics - not a way to bypass
+    the app-removal check above). Requires confirmation and owner
+    co-signature - PLAN.md Phase 13's "domain removal" candidate,
+    irreversible either way, even with remove_apps=False."""
+    return adapter.domain_remove(domain, remove_apps=remove_apps, force=force, confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.USERS_READ)
 def users_list() -> dict[str, Any]:
     """List YunoHost user accounts."""
@@ -1118,10 +1180,76 @@ def user_permission_remove(permission: str, names: list[str], confirmation_id: s
 @mcp.tool()
 @redact_response
 @translate_known_errors
+@require_scope(Scope.USERS_READ)
+def user_permission_info(permission: str) -> dict[str, Any]:
+    """Read one permission's full info (allowed users/groups, label,
+    show_tile, protected, URL(s)) - see user_permission_list for known
+    permission names. Read-only."""
+    return adapter.user_permission_info(permission)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.USERS_WRITE)
+@audited_write("users.permissions", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "users.permissions",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda permission, label=None, show_tile=None, protected=None, **_: {
+        "action": "update permission",
+        "permission": permission,
+        "label": label,
+        "show_tile": show_tile,
+        "protected": protected,
+        "warning": "protected=true bypasses SSO auth entirely for this permission's URL(s) if "
+        "set false, or requires it even for otherwise-public apps if set true - double check "
+        "which direction is intended before confirming.",
+    },
+)
+def user_permission_update(
+    permission: str,
+    label: str | None = None,
+    show_tile: bool | None = None,
+    protected: bool | None = None,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Update a permission's label, dashboard tile visibility
+    (`show_tile`), or SSO-protection flag (`protected`) - not who has
+    access, use user_permission_add/user_permission_remove for that.
+    Leave an argument None to leave it unchanged. `protected=False` on a
+    permission that's meant to require login is a real access-control
+    change, not cosmetic - same tier as user_permission_add/remove
+    (requires owner co-signature)."""
+    return adapter.user_permission_update(
+        permission, label=label, show_tile=show_tile, protected=protected, confirmation_id=confirmation_id
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
 @require_scope(Scope.BACKUPS_READ)
 def backups_list() -> dict[str, Any]:
     """List available backup archives."""
     return adapter.backups_list()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.BACKUPS_READ)
+def backup_info(name: str, with_details: bool = False) -> dict[str, Any]:
+    """Details for one backup archive - creation time, description, size,
+    and its on-disk `path` - and, with `with_details=True`, the apps and
+    system parts it actually contains. Read-only. There is no MCP tool to
+    fetch the archive's bytes: `path` is where an admin retrieves it from
+    (e.g. over SSH/SCP/SFTP) - YunoHost's own backup_download is an
+    HTTP-file-serving action tied to its REST API, not something
+    meaningfully callable as a plain function."""
+    return adapter.backup_info(name, with_details=with_details)
 
 
 @mcp.tool()
@@ -1550,6 +1678,58 @@ def backup_restore(
 def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
     """Upgrade system (OS-level) packages. Requires confirmation."""
     return adapter.system_upgrade(confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SYSTEM_POWER)
+@audited_write("system.power", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "system.power",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda **_: {
+        "action": "reboot server",
+        "warning": "Drops every in-flight connection and operation immediately. The server "
+        "comes back up on its own (unlike system_shutdown) once hardware/hypervisor boot "
+        "completes - this call itself will not see that happen, the connection is cut first.",
+    },
+)
+def system_reboot(confirmation_id: str | None = None) -> dict[str, Any]:
+    """Reboot the host (`systemctl reboot`) immediately once confirmed -
+    no further in-process delay or grace period. Requires confirmation and
+    owner co-signature, same tier as system_upgrade. Comes back up on its
+    own; contrast with system_shutdown, which does not."""
+    return adapter.system_reboot(confirmation_id=confirmation_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.SYSTEM_POWER)
+@audited_write("system.power", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "system.power",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda **_: {
+        "action": "shut down server",
+        "warning": "Powers the host off (systemctl poweroff) and does NOT come back up on its "
+        "own - unlike system_reboot, this needs someone with physical or remote-power access "
+        "to turn it back on. Confirm this is really intended, not a reboot.",
+    },
+)
+def system_shutdown(confirmation_id: str | None = None) -> dict[str, Any]:
+    """Power off the host (`systemctl poweroff`) immediately once
+    confirmed. Requires confirmation and owner co-signature, same tier as
+    system_upgrade. Does NOT come back up on its own - without remote
+    power management, someone needs physical access to the machine to
+    restore it. Prefer system_reboot unless a real power-off is actually
+    what's wanted."""
+    return adapter.system_shutdown(confirmation_id=confirmation_id)
 
 
 @mcp.tool()

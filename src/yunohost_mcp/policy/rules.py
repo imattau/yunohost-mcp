@@ -114,10 +114,17 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # default - "app removal with data" would need argument-conditional
     # policy (require_owner_signature only when purge=true) this dataclass
     # doesn't support - noted as a real gap, not silently assumed covered.
-    # "domain removal" is still not implemented as a tool; "user deletion",
-    # "permission changes", and "firewall changes" now are (below),
-    # matching what Phase 13 names them as.
+    # "domain removal", "user deletion", "permission changes", and
+    # "firewall changes" are all implemented as tools (below), matching
+    # what Phase 13 names them as.
     "backups.restore": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # Unconditionally owner-signature-gated regardless of remove_apps -
+    # same "argument-conditional policy isn't supported" limitation noted
+    # above for apps.remove's purge, so the stricter tier applies always
+    # rather than only when apps are actually being removed. Deleting the
+    # domain's LDAP entry, certs, and DNS/nginx config is irreversible
+    # either way, even with remove_apps=False.
+    "domains.remove": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "backups.delete": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "system.upgrade": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # Not named in PLAN.md's original Phase 13 list, but the same risk
@@ -140,6 +147,11 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # regeneration of e.g. nginx/ssowat can lock the admin out - same risk
     # class as firewall.write.
     "regenconf.write": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    # Takes the whole host down. Reboot recovers on its own; shutdown
+    # doesn't without remote power management - same tier regardless,
+    # since the dataclass can't gate reboot vs. shutdown differently and
+    # reboot alone still drops every in-flight connection/operation.
+    "system.power": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # Not a write, but owner-signature-gated for the same reason as the
     # tier above: the audit trail includes every identity's calls, not
     # just the requester's own, so app-admin (which now has Scope.

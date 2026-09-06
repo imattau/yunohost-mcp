@@ -49,9 +49,14 @@ PHASE13_TOOLS = {"approve_operation", "approval_get", "approval_status"}
 PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app", "test_package"}
 MEMORY_READ_TOOLS = {"memory_get", "memory_list_contexts", "memory_recall", "memory_context", "memory_thread"}
 MEMORY_WRITE_TOOLS = {"memory_store", "memory_feedback"}
-USER_MGMT_READ_TOOLS = {"user_group_list", "user_permission_list"}
+USER_MGMT_READ_TOOLS = {"user_group_list", "user_permission_list", "user_permission_info"}
 USER_MGMT_PLAIN_CONFIRM_TOOLS = {"user_create", "user_update", "user_group_create", "user_group_update"}
-USER_MGMT_OWNER_COSIGN_TOOLS = {"user_delete", "user_group_delete", "user_permission_add", "user_permission_remove"}
+USER_MGMT_OWNER_COSIGN_TOOLS = {
+    "user_delete", "user_group_delete", "user_permission_add", "user_permission_remove", "user_permission_update"
+}
+BACKUP_INFO_TOOLS = {"backup_info"}
+DOMAIN_REMOVE_TOOLS = {"domain_remove"}
+SYSTEM_POWER_TOOLS = {"system_reboot", "system_shutdown"}
 
 PHASE4_TOOLS = {
     "apps_list",
@@ -141,6 +146,9 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | USER_MGMT_READ_TOOLS
             | USER_MGMT_PLAIN_CONFIRM_TOOLS
             | USER_MGMT_OWNER_COSIGN_TOOLS
+            | BACKUP_INFO_TOOLS
+            | DOMAIN_REMOVE_TOOLS
+            | SYSTEM_POWER_TOOLS
         )
         assert expected <= names
 
@@ -176,6 +184,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("regenconf_pending", {}),
         ("domain_dns_suggest", {"domain": "example.com"}),
         ("domain_dns_push_preview", {"domain": "example.com"}),
+        ("backup_info", {"name": "20260901-000000"}),
+        ("user_permission_info", {"permission": "myapp.main"}),
     ],
 )
 async def test_phase4_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
@@ -265,6 +275,9 @@ async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
         ("firewall_reload", {}),
         ("settings_set", {"key": "example.setting", "value": "1"}),
         ("regenconf_apply", {}),
+        ("domain_remove", {"domain": "old.example.com"}),
+        ("system_reboot", {}),
+        ("system_shutdown", {}),
     ],
 )
 async def test_phase6_confirmable_write_requires_then_accepts_confirmation(tool: str, args: dict):
@@ -502,6 +515,7 @@ async def test_user_mgmt_plain_confirmable_write_requires_then_accepts_confirmat
         ("user_group_delete", {"groupname": "editors"}),
         ("user_permission_add", {"permission": "myapp.main", "names": ["alice"]}),
         ("user_permission_remove", {"permission": "myapp.main", "names": ["alice"]}),
+        ("user_permission_update", {"permission": "myapp.main", "label": "Main"}),
     ],
 )
 async def test_user_mgmt_owner_cosign_write_requires_then_accepts_confirmation(tool: str, args: dict):

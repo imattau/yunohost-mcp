@@ -80,6 +80,7 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.SYSTEM_MIGRATE,
     Scope.SETTINGS_WRITE,
     Scope.REGENCONF_WRITE,
+    Scope.SYSTEM_POWER,
 }
 
 _PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {

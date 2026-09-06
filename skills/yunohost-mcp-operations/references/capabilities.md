@@ -4,7 +4,7 @@ This is a reviewed snapshot of the upstream tool inventory and policy model (che
 
 ## Scopes and roles
 
-Scopes: `server.read`, `diagnosis.read`, `apps.read`, `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.read`, `apps.config.write`, `services.read`, `services.restart`, `logs.read`, `backups.read`, `backups.create`, `backups.restore`, `backups.delete`, `users.read`, `users.write`, `users.delete`, `domains.read`, `domains.write`, `system.update`, `system.upgrade`, `system.migrate`, `firewall.read`, `firewall.write`, `settings.read`, `settings.write`, `regenconf.read`, `regenconf.write`, `packages.inspect`, `packages.test`, `catalog.inspect`, `catalog.verify`, `catalog.publish`, `audit.read`, `owner.approve`, `memory.read`, `memory.write`, and `memory.feedback` (the last three gate the optional Polypack bridge - see "Memory" below, and are deliberately kept separate from all YunoHost administration scopes).
+Scopes: `server.read`, `diagnosis.read`, `apps.read`, `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.read`, `apps.config.write`, `services.read`, `services.restart`, `logs.read`, `backups.read`, `backups.create`, `backups.restore`, `backups.delete`, `users.read`, `users.write`, `users.delete`, `domains.read`, `domains.write`, `system.update`, `system.upgrade`, `system.migrate`, `system.power`, `firewall.read`, `firewall.write`, `settings.read`, `settings.write`, `regenconf.read`, `regenconf.write`, `packages.inspect`, `packages.test`, `catalog.inspect`, `catalog.verify`, `catalog.publish`, `audit.read`, `owner.approve`, `memory.read`, `memory.write`, and `memory.feedback` (the last three gate the optional Polypack bridge - see "Memory" below, and are deliberately kept separate from all YunoHost administration scopes).
 
 Role bundles:
 
@@ -14,11 +14,11 @@ Role bundles:
 | `operator` | `readonly` plus `services.restart`, `backups.create` |
 | `app-admin` | `operator` plus `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.write`, `backups.restore`, `backups.delete`, `domains.write`, `users.write`, `users.delete`, `system.upgrade`, `audit.read` (audit reads still additionally require owner co-signature per call - the scope only lets an identity *ask*) |
 | `package-developer` | `app-admin` plus `packages.test`, `catalog.publish`, `memory.read`, `memory.write`, `memory.feedback` |
-| `administrator` | Every scope, including `system.migrate`, `firewall.write`, `settings.write`, `regenconf.write`, and `owner.approve` |
+| `administrator` | Every scope, including `system.migrate`, `firewall.write`, `settings.write`, `regenconf.write`, `system.power`, and `owner.approve` |
 
 Role bundles are strictly hierarchical below `administrator`: `readonly` < `operator` < `app-admin` < `package-developer`, each a superset of the one before. This changed from an earlier "package-developer is not app-admin, roles combine by union" model - don't assume that older shape if you've seen it described elsewhere. An identity with no roles has no operational scopes. A valid NIP-98 signature authenticates identity; it does not grant authorization.
 
-`system.migrate` (`migrations_run` - can carry irreversible OS/schema changes), `firewall.write` (`firewall_open`/`firewall_close`/`firewall_reload` - a wrong rule can lock the admin out with no MCP-level undo), `settings.write` (`settings_set` - global settings apply server-wide), and `regenconf.write` (`regenconf_apply` - `force=true` can overwrite a manually-edited service config, and a bad regeneration of e.g. nginx/ssowat carries the same lockout risk as `firewall.write`) are granted from `app-admin` up, same as `system.upgrade` - but every call still needs confirmation plus a *different* identity's owner co-signature, which is the actual per-call safety gate; the scope only lets an identity ask. `owner.approve` (`approve_operation`) is administrator-only for the same reason as `audit.read` needing per-call owner co-signature: both touch cross-identity state, not just the caller's own.
+`system.migrate` (`migrations_run` - can carry irreversible OS/schema changes), `firewall.write` (`firewall_open`/`firewall_close`/`firewall_reload` - a wrong rule can lock the admin out with no MCP-level undo), `settings.write` (`settings_set` - global settings apply server-wide), `regenconf.write` (`regenconf_apply` - `force=true` can overwrite a manually-edited service config, and a bad regeneration of e.g. nginx/ssowat carries the same lockout risk as `firewall.write`), and `system.power` (`system_reboot`/`system_shutdown` - takes the whole host down) are granted from `app-admin` up, same as `system.upgrade` - but every call still needs confirmation plus a *different* identity's owner co-signature, which is the actual per-call safety gate; the scope only lets an identity ask. `owner.approve` (`approve_operation`) is administrator-only for the same reason as `audit.read` needing per-call owner co-signature: both touch cross-identity state, not just the caller's own - the co-signer must always hold `administrator`, even for a request an `app-admin` identity is scoped to make.
 
 ## Tool inventory by capability
 
@@ -57,8 +57,8 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 
 ### Backups
 
-- `backups_list`, `backup_create`, `backup_restore` — `backups.read`/`backups.create`/`backups.restore`.
-- A `backups.delete` scope exists in the policy model (app-admin and above) for an owner-approved backup-deletion capability, but no corresponding tool was found in a live listing as of this writing - confirm via `ToolSearch` before assuming it's callable on a given server.
+- `backups_list`, `backup_create`, `backup_restore`, `backup_delete` — `backups.read`/`backups.create`/`backups.restore`/`backups.delete`.
+- `backup_info` — `backups.read`. Per-archive creation time, description, size, on-disk `path`, and (`with_details=True`) the apps/system parts it contains. There is no "download" tool - `path` is where an admin retrieves the archive's bytes from (SSH/SCP/SFTP); YunoHost's own `backup_download` is a Bottle-HTTP-file-serving action tied to its REST API, not a plain callable function.
 
 ### Domains and certificates
 
@@ -68,6 +68,7 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 - `domain_dns_suggest` — `domains.read`. Locally-computed recommended DNS records (basic/mail/extra) as zone-file-style text; does not contact the registrar.
 - `domain_dns_push_preview` — `domains.read`. Diffs `domain_dns_suggest`'s records against what's actually live at the domain's configured registrar (create/update/delete/unchanged), without changing anything. Requires a registrar to already be configured on the domain - fails clearly otherwise. Always call before `domain_dns_push`.
 - `domain_dns_push` — `domains.write`, confirmation-gated (not owner-signature-gated) - same tier as `domain_add`/`domain_cert_install`. Applies the diff `domain_dns_push_preview` shows. Without `force`, only touches records YunoHost itself previously created; `force=True` extends that to any matching record; `purge=True` deletes every YunoHost-managed record instead of syncing (almost always paired with removing the domain itself).
+- `domain_remove` — `domains.write`, confirmation *and* owner co-signature (unlike the other domain writes above - irreversible: deletes the domain's LDAP entry, certs, and DNS/nginx/mail config). Refuses to run - and lists the offending apps - if any app is still installed on the domain, unless `remove_apps=True`, which removes those apps too as part of the same call. Cannot remove the main domain while any other domain exists.
 
 ### Firewall
 
@@ -86,6 +87,12 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 - `users_list`, `user_create`, `user_update`, `user_delete`
 - `user_group_list`, `user_group_create`, `user_group_update`, `user_group_delete`
 - `user_permission_list`, `user_permission_add`, `user_permission_remove`
+- `user_permission_info` — `users.read`. One permission's full info (allowed users/groups, label, `show_tile`, `protected`, URL(s)).
+- `user_permission_update` — `users.write`, same `users.permissions` gate (confirmation plus owner co-signature) as `user_permission_add`/`remove`. Updates `label`/`show_tile`/`protected` - not who has access; `protected=False` on a permission meant to require login is a real access-control change, not cosmetic.
+
+### Host power
+
+- `system_reboot`, `system_shutdown` — `system.power`, app-admin and above, confirmation plus owner co-signature - same tier as `system_upgrade`. Both always run with YunoHost's own `force=True` internally (never exposed - `force=False`'s interactive y/N prompt silently no-ops under this server's headless interface, so the confirmation/co-signature round trip is the real gate). `system_reboot` comes back up on its own; `system_shutdown` does not - without remote power management, someone needs physical access to the machine to restore it afterward.
 
 ### Package development
 
@@ -140,6 +147,8 @@ The built-in policy requires:
 | `user_delete` | confirmation plus different administrator identity co-signature |
 | `user_group_create` / `user_group_update` | confirmation |
 | `user_group_delete` | confirmation plus different administrator identity co-signature |
-| `user_permission_add` / `user_permission_remove` | confirmation plus different administrator identity co-signature |
+| `user_permission_add` / `user_permission_remove` / `user_permission_update` | confirmation plus different administrator identity co-signature |
+| `domain_remove` | confirmation plus different administrator identity co-signature |
+| `system_reboot` / `system_shutdown` | confirmation plus different administrator identity co-signature |
 
 The local `policy.toml` may change confirmation settings, but the live server's response is authoritative. Every write is serialized and audited; responses are redacted for secret-shaped values.

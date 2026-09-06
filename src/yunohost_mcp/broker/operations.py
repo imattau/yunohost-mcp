@@ -494,6 +494,19 @@ def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
     )
 
 
+def _backup_info(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"name", "with_details"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown backup info argument")
+    name = arguments.get("name")
+    if not isinstance(name, str) or not name or len(name) > 256:
+        raise ValueError("name must be a non-empty string")
+    with_details = arguments.get("with_details", False)
+    if not isinstance(with_details, bool):
+        raise ValueError("with_details must be a boolean")
+    return adapter.backup_info(name, with_details=with_details)
+
+
 def _backup_delete(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "confirmation_id"}
     if set(arguments) - allowed:
@@ -638,6 +651,24 @@ def _system_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
         raise ValueError("confirmation_id must be a string")
     return adapter.system_upgrade(confirmation_id=confirmation_id)
+
+
+def _confirmation_only(fn):
+    def invoke(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+        if set(arguments) - {"confirmation_id"}:
+            raise ValueError("unknown argument")
+        confirmation_id = arguments.get("confirmation_id")
+        if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+            raise ValueError("confirmation_id must be a string")
+        return fn(adapter, confirmation_id=confirmation_id)
+
+    return invoke
+
+
+_system_reboot = _confirmation_only(lambda adapter, confirmation_id: adapter.system_reboot(confirmation_id=confirmation_id))
+_system_shutdown = _confirmation_only(
+    lambda adapter, confirmation_id: adapter.system_shutdown(confirmation_id=confirmation_id)
+)
 
 
 def _migrations_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -838,6 +869,36 @@ def _permission_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     return _permission_change(adapter, arguments, "remove")
 
 
+def _permission_info(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"permission"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown user permission info argument")
+    permission = _bounded_string(arguments, "permission", 256, required=True)
+    return adapter.user_permission_info(permission)
+
+
+def _permission_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"permission", "label", "show_tile", "protected", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown user permission update argument")
+    permission = _bounded_string(arguments, "permission", 256, required=True)
+    label = arguments.get("label")
+    if label is not None and (not isinstance(label, str) or not label or len(label) > 256):
+        raise ValueError("label must be a bounded non-empty string")
+    show_tile = arguments.get("show_tile")
+    if show_tile is not None and not isinstance(show_tile, bool):
+        raise ValueError("show_tile must be a boolean")
+    protected = arguments.get("protected")
+    if protected is not None and not isinstance(protected, bool):
+        raise ValueError("protected must be a boolean")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.user_permission_update(
+        permission, label=label, show_tile=show_tile, protected=protected, confirmation_id=confirmation_id
+    )
+
+
 def _domain_add(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"domain", "install_letsencrypt_cert", "confirmation_id"}
     if set(arguments) - allowed:
@@ -850,6 +911,21 @@ def _domain_add(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str
     if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
         raise ValueError("confirmation_id must be a string")
     return adapter.domain_add(domain, install_letsencrypt_cert=letsencrypt, confirmation_id=confirmation_id)
+
+
+def _domain_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"domain", "remove_apps", "force", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown domain remove argument")
+    domain = _bounded_string(arguments, "domain", 253, required=True)
+    remove_apps = arguments.get("remove_apps", False)
+    force = arguments.get("force", False)
+    if not isinstance(remove_apps, bool) or not isinstance(force, bool):
+        raise ValueError("remove_apps and force must be booleans")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.domain_remove(domain, remove_apps=remove_apps, force=force, confirmation_id=confirmation_id)
 
 
 def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1006,6 +1082,7 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "domain.certificate_info": BrokerOperation("domain.certificate_info", "domains.read", _domain_name),
     "user.groups": BrokerOperation("user.groups", "users.read", _no_args(YunohostAdapter.user_group_list)),
     "user.permissions": BrokerOperation("user.permissions", "users.read", _no_args(YunohostAdapter.user_permission_list)),
+    "user.permission_info": BrokerOperation("user.permission_info", "users.read", _permission_info),
     "service.logs": BrokerOperation("service.logs", "logs.read", _service_logs),
     "journal.query": BrokerOperation("journal.query", "logs.read", _journal_query),
     "web.logs": BrokerOperation("web.logs", "logs.read", _web_logs),
@@ -1023,6 +1100,7 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "firewall.is_open": BrokerOperation("firewall.is_open", "firewall.read", _firewall_is_open),
     "service.restart": BrokerOperation("service.restart", "services.restart", _service_restart),
     "backup.create": BrokerOperation("backup.create", "backups.create", _backup_create),
+    "backup.info": BrokerOperation("backup.info", "backups.read", _backup_info),
     "backup.delete": BrokerOperation("backup.delete", "backups.delete", _backup_delete),
     "app.install": BrokerOperation("app.install", "apps.install", _app_install),
     "app.upgrade": BrokerOperation("app.upgrade", "apps.upgrade", _app_upgrade),
@@ -1031,6 +1109,8 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "app.config_set": BrokerOperation("app.config_set", "apps.config.write", _app_config_set),
     "backup.restore": BrokerOperation("backup.restore", "backups.restore", _backup_restore),
     "system.upgrade": BrokerOperation("system.upgrade", "system.upgrade", _system_upgrade),
+    "system.reboot": BrokerOperation("system.reboot", "system.power", _system_reboot),
+    "system.shutdown": BrokerOperation("system.shutdown", "system.power", _system_shutdown),
     "migrations.run": BrokerOperation("migrations.run", "system.migrate", _migrations_run),
     "firewall.open": BrokerOperation("firewall.open", "firewall.write", _firewall_open),
     "firewall.close": BrokerOperation("firewall.close", "firewall.write", _firewall_close),
@@ -1043,7 +1123,9 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "user.group_delete": BrokerOperation("user.group_delete", "users.delete", _group_delete),
     "user.permission_add": BrokerOperation("user.permission_add", "users.write", _permission_add),
     "user.permission_remove": BrokerOperation("user.permission_remove", "users.write", _permission_remove),
+    "user.permission_update": BrokerOperation("user.permission_update", "users.write", _permission_update),
     "domain.add": BrokerOperation("domain.add", "domains.write", _domain_add),
+    "domain.remove": BrokerOperation("domain.remove", "domains.write", _domain_remove),
     "domain.cert_install": BrokerOperation("domain.cert_install", "domains.write", _domain_cert_install),
     "domain.dns_suggest": BrokerOperation("domain.dns_suggest", "domains.read", _domain_dns_suggest),
     "domain.dns_push_preview": BrokerOperation("domain.dns_push_preview", "domains.read", _domain_dns_push_preview),

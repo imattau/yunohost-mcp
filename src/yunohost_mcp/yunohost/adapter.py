@@ -1513,6 +1513,52 @@ class YunohostAdapter:
         result = user_permission_remove(permission=permission, names=names)
         return {"fake": False, "permission": permission, "result": result}
 
+    def user_permission_info(self, permission: str) -> dict[str, Any]:
+        brokered = self._broker_call("user.permission_info", {"permission": permission})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "permission": permission, "info": {"allowed": ["all_users"]}}
+        return {
+            "fake": False,
+            "permission": permission,
+            "info": _call_via_system_python(
+                "yunohost.user", "user_permission_info", {"permission": permission}, self.settings
+            ),
+        }
+
+    def user_permission_update(
+        self,
+        permission: str,
+        label: str | None = None,
+        show_tile: bool | None = None,
+        protected: bool | None = None,
+        confirmation_id: str | None = None,
+    ) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "user.permission_update",
+            {
+                "permission": permission,
+                "label": label,
+                "show_tile": show_tile,
+                "protected": protected,
+                "confirmation_id": confirmation_id,
+            },
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "permission": permission, "label": label, "show_tile": show_tile, "protected": protected}
+        user_permission_update = _import_attr("yunohost.user", "user_permission_update")
+        # add/remove are deliberately not exposed here - user_permission_add/
+        # user_permission_remove above already cover that, with their own
+        # narrower @is_flash_unit_operation write path; this method is for
+        # the label/show_tile/protected fields those two don't touch.
+        result = user_permission_update(
+            permission=permission, label=label, show_tile=show_tile, protected=protected
+        )
+        return {"fake": False, "permission": permission, "result": result}
+
     def backups_list(self) -> dict[str, Any]:
         brokered = self._broker_call("backups.list", {})
         if brokered is not None:
@@ -1521,6 +1567,29 @@ class YunohostAdapter:
             return {"fake": True, "archives": ["20260901-000000"]}
         backup_list = _import_attr("yunohost.backup", "backup_list")
         return {"fake": False, **backup_list()}
+
+    def backup_info(self, name: str, with_details: bool = False) -> dict[str, Any]:
+        # Closes the "download a backup" gap without a fake "download"
+        # tool: backup_download() itself returns a raw Bottle HTTPResponse
+        # (static_file(...)) meant for the real REST API's file-serving
+        # path, not JSON-serializable data - it can't be called through
+        # either _import_attr or _call_via_system_python's JSON-in/JSON-out
+        # contract, and shoving a multi-GB archive through an MCP response
+        # wouldn't be practical even if it could. backup_info()'s own
+        # `path` field is the actual answer to "where is this archive" -
+        # an admin fetches the bytes over SSH/SCP/SFTP from there.
+        brokered = self._broker_call("backup.info", {"name": name, "with_details": with_details})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "name": name,
+                "path": f"/home/yunohost.backup/archives/{name}.tar.gz",
+                "size": 0,
+            }
+        backup_info = _import_attr("yunohost.backup", "backup_info")
+        return {"fake": False, "name": name, **backup_info(name, with_details=with_details)}
 
     def backup_created_at_times(self) -> dict[str, float]:
         """Real per-archive creation time (unix timestamp), keyed by
@@ -1950,6 +2019,48 @@ class YunohostAdapter:
         )
         return {"fake": False, "operation_id": _latest_operation_id(), "domain": domain, "result": result}
 
+    def domain_remove(
+        self, domain: str, remove_apps: bool = False, force: bool = False, confirmation_id: str | None = None
+    ) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "domain.remove",
+            {"domain": domain, "remove_apps": remove_apps, "force": force, "confirmation_id": confirmation_id},
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-domain_remove",
+                "domain": domain,
+                "remove_apps": remove_apps,
+            }
+        # @is_unit_operation-decorated (yunohost.domain), and uses
+        # _get_ldap_interface() directly to delete the domain's LDAP entry -
+        # same "keep it in the system interpreter" reasoning as domain_list/
+        # users_list (see their comments), not the pydantic-conflict one
+        # domain_add/domain_dns_* are routed for. ignore_dyndns=True always
+        # (not exposed) for the same reason domain_add always sets it: this
+        # server doesn't manage the DynDNS subscription lifecycle, only
+        # plain custom domains - see domain_add's comment. Running headless
+        # (interface_type="api", the default) also means the CLI-only
+        # "remove these N apps too?" confirmation prompt inside
+        # domain_remove itself never fires, which is what we want - our own
+        # require_confirmation is the gate here, remove_apps=True executes
+        # every affected app's removal directly once confirmed.
+        _call_via_system_python(
+            "yunohost.domain",
+            "domain_remove",
+            {"domain": domain, "remove_apps": remove_apps, "force": force, "ignore_dyndns": True},
+            self.settings,
+        )
+        return {
+            "fake": False,
+            "operation_id": _latest_operation_id(),
+            "domain": domain,
+            "remove_apps": remove_apps,
+        }
+
     def service_restart(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call("service.restart", {"names": names, "confirmation_id": confirmation_id})
         if brokered is not None:
@@ -2190,6 +2301,39 @@ class YunohostAdapter:
         tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
         result = tools_upgrade(target="system")
         return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+
+    # -- Power ----------------------------------------------------------------
+    #
+    # tools_reboot/tools_shutdown (yunohost.tools) both take `force: bool`
+    # and, when force=False, try Moulinette.prompt() for an interactive y/N
+    # confirmation - which raises NotImplementedError under our headless
+    # API-mode interface and is silently caught, leaving the reboot/
+    # shutdown flag False and the call a no-op. force=True is therefore
+    # always passed here (not exposed as a parameter) - our own
+    # @require_confirmation + owner co-signature is the actual gate,
+    # exactly like domain_add always passing ignore_dyndns=True to route
+    # around a different CLI-only prompt. Same @is_unit_operation, plain-
+    # _import_attr treatment as tools_upgrade just above.
+
+    def system_reboot(self, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("system.reboot", {"confirmation_id": confirmation_id})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-tools_reboot", "rebooting": True}
+        tools_reboot = _import_attr("yunohost.tools", "tools_reboot")
+        tools_reboot(force=True)
+        return {"fake": False, "operation_id": _latest_operation_id(), "rebooting": True}
+
+    def system_shutdown(self, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("system.shutdown", {"confirmation_id": confirmation_id})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-tools_shutdown", "shutting_down": True}
+        tools_shutdown = _import_attr("yunohost.tools", "tools_shutdown")
+        tools_shutdown(force=True)
+        return {"fake": False, "operation_id": _latest_operation_id(), "shutting_down": True}
 
     # -- Migrations ---------------------------------------------------------
     #

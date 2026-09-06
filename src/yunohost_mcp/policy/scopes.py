@@ -62,6 +62,16 @@ class Scope(StrEnum):
     # same risk class.
     SYSTEM_MIGRATE = "system.migrate"
 
+    # system_reboot/system_shutdown (tools_reboot/tools_shutdown) - takes
+    # the whole host down. Reboot recovers on its own; shutdown does not -
+    # without remote power management, an admin needs physical access to
+    # bring the server back. Same app-admin-plus-owner-co-signature tier as
+    # SYSTEM_UPGRADE (the owner co-signature is what stands between an
+    # agent and actually pulling this trigger), not a separate tier of its
+    # own - see policy/roles.py's _APP_ADMIN comment for why administrator-
+    # only isn't the right lever here either.
+    SYSTEM_POWER = "system.power"
+
     # firewall_list/firewall_is_open - read-only, safe for every role that
     # already gets services.read/domains.read.
     FIREWALL_READ = "firewall.read"

@@ -95,6 +95,16 @@ def test_only_app_admin_and_above_can_write_settings_or_apply_regenconf():
         assert Scope.REGENCONF_WRITE in ROLE_SCOPES[role], role
 
 
+def test_only_app_admin_and_above_can_reboot_or_shutdown():
+    # Same reasoning as the scope-tier tests above: owner co-signature is
+    # the actual per-call gate for something this destructive, not the
+    # scope/role itself.
+    for role in ("readonly", "operator"):
+        assert Scope.SYSTEM_POWER not in ROLE_SCOPES[role], role
+    for role in ("app-admin", "package-developer", "administrator"):
+        assert Scope.SYSTEM_POWER in ROLE_SCOPES[role], role
+
+
 def test_roles_are_strictly_hierarchical_below_administrator():
     # readonly < operator < app-admin < package-developer < administrator -
     # each a strict superset of the one before, not independent branches
