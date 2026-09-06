@@ -494,6 +494,21 @@ def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
     )
 
 
+def _backup_delete(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"name", "confirmation_id"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown backup delete argument")
+    name = arguments.get("name")
+    if not isinstance(name, str) or not name or len(name) > 256:
+        raise ValueError("name must be a non-empty string")
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        raise ValueError("name must be an archive name, not a path")
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.backup_delete(name, confirmation_id=confirmation_id)
+
+
 def _app_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "label", "args", "force", "confirmation_id"}
     if set(arguments) - allowed:
@@ -909,6 +924,7 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "firewall.is_open": BrokerOperation("firewall.is_open", "firewall.read", _firewall_is_open),
     "service.restart": BrokerOperation("service.restart", "services.restart", _service_restart),
     "backup.create": BrokerOperation("backup.create", "backups.create", _backup_create),
+    "backup.delete": BrokerOperation("backup.delete", "backups.delete", _backup_delete),
     "app.install": BrokerOperation("app.install", "apps.install", _app_install),
     "app.upgrade": BrokerOperation("app.upgrade", "apps.upgrade", _app_upgrade),
     "app.remove": BrokerOperation("app.remove", "apps.remove", _app_remove),

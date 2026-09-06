@@ -15,7 +15,7 @@ write is ever in flight, plus a JSON-lines audit entry per call -
 audit/log.py, policy/locks.py).
 Phase 6: adds the safety policy engine and confirmation model
 (policy/rules.py, policy/confirmation.py) and the riskier writes that need
-them - app_remove, backup_restore, system_upgrade all require a matching
+them - app_remove, backup_restore, backup_delete, system_upgrade all require a matching
 confirm-then-execute round trip; app_upgrade additionally gets hard
 policy checks (a recent backup must exist, minimum free space) that no
 confirmation can bypass, per PLAN.md's example policy.toml.
@@ -1026,6 +1026,40 @@ def backup_create(
     return adapter.backup_create(
         name=name, description=description, apps=apps, system=system, confirmation_id=confirmation_id
     )
+
+
+def _validate_backup_archive_name(name: str) -> None:
+    if not isinstance(name, str) or not name or len(name) > 256:
+        raise ToolInputError("name must be a non-empty string")
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        raise ToolInputError("name must be an archive name, not a path")
+
+
+def _backup_delete_plan(name: str) -> dict[str, Any]:
+    _validate_backup_archive_name(name)
+    return {
+        "action": "delete backup archive",
+        "name": name,
+        "warning": "This permanently deletes the named backup archive and cannot be undone.",
+    }
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.BACKUPS_DELETE)
+@audited_write("backups.delete", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "backups.delete",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda name, **_: _backup_delete_plan(name),
+)
+def backup_delete(name: str, confirmation_id: str | None = None) -> dict[str, Any]:
+    """Permanently delete one local backup archive. Requires owner approval."""
+    _validate_backup_archive_name(name)
+    return adapter.backup_delete(name, confirmation_id=confirmation_id)
 
 
 @mcp.tool()

@@ -21,7 +21,9 @@ from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
 PHASE5_WRITE_TOOLS = {"service_restart", "backup_create", "app_install", "app_upgrade"}
-PHASE6_WRITE_TOOLS = {"app_remove", "backup_restore", "system_upgrade", "domain_add", "domain_cert_install"}
+PHASE6_WRITE_TOOLS = {
+    "app_remove", "backup_restore", "backup_delete", "system_upgrade", "domain_add", "domain_cert_install"
+}
 APP_CHANGE_URL_TOOLS = {"app_change_url"}
 MIGRATIONS_TOOLS = {"migrations_list", "migrations_state", "migrations_run"}
 FIREWALL_TOOLS = {"firewall_list", "firewall_is_open", "firewall_open", "firewall_close", "firewall_reload"}
@@ -216,6 +218,7 @@ async def test_phase5_write_tool_succeeds_and_is_audited(tool: str, args: dict):
     ("tool", "args"),
     [
         ("backup_restore", {"name": "20260901-000000"}),
+        ("backup_delete", {"name": "package-test-example-123"}),
         ("system_upgrade", {}),
         ("migrations_run", {}),
         ("firewall_open", {"port": 8080, "protocol": "tcp"}),

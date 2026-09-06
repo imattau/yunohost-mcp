@@ -87,6 +87,7 @@ def test_package_developer_has_every_app_admin_scope():
     # iteration.
     assert Scope.USERS_DELETE in ROLE_SCOPES["package-developer"]
     assert Scope.BACKUPS_RESTORE in ROLE_SCOPES["package-developer"]
+    assert Scope.BACKUPS_DELETE in ROLE_SCOPES["package-developer"]
     assert ROLE_SCOPES["app-admin"] <= ROLE_SCOPES["package-developer"]
 
 

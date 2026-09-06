@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -55,7 +56,7 @@ def test_package_upgrade_test():
 
 def test_package_backup_test():
     result = make_adapter().package_backup_test("example")
-    assert result["name"] == "package-test-example"
+    assert re.fullmatch(r"package-test-example-\d+", result["name"])
 
 
 def test_package_restore_test():
@@ -87,7 +88,7 @@ def test_package_run_tests_uses_explicit_app_id_over_manifest_id():
     adapter = make_adapter()
     result = adapter.package_run_tests("/path/to/example_ynh", app_id="my-custom-id")
     backup_step = next(s for s in result["steps"] if s["step"] == "backup")
-    assert backup_step["result"]["name"] == "package-test-my-custom-id"
+    assert re.fullmatch(r"package-test-my-custom-id-\d+", backup_step["result"]["name"])
 
 
 def test_package_run_tests_stops_after_install_failure(monkeypatch: pytest.MonkeyPatch):

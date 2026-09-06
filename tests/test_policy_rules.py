@@ -44,6 +44,8 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["apps.change_url"].require_confirmation is True
     assert DEFAULT_POLICY["apps.change_url"].require_backup is False
     assert DEFAULT_POLICY["backups.restore"].require_confirmation is True
+    assert DEFAULT_POLICY["backups.delete"].require_confirmation is True
+    assert DEFAULT_POLICY["backups.delete"].require_owner_signature is True
     assert DEFAULT_POLICY["system.upgrade"].require_confirmation is True
     assert DEFAULT_POLICY["system.migrate"].require_confirmation is True
     assert DEFAULT_POLICY["system.migrate"].require_owner_signature is True

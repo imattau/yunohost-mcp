@@ -53,6 +53,7 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     Scope.APPS_REMOVE,
     Scope.APPS_CONFIG_WRITE,
     Scope.BACKUPS_RESTORE,
+    Scope.BACKUPS_DELETE,
     Scope.DOMAINS_WRITE,
     Scope.USERS_WRITE,
     Scope.USERS_DELETE,

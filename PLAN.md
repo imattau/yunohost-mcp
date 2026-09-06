@@ -215,6 +215,7 @@ logs.read
 backups.read
 backups.create
 backups.restore
+backups.delete
 
 users.read
 users.write
@@ -366,6 +367,10 @@ max_backup_age = "24h"
 [policy.backups.restore]
 require_confirmation = true
 
+[policy.backups.delete]
+require_confirmation = true
+require_owner_signature = true
+
 [policy.system.upgrade]
 require_confirmation = true
 ```
@@ -467,6 +472,9 @@ package_run_tests(source)
 
 package_logs(operation)
 ```
+
+Package-test backups use unique archive names and are retained for inspection;
+deleting one is a separate owner-approved `backup_delete(name)` operation.
 
 The AI-coding workflow then becomes:
 

@@ -115,6 +115,7 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # "permission changes", and "firewall changes" now are (below),
     # matching what Phase 13 names them as.
     "backups.restore": PolicyRule(require_confirmation=True, require_owner_signature=True),
+    "backups.delete": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "system.upgrade": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # Not named in PLAN.md's original Phase 13 list, but the same risk
     # class as system.upgrade in practice - a migration can carry

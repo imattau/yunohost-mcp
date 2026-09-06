@@ -39,6 +39,7 @@ class Scope(StrEnum):
     BACKUPS_READ = "backups.read"
     BACKUPS_CREATE = "backups.create"
     BACKUPS_RESTORE = "backups.restore"
+    BACKUPS_DELETE = "backups.delete"
 
     USERS_READ = "users.read"
     USERS_WRITE = "users.write"

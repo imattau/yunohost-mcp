@@ -122,6 +122,7 @@ def test_registry_contains_only_explicit_operations():
     assert OPERATIONS["app.change_url"].required_scope == "apps.upgrade"
     assert OPERATIONS["app.config_set"].required_scope == "apps.config.write"
     assert OPERATIONS["backup.restore"].required_scope == "backups.restore"
+    assert OPERATIONS["backup.delete"].required_scope == "backups.delete"
     assert OPERATIONS["system.upgrade"].required_scope == "system.upgrade"
     assert OPERATIONS["migrations.run"].required_scope == "system.migrate"
     assert OPERATIONS["user.create"].required_scope == "users.write"

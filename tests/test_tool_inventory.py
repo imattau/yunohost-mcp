@@ -49,6 +49,7 @@ EXPECTED_TOOLS = frozenset(
         "domain_cert_install",
         "service_restart",
         "backup_create",
+        "backup_delete",
         "app_install",
         "app_upgrade",
         "plan_app_upgrade",

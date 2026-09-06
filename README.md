@@ -162,7 +162,7 @@ yunohost-mcp-delegate --key-file ~/.config/yunohost-mcp/key \
 
 ## Approving high-risk operations: yunohost-mcp-approve
 
-Some operations (`system_upgrade`, `backup_restore`, `system_migrate`, `user_delete`, permission changes, firewall changes) require owner co-signature on top of the requester's own confirmation (PLAN.md Phase 13, `solo` profile - see `docs/owner-approval-plan.md` in the packaging repo for the full design). The requester's call pauses with a `confirmation_id`; the configured owner reviews and approves it with `yunohost-mcp-approve`, signing through their own [NIP-46](https://nips.nostr.com/46) remote signer app (Amber, nsec.app, ...) - their private key never touches this server or the requesting agent's machine.
+Some operations (`system_upgrade`, `backup_restore`, `backup_delete`, `system_migrate`, `user_delete`, permission changes, firewall changes) require owner co-signature on top of the requester's own confirmation (PLAN.md Phase 13, `solo` profile - see `docs/owner-approval-plan.md` in the packaging repo for the full design). The requester's call pauses with a `confirmation_id`; the configured owner reviews and approves it with `yunohost-mcp-approve`, signing through their own [NIP-46](https://nips.nostr.com/46) remote signer app (Amber, nsec.app, ...) - their private key never touches this server or the requesting agent's machine.
 
 One-time setup, on whatever device the owner keeps their signer app on:
 

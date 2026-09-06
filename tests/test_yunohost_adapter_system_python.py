@@ -104,6 +104,26 @@ def test_backup_restore_calls_call_via_system_python_with_correct_kwargs(monkeyp
     assert result == {"fake": False, "name": "20260901-000000", "result": None}
 
 
+def test_backup_delete_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.backup_delete("package-test-example-123")
+
+    assert captured["module_name"] == "yunohost.backup"
+    assert captured["attr"] == "backup_delete"
+    assert captured["kwargs"] == {"name": "package-test-example-123"}
+    assert result == {"fake": False, "name": "package-test-example-123", "deleted": True, "result": None}
+
+
 def test_app_install_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
     # app_install() re-parses the target manifest's [install] options,
     # which for any domain/group question hits the same DomainOption/

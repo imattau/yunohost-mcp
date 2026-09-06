@@ -412,6 +412,7 @@ class YunohostAdapter:
             "users_list",
             "backups_list",
             "backup_create",
+            "backup_delete",
             "backup_created_at_times",
             "free_space_bytes",
             "user_group_list",
@@ -1766,6 +1767,21 @@ class YunohostAdapter:
         archive_name = result.get("name", name) if isinstance(result, dict) else name
         return {"fake": False, "operation_id": _latest_operation_id(), "name": archive_name, "result": result}
 
+    def backup_delete(self, name: str, confirmation_id: str | None = None) -> dict[str, Any]:
+        brokered = self._broker_call("backup.delete", {"name": name, "confirmation_id": confirmation_id})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "name": name, "deleted": True}
+        # backup_delete() is a bounded native archive operation and returns
+        # no useful result of its own. Keep it in the system interpreter so
+        # the broker never imports YunoHost's backup module into the MCP
+        # venv, and report the exact archive that was deleted.
+        result = _call_via_system_python(
+            "yunohost.backup", "backup_delete", {"name": name}, self.settings
+        )
+        return {"fake": False, "name": name, "deleted": True, "result": result}
+
     def app_install(
         self,
         app: str,
@@ -2467,7 +2483,11 @@ class YunohostAdapter:
         brokered = self._broker_call("package.backup_test", {"app": app})
         if brokered is not None:
             return brokered
-        return self.backup_create(name=f"package-test-{app}", apps=[app])
+        # A fixed name makes a later test fail before the package lifecycle
+        # starts whenever the previous archive was retained. Keep archives
+        # for post-test inspection, but make each test's name unique.
+        name = f"package-test-{app}-{time.time_ns()}"
+        return self.backup_create(name=name, apps=[app])
 
     def package_restore_test(self, app: str, archive_name: str) -> dict[str, Any]:
         brokered = self._broker_call("package.restore_test", {"app": app, "archive_name": archive_name})
