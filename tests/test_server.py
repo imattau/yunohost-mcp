@@ -44,6 +44,8 @@ PHASE10_TOOLS = {"audit_list", "audit_get"}
 PHASE11_TOOLS = {"server_identity"}
 PHASE13_TOOLS = {"approve_operation", "approval_get", "approval_status"}
 PHASE14_TOOLS = {"diagnose_app", "validate_server", "safe_upgrade", "repair_app", "test_package"}
+MEMORY_READ_TOOLS = {"memory_get", "memory_list_contexts", "memory_recall", "memory_context", "memory_thread"}
+MEMORY_WRITE_TOOLS = {"memory_store", "memory_feedback"}
 USER_MGMT_READ_TOOLS = {"user_group_list", "user_permission_list"}
 USER_MGMT_PLAIN_CONFIRM_TOOLS = {"user_create", "user_update", "user_group_create", "user_group_update"}
 USER_MGMT_OWNER_COSIGN_TOOLS = {"user_delete", "user_group_delete", "user_permission_add", "user_permission_remove"}
@@ -128,6 +130,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | PHASE11_TOOLS
             | PHASE13_TOOLS
             | PHASE14_TOOLS
+            | MEMORY_READ_TOOLS
+            | MEMORY_WRITE_TOOLS
             | USER_MGMT_READ_TOOLS
             | USER_MGMT_PLAIN_CONFIRM_TOOLS
             | USER_MGMT_OWNER_COSIGN_TOOLS
@@ -186,6 +190,30 @@ async def test_phase4_tool_denied_for_identity_without_scope():
     async with Client(mcp) as client:
         result = await client.call_tool("apps_list", {})
         assert result.is_error is True
+
+
+@pytest.mark.anyio
+async def test_memory_store_audit_does_not_persist_memory_content(monkeypatch: pytest.MonkeyPatch):
+    from yunohost_mcp import server as server_module
+
+    monkeypatch.setattr(server_module.adapter, "memory_store", lambda *args, **kwargs: {"stored": True})
+    existing_lines = audit_log.path.read_text().splitlines() if audit_log.path.exists() else []
+    secret_content = "private decision that must not enter the YunoHost audit log"
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "memory_store",
+            {"content": secret_content, "metadata": {"source": "agent"}},
+        )
+        assert result.is_error is not True, result.content
+        assert result.structured_content == {"stored": True}
+
+    new_lines = audit_log.path.read_text().splitlines()[len(existing_lines) :]
+    assert len(new_lines) == 1
+    entry = json.loads(new_lines[0])
+    assert secret_content not in json.dumps(entry)
+    assert entry["arguments"]["content"]["length"] == len(secret_content)
+    assert entry["arguments"]["metadata"] == {"keys": ["source"]}
 
 
 @pytest.mark.anyio

@@ -34,7 +34,16 @@ def _consumed_ticket_approved_by() -> str | None:
     return ticket.owner_approved_by if ticket else None
 
 
-def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Callable[[F], F]:
+def audited_write(
+    tool_name: str,
+    *,
+    lock: WriteLock,
+    audit_log: AuditLog,
+    argument_sanitizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> Callable[[F], F]:
+    def audit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+        return argument_sanitizer(arguments) if argument_sanitizer else arguments
+
     def decorator(fn: F) -> F:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -47,7 +56,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
             except LockedError as exc:
                 audit_log.record(
                     tool=tool_name,
-                    arguments=kwargs,
+                    arguments=audit_arguments(kwargs),
                     caller_pubkey=caller,
                     decision="allowed",
                     result="locked",
@@ -58,7 +67,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
             except Exception as exc:
                 audit_log.record(
                     tool=tool_name,
-                    arguments=kwargs,
+                    arguments=audit_arguments(kwargs),
                     caller_pubkey=caller,
                     decision="allowed",
                     result="error",
@@ -79,7 +88,7 @@ def audited_write(tool_name: str, *, lock: WriteLock, audit_log: AuditLog) -> Ca
 
             audit_log.record(
                 tool=tool_name,
-                arguments=kwargs,
+                arguments=audit_arguments(kwargs),
                 caller_pubkey=caller,
                 decision="allowed",
                 result=outcome,

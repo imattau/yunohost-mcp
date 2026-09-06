@@ -15,6 +15,23 @@ yunohost-mcp --transport http --host 127.0.0.1 --port 8765   # NIP-98-authentica
 
 By default `fake_yunohost` is off (real mode) — set `YUNOHOST_MCP_FAKE_YUNOHOST=true` to run against canned data on a machine without YunoHost installed. See `identity.example.toml` for `identity.toml`'s shape (pubkey → role mapping; required before any HTTP request can do anything).
 
+## Optional local Polypack memory
+
+The server can act as an authenticated façade for a separately installed
+Polypack MCP service. Set `YUNOHOST_MCP_POLYPACK_URL` to that service's
+loopback `/mcp/` endpoint; the URL must resolve to `127.0.0.1`, `::1`, or
+`localhost`, and Polypack remains the sole owner of its database. The YunoHost
+MCP HTTP endpoint is still the only endpoint agents should expose publicly.
+
+The initial integration exposes bounded `memory_get`, `memory_list_contexts`,
+`memory_recall`, `memory_context`, `memory_thread`, `memory_store`, and
+`memory_feedback` tools. Memory reads, writes, and feedback have separate
+`memory.read`, `memory.write`, and `memory.feedback` scopes; writes are locked
+and audited, while content is represented in the audit log only by length and
+hash. Provenance is added by this server, and user metadata cannot forge its
+reserved `_yunohost_*` fields. The integration is optional and core YunoHost
+tools continue to work when Polypack is not installed or not configured.
+
 ## Installing the client tools
 
 The recommended client-side path is `uvx`, which creates an isolated

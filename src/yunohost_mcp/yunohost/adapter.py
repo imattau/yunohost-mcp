@@ -150,6 +150,26 @@ def _bounded_output(value: str, limit: int) -> str:
     return value[:limit] + "\n[output truncated]"
 
 
+_POLYPACK_MEMORY_CLASSES = frozenset({"entity", "episodic", "procedural", "semantic"})
+_POLYPACK_EDGE_TYPES = frozenset({"RESPONDS_TO", "SUPERSEDES", "SUPERSEDED_BY", "CONSOLIDATED_FROM"})
+
+
+def _polypack_text(value: str | None, *, name: str, limit: int, required: bool = False) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or (required and not value.strip()):
+        raise ToolInputError(f"{name} must be a non-empty string")
+    if len(value) > limit:
+        raise ToolInputError(f"{name} must be at most {limit} characters")
+    return value
+
+
+def _polypack_integer(value: int, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ToolInputError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 _yunohost_runtime_initialized = False
 
 
@@ -450,6 +470,130 @@ class YunohostAdapter:
                 )
 
             object.__setattr__(self, name, guarded)
+
+    def _polypack_call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Forward one typed call to the optional loopback Polypack service."""
+        from yunohost_mcp.polypack import PolypackClient
+
+        return PolypackClient(self.settings).call_tool(tool, arguments)
+
+    def memory_get(self, memory_id: str) -> dict[str, Any]:
+        memory_id = _polypack_text(memory_id, name="memory_id", limit=128, required=True)  # type: ignore[assignment]
+        return self._polypack_call("memory_get", {"memory_id": memory_id})
+
+    def memory_list_contexts(self) -> dict[str, Any]:
+        return self._polypack_call("memory_list_contexts", {})
+
+    def memory_recall(
+        self,
+        query: str,
+        *,
+        context: str | None = None,
+        include_neighbors: bool = False,
+        edge_types: list[str] | None = None,
+        depth: int = 1,
+        neighbor_limit: int = 3,
+        limit: int = 20,
+        token_budget: int = 4_000,
+    ) -> dict[str, Any]:
+        query = _polypack_text(
+            query, name="query", limit=self.settings.polypack_max_query_chars, required=True
+        )  # type: ignore[assignment]
+        context = _polypack_text(context, name="context", limit=256)
+        depth = _polypack_integer(depth, name="depth", minimum=0, maximum=3)
+        neighbor_limit = _polypack_integer(neighbor_limit, name="neighbor_limit", minimum=0, maximum=100)
+        limit = _polypack_integer(
+            limit, name="limit", minimum=1, maximum=self.settings.polypack_max_response_items
+        )
+        token_budget = _polypack_integer(token_budget, name="token_budget", minimum=1, maximum=50_000)
+        if edge_types is not None:
+            if not isinstance(edge_types, list) or not all(edge in _POLYPACK_EDGE_TYPES for edge in edge_types):
+                raise ToolInputError(f"edge_types must contain only {sorted(_POLYPACK_EDGE_TYPES)}")
+        arguments: dict[str, Any] = {
+            "query": query,
+            "include_neighbors": include_neighbors,
+            "depth": depth,
+            "neighbor_limit": neighbor_limit,
+            "limit": limit,
+            "token_budget": token_budget,
+        }
+        if context is not None:
+            arguments["context"] = context
+        if edge_types is not None:
+            arguments["edge_types"] = edge_types
+        return self._polypack_call("memory_recall", arguments)
+
+    def memory_context(
+        self,
+        context: str,
+        *,
+        strict_context: bool = False,
+        limit: int = 20,
+        token_budget: int = 4_000,
+    ) -> dict[str, Any]:
+        context = _polypack_text(context, name="context", limit=256, required=True)  # type: ignore[assignment]
+        limit = _polypack_integer(
+            limit, name="limit", minimum=1, maximum=self.settings.polypack_max_response_items
+        )
+        token_budget = _polypack_integer(token_budget, name="token_budget", minimum=1, maximum=50_000)
+        return self._polypack_call(
+            "memory_context",
+            {"context": context, "strict_context": strict_context, "limit": limit, "token_budget": token_budget},
+        )
+
+    def memory_thread(self, start_id: str, *, max_depth: int = 20) -> dict[str, Any]:
+        start_id = _polypack_text(start_id, name="start_id", limit=128, required=True)  # type: ignore[assignment]
+        max_depth = _polypack_integer(max_depth, name="max_depth", minimum=1, maximum=100)
+        return self._polypack_call("memory_thread", {"start_id": start_id, "max_depth": max_depth})
+
+    def memory_store(
+        self,
+        content: str,
+        *,
+        context: str | None = None,
+        memory_class: str = "semantic",
+        confidence: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        provenance: dict[str, Any],
+    ) -> dict[str, Any]:
+        content = _polypack_text(
+            content, name="content", limit=self.settings.polypack_max_content_chars, required=True
+        )  # type: ignore[assignment]
+        context = _polypack_text(context, name="context", limit=256)
+        if memory_class not in _POLYPACK_MEMORY_CLASSES:
+            raise ToolInputError(f"memory_class must be one of {sorted(_POLYPACK_MEMORY_CLASSES)}")
+        if confidence is not None and (
+            isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1
+        ):
+            raise ToolInputError("confidence must be between 0 and 1")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict) or len(metadata) > 64:
+            raise ToolInputError("metadata must be an object with at most 64 keys")
+        if not isinstance(provenance, dict):
+            raise ToolInputError("provenance must be an object")
+        if any(str(key).startswith("_yunohost_") for key in metadata):
+            raise ToolInputError("metadata keys beginning with _yunohost_ are reserved")
+        arguments: dict[str, Any] = {
+            "content": content,
+            "memory_class": memory_class,
+            "metadata": metadata,
+            "provenance": provenance,
+        }
+        if context is not None:
+            arguments["context"] = context
+        if confidence is not None:
+            arguments["confidence"] = confidence
+        return self._polypack_call("memory_store", arguments)
+
+    def memory_feedback(self, memory_id: str, *, useful: bool, agent_id: str) -> dict[str, Any]:
+        memory_id = _polypack_text(memory_id, name="memory_id", limit=128, required=True)  # type: ignore[assignment]
+        if not isinstance(useful, bool):
+            raise ToolInputError("useful must be a boolean")
+        agent_id = _polypack_text(agent_id, name="agent_id", limit=128, required=True)  # type: ignore[assignment]
+        return self._polypack_call(
+            "memory_feedback", {"memory_id": memory_id, "useful": useful, "agent_id": agent_id}
+        )
 
     def _broker_call(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         """Use the local broker when configured; otherwise return ``None``.

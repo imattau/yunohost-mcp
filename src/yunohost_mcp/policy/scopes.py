@@ -78,6 +78,13 @@ class Scope(StrEnum):
     CATALOG_VERIFY = "catalog.verify"
     CATALOG_PUBLISH = "catalog.publish"
 
+    # Optional local Polypack integration.  These are intentionally separate
+    # from YunoHost administration scopes: memory is durable shared context,
+    # not a substitute for server/app authorization.
+    MEMORY_READ = "memory.read"
+    MEMORY_WRITE = "memory.write"
+    MEMORY_FEEDBACK = "memory.feedback"
+
     # Not granted by any role except administrator (policy/roles.py) - this
     # is what makes audit_list()/audit_get() "administrator-only" per
     # PLAN.md Phase 10, without a role-name check in the tool itself.

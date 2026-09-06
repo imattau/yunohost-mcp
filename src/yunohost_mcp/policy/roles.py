@@ -69,6 +69,9 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
 _PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {
     Scope.PACKAGES_TEST,
     Scope.CATALOG_PUBLISH,
+    Scope.MEMORY_READ,
+    Scope.MEMORY_WRITE,
+    Scope.MEMORY_FEEDBACK,
 }
 
 _ADMINISTRATOR: frozenset[Scope] = ALL_SCOPES

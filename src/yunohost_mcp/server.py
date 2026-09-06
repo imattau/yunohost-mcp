@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import hashlib
 import inspect
 import time
 from typing import Any
@@ -277,6 +278,31 @@ def get_server_identity() -> ServerIdentity:
     return _server_identity
 
 
+def _memory_provenance(tool: str) -> dict[str, str]:
+    """Build reserved provenance from the authenticated YunoHost request."""
+    request = require_current_request()
+    return {
+        "_yunohost_source": "yunohost-mcp",
+        "_yunohost_server": settings.server_name,
+        "_yunohost_tool": tool,
+        "_yunohost_caller_pubkey": request.pubkey,
+        "_yunohost_request_id": request.event_id,
+    }
+
+
+def _memory_audit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep durable memory content and metadata out of the YunoHost audit log."""
+    sanitized: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key in {"content", "query"} and isinstance(value, str):
+            sanitized[key] = {"length": len(value), "sha256": hashlib.sha256(value.encode()).hexdigest()}
+        elif key in {"metadata", "provenance"} and isinstance(value, dict):
+            sanitized[key] = {"keys": sorted(str(item) for item in value)}
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
 def _check_apps_upgrade(rule: PolicyRule) -> None:
     # These reads are brokered in the packaged deployment. Calling them while
     # constructing the confirmation response would forward the same NIP-98
@@ -323,6 +349,123 @@ def health_check() -> dict[str, Any]:
 def apps_list(full: bool = False) -> dict[str, Any]:
     """List installed YunoHost apps."""
     return adapter.apps_list(full=full)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_READ)
+def memory_get(memory_id: str) -> dict[str, Any]:
+    """Return one Polypack memory by exact ID."""
+    return adapter.memory_get(memory_id)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_READ)
+def memory_list_contexts() -> dict[str, Any]:
+    """List Polypack context namespaces visible to the local store."""
+    return adapter.memory_list_contexts()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_READ)
+def memory_recall(
+    query: str,
+    context: str | None = None,
+    include_neighbors: bool = False,
+    edge_types: list[str] | None = None,
+    depth: int = 1,
+    neighbor_limit: int = 3,
+    limit: int = 20,
+    token_budget: int = 4_000,
+) -> dict[str, Any]:
+    """Recall bounded Polypack memories for an authenticated agent."""
+    return adapter.memory_recall(
+        query,
+        context=context,
+        include_neighbors=include_neighbors,
+        edge_types=edge_types,
+        depth=depth,
+        neighbor_limit=neighbor_limit,
+        limit=limit,
+        token_budget=token_budget,
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_READ)
+def memory_context(
+    context: str,
+    strict_context: bool = False,
+    limit: int = 20,
+    token_budget: int = 4_000,
+) -> dict[str, Any]:
+    """Assemble bounded working context from Polypack."""
+    return adapter.memory_context(
+        context,
+        strict_context=strict_context,
+        limit=limit,
+        token_budget=token_budget,
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_READ)
+def memory_thread(start_id: str, max_depth: int = 20) -> dict[str, Any]:
+    """Walk a bounded Polypack response/supersession thread."""
+    return adapter.memory_thread(start_id, max_depth=max_depth)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_WRITE)
+@audited_write(
+    "memory.store",
+    lock=write_lock,
+    audit_log=audit_log,
+    argument_sanitizer=_memory_audit_arguments,
+)
+def memory_store(
+    content: str,
+    context: str | None = None,
+    memory_class: str = "semantic",
+    confidence: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Store durable Polypack memory with server-authored provenance."""
+    return adapter.memory_store(
+        content,
+        context=context,
+        memory_class=memory_class,
+        confidence=confidence,
+        metadata=metadata,
+        provenance=_memory_provenance("memory.store"),
+    )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.MEMORY_FEEDBACK)
+@audited_write(
+    "memory.feedback",
+    lock=write_lock,
+    audit_log=audit_log,
+    argument_sanitizer=_memory_audit_arguments,
+)
+def memory_feedback(memory_id: str, useful: bool) -> dict[str, Any]:
+    """Record whether a Polypack memory helped this authenticated agent."""
+    request = require_current_request()
+    return adapter.memory_feedback(memory_id, useful=useful, agent_id=request.pubkey)
 
 
 @mcp.tool()

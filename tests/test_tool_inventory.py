@@ -93,6 +93,13 @@ EXPECTED_TOOLS = frozenset(
         "catalog_publish",
         "whoami",
         "server_identity",
+        "memory_get",
+        "memory_list_contexts",
+        "memory_recall",
+        "memory_context",
+        "memory_thread",
+        "memory_store",
+        "memory_feedback",
     }
 )
 

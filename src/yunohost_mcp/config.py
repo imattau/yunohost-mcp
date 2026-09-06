@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     # does NOT have them). An absolute path avoids PATH ambiguity entirely.
     package_linter_python: str = "python3"
 
+    # Optional local Polypack MCP integration.  This is deliberately unset
+    # by default: the YunoHost MCP service remains fully functional when the
+    # separate polypack-mcp app is not installed or is not configured.  The
+    # package's port is allocated by YunoHost, so deployments must provide
+    # the actual loopback endpoint rather than relying on a hard-coded port.
+    polypack_url: str | None = None
+    polypack_timeout_seconds: float = 30.0
+    polypack_max_content_chars: int = 100_000
+    polypack_max_query_chars: int = 4_000
+    polypack_max_response_items: int = 100
+
     # The *system* python3 (Debian's own, with yunohost/moulinette and
     # their actual apt-installed deps on its path) - used to run specific
     # real yunohost.* calls in a subprocess instead of in-process, when
