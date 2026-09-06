@@ -84,9 +84,16 @@ Phase 15: settings_list/settings_get/settings_set (global YunoHost
 settings) and regenconf_pending/regenconf_apply (yunohost.regenconf) -
 gap-filled after auditing this tool surface against full YunoHost admin
 capability. settings_set/regenconf_apply are gated the same as
-firewall_open/close: administrator-only, confirmation + owner co-signature
-(policy/rules.py) - both can change server-wide, externally-visible
-behavior (SSO/auth policy, or a service's live config) in one call.
+firewall_open/close: app-admin and above, confirmation + owner
+co-signature (policy/rules.py) - both can change server-wide,
+externally-visible behavior (SSO/auth policy, or a service's live config)
+in one call. This also prompted moving firewall.write/system.migrate down
+from administrator-only to app-admin (policy/roles.py) - owner
+co-signature (a *different* identity holding Scope.OWNER_APPROVE, which
+stays administrator-only) was already the real per-call safety gate, so
+restricting the scope itself to administrator too just made those two
+tools unreachable by any agent identity that isn't separately granted
+"administrator", not more protected.
 """
 
 from __future__ import annotations

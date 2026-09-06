@@ -18,7 +18,7 @@ Role bundles:
 
 Role bundles are strictly hierarchical below `administrator`: `readonly` < `operator` < `app-admin` < `package-developer`, each a superset of the one before. This changed from an earlier "package-developer is not app-admin, roles combine by union" model - don't assume that older shape if you've seen it described elsewhere. An identity with no roles has no operational scopes. A valid NIP-98 signature authenticates identity; it does not grant authorization.
 
-Four scopes are never granted by any role except `administrator`: `system.migrate` (`migrations_run` - can carry irreversible OS/schema changes), `firewall.write` (`firewall_open`/`firewall_close`/`firewall_reload` - a wrong rule can lock the admin out with no MCP-level undo), `settings.write` (`settings_set` - global settings apply server-wide), and `regenconf.write` (`regenconf_apply` - `force=true` can overwrite a manually-edited service config, and a bad regeneration of e.g. nginx/ssowat carries the same lockout risk as `firewall.write`). `owner.approve` (`approve_operation`) is administrator-only for the same reason as `audit.read` needing per-call owner co-signature: both touch cross-identity state, not just the caller's own.
+`system.migrate` (`migrations_run` - can carry irreversible OS/schema changes), `firewall.write` (`firewall_open`/`firewall_close`/`firewall_reload` - a wrong rule can lock the admin out with no MCP-level undo), `settings.write` (`settings_set` - global settings apply server-wide), and `regenconf.write` (`regenconf_apply` - `force=true` can overwrite a manually-edited service config, and a bad regeneration of e.g. nginx/ssowat carries the same lockout risk as `firewall.write`) are granted from `app-admin` up, same as `system.upgrade` - but every call still needs confirmation plus a *different* identity's owner co-signature, which is the actual per-call safety gate; the scope only lets an identity ask. `owner.approve` (`approve_operation`) is administrator-only for the same reason as `audit.read` needing per-call owner co-signature: both touch cross-identity state, not just the caller's own.
 
 ## Tool inventory by capability
 
@@ -53,7 +53,7 @@ Four scopes are never granted by any role except `administrator`: `system.migrat
 - `plan_app_upgrade`, `execute_plan`, `safe_upgrade`, `repair_app`
 - `updates_check`, `updates_refresh`
 - `migrations_list`, `migrations_state` — `system.update`. Read-only; listing/state sit under the same scope as `updates_check`, not `system.migrate`.
-- `migrations_run` — `system.migrate`, administrator-only, confirmation plus owner co-signature. Defaults to all pending migrations if `targets` is empty; `skip`/`force_rerun` require explicit `targets`.
+- `migrations_run` — `system.migrate`, app-admin and above, confirmation plus owner co-signature. Defaults to all pending migrations if `targets` is empty; `skip`/`force_rerun` require explicit `targets`.
 
 ### Backups
 
@@ -69,14 +69,14 @@ Four scopes are never granted by any role except `administrator`: `system.migrat
 ### Firewall
 
 - `firewall_is_open`, `firewall_list` — `firewall.read`, safe for every role.
-- `firewall_open`, `firewall_close`, `firewall_reload` — `firewall.write`, administrator-only, confirmation plus owner co-signature - same risk tier as `system_upgrade`/`backup_restore`: a wrong port/protocol/rule is externally visible and reachable, or can lock the admin out, with no MCP-level undo. `firewall_reload` is the point any pending rule change actually takes effect.
+- `firewall_open`, `firewall_close`, `firewall_reload` — `firewall.write`, app-admin and above, confirmation plus owner co-signature - same risk tier as `system_upgrade`/`backup_restore`: a wrong port/protocol/rule is externally visible and reachable, or can lock the admin out, with no MCP-level undo. `firewall_reload` is the point any pending rule change actually takes effect.
 
 ### Settings and configuration
 
 - `settings_list`, `settings_get` — `settings.read`, safe for every role. Global YunoHost settings (SSO behavior, security toggles, misc display options); `full=True` additionally returns each setting's type/description/default.
-- `settings_set` — `settings.write`, administrator-only, confirmation plus owner co-signature - same risk tier as `firewall_open`/`firewall_close`: a global setting applies server-wide immediately (e.g. SSO behavior, auth policy). `value` is always passed as a string; YunoHost coerces it to the setting's actual type internally.
+- `settings_set` — `settings.write`, app-admin and above, confirmation plus owner co-signature - same risk tier as `firewall_open`/`firewall_close`: a global setting applies server-wide immediately (e.g. SSO behavior, auth policy). `value` is always passed as a string; YunoHost coerces it to the setting's actual type internally.
 - `regenconf_pending` — `regenconf.read`, safe for every role. Lists which system-service config files (nginx, ssowat, mysql, ...) are out of date versus YunoHost's current internal state, without changing anything - call before `regenconf_apply` to see what would change.
-- `regenconf_apply` — `regenconf.write`, administrator-only, confirmation plus owner co-signature - same risk tier as `firewall_open`/`firewall_close`: rewrites system-service config files in place, and `force=True` additionally overwrites any file manually edited outside YunoHost. A bad regeneration (e.g. of nginx/ssowat) can lock the admin out the same way a bad firewall rule can.
+- `regenconf_apply` — `regenconf.write`, app-admin and above, confirmation plus owner co-signature - same risk tier as `firewall_open`/`firewall_close`: rewrites system-service config files in place, and `force=True` additionally overwrites any file manually edited outside YunoHost. A bad regeneration (e.g. of nginx/ssowat) can lock the admin out the same way a bad firewall rule can.
 
 ### Users, groups, and app permissions
 

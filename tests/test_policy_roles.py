@@ -58,15 +58,19 @@ def test_every_role_can_read_firewall_state():
         assert Scope.FIREWALL_READ in ROLE_SCOPES[role], role
 
 
-def test_only_administrator_can_change_firewall_or_run_migrations():
-    # Both carry system-wide/lockout risk beyond what app-admin or
-    # package-developer normally touch - same exclusivity as
-    # system.upgrade (neither role has that one either).
-    for role in ("readonly", "operator", "app-admin", "package-developer"):
+def test_only_app_admin_and_above_can_change_firewall_or_run_migrations():
+    # Both carry system-wide/lockout risk, but that risk is covered by
+    # policy/rules.py's require_owner_signature (a *different* identity
+    # holding Scope.OWNER_APPROVE, which stays administrator-only) on every
+    # call - not by restricting the scope itself to administrator, which
+    # would make these unreachable by any agent identity that isn't
+    # separately granted "administrator". Same tier as system.upgrade.
+    for role in ("readonly", "operator"):
         assert Scope.FIREWALL_WRITE not in ROLE_SCOPES[role], role
         assert Scope.SYSTEM_MIGRATE not in ROLE_SCOPES[role], role
-    assert Scope.FIREWALL_WRITE in ROLE_SCOPES["administrator"]
-    assert Scope.SYSTEM_MIGRATE in ROLE_SCOPES["administrator"]
+    for role in ("app-admin", "package-developer", "administrator"):
+        assert Scope.FIREWALL_WRITE in ROLE_SCOPES[role], role
+        assert Scope.SYSTEM_MIGRATE in ROLE_SCOPES[role], role
 
 
 def test_every_role_can_read_settings_and_pending_regenconf():
@@ -78,14 +82,17 @@ def test_every_role_can_read_settings_and_pending_regenconf():
         assert Scope.REGENCONF_READ in ROLE_SCOPES[role], role
 
 
-def test_only_administrator_can_write_settings_or_apply_regenconf():
-    # Same exclusivity/risk class as FIREWALL_WRITE/SYSTEM_MIGRATE above -
-    # both can change server-wide, externally-visible behavior in one call.
-    for role in ("readonly", "operator", "app-admin", "package-developer"):
+def test_only_app_admin_and_above_can_write_settings_or_apply_regenconf():
+    # Same reasoning as test_only_app_admin_and_above_can_change_firewall_
+    # or_run_migrations above: owner co-signature (a different identity)
+    # is the actual per-call safety gate, so the scope itself sits at
+    # app-admin rather than administrator-only.
+    for role in ("readonly", "operator"):
         assert Scope.SETTINGS_WRITE not in ROLE_SCOPES[role], role
         assert Scope.REGENCONF_WRITE not in ROLE_SCOPES[role], role
-    assert Scope.SETTINGS_WRITE in ROLE_SCOPES["administrator"]
-    assert Scope.REGENCONF_WRITE in ROLE_SCOPES["administrator"]
+    for role in ("app-admin", "package-developer", "administrator"):
+        assert Scope.SETTINGS_WRITE in ROLE_SCOPES[role], role
+        assert Scope.REGENCONF_WRITE in ROLE_SCOPES[role], role
 
 
 def test_roles_are_strictly_hierarchical_below_administrator():

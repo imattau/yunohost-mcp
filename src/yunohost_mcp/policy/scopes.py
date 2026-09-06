@@ -56,19 +56,23 @@ class Scope(StrEnum):
     # Actually running/skipping a migration (tools_migrations_run) -
     # listing/state (migrations_list/migrations_state) sit under
     # SYSTEM_UPDATE instead, same as pending_migrations already surfacing
-    # passively through validate_server/updates_refresh. Administrator-only,
-    # like SYSTEM_UPGRADE - migrations can carry irreversible OS/schema
-    # changes (e.g. a Debian version bump) in the same risk class.
+    # passively through validate_server/updates_refresh. Same app-admin-
+    # plus-owner-co-signature tier as SYSTEM_UPGRADE - migrations can carry
+    # irreversible OS/schema changes (e.g. a Debian version bump) in the
+    # same risk class.
     SYSTEM_MIGRATE = "system.migrate"
 
     # firewall_list/firewall_is_open - read-only, safe for every role that
     # already gets services.read/domains.read.
     FIREWALL_READ = "firewall.read"
-    # firewall_open/close/allow/disallow/reload/upnp/stop. Administrator-only
-    # and owner-co-signed (policy/rules.py) - a wrong port/rule can lock the
-    # admin out of their own server with no MCP-level undo, PLAN.md's named
-    # example of exactly the risk class system.upgrade/backups.restore are
-    # already gated at.
+    # firewall_open/close/allow/disallow/reload/upnp/stop. Granted from
+    # app-admin up (policy/roles.py) and owner-co-signed on every call
+    # (policy/rules.py) - a wrong port/rule can lock the admin out of their
+    # own server with no MCP-level undo, PLAN.md's named example of exactly
+    # the risk class system.upgrade/backups.restore are already gated at,
+    # but that risk is covered by require_owner_signature (a *different*
+    # identity approving each call), not by restricting the scope itself to
+    # administrator - see policy/roles.py's _APP_ADMIN comment.
     FIREWALL_WRITE = "firewall.write"
 
     # settings_get/settings_list - YunoHost's global settings (SSO
@@ -76,8 +80,8 @@ class Scope(StrEnum):
     # for every role that already gets server.read.
     SETTINGS_READ = "settings.read"
     # settings_set - global settings apply server-wide (e.g. disabling
-    # password auth, SSO panel behavior) - same risk class as
-    # FIREWALL_WRITE: administrator-only, owner-co-signed (policy/rules.py).
+    # password auth, SSO panel behavior) - same risk class and same
+    # app-admin-plus-owner-co-signature tier as FIREWALL_WRITE.
     SETTINGS_WRITE = "settings.write"
 
     # tools_regen_conf's list_pending mode - which system-service config
@@ -87,8 +91,8 @@ class Scope(StrEnum):
     REGENCONF_READ = "regenconf.read"
     # tools_regen_conf's apply mode - force=True can overwrite a manually-
     # edited config file, and a bad regeneration of e.g. nginx/ssowat can
-    # lock the admin out same as FIREWALL_WRITE - administrator-only,
-    # owner-co-signed.
+    # lock the admin out same as FIREWALL_WRITE - same app-admin-plus-
+    # owner-co-signature tier.
     REGENCONF_WRITE = "regenconf.write"
 
     PACKAGES_INSPECT = "packages.inspect"

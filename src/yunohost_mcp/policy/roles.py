@@ -66,6 +66,20 @@ _APP_ADMIN: frozenset[Scope] = _OPERATOR | {
     # granting the scope to app-admin only lets an identity *ask*, it
     # doesn't skip that per-call approval.
     Scope.AUDIT_READ,
+    # firewall.write/system.migrate/settings.write/regenconf.write were
+    # previously administrator-only, on the theory that lockout-class risk
+    # deserved its own tier. In practice no deployed agent identity is ever
+    # granted "administrator" - policy/rules.py's require_owner_signature
+    # (a *different* identity holding Scope.OWNER_APPROVE, which stays
+    # administrator-only below) is the actual safety boundary per call, so
+    # gating the scope itself at administrator too just made these four
+    # tools unreachable by any real agent rather than adding real
+    # protection. Moved down here so app-admin can *request* them - the
+    # owner still has to separately approve every single call.
+    Scope.FIREWALL_WRITE,
+    Scope.SYSTEM_MIGRATE,
+    Scope.SETTINGS_WRITE,
+    Scope.REGENCONF_WRITE,
 }
 
 _PACKAGE_DEVELOPER: frozenset[Scope] = _APP_ADMIN | {
