@@ -165,7 +165,15 @@ from yunohost_mcp.policy.enforcement import (
     translate_known_errors,
 )
 from yunohost_mcp.policy.locks import WriteLock
-from yunohost_mcp.policy.rules import PolicyRule, PolicyViolation, check_free_space, check_recent_backup, load_policy
+from yunohost_mcp.policy.rules import (
+    PolicyRule,
+    PolicyViolation,
+    check_free_space,
+    check_recent_backup,
+    load_policy,
+    user_create_policy_key,
+    user_group_update_policy_key,
+)
 from yunohost_mcp.policy.scopes import Scope
 from yunohost_mcp.redaction import redact_response
 from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
@@ -978,7 +986,7 @@ def users_list() -> dict[str, Any]:
 @require_scope(Scope.USERS_WRITE)
 @audited_write("users.write", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "users.write",
+    user_create_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=lambda: settings.broker_socket_path is not None,
@@ -1112,7 +1120,7 @@ def user_group_create(groupname: str, confirmation_id: str | None = None) -> dic
 @require_scope(Scope.USERS_WRITE)
 @audited_write("users.write", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "users.write",
+    user_group_update_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=lambda: settings.broker_socket_path is not None,

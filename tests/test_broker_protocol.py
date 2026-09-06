@@ -11,6 +11,7 @@ from yunohost_mcp.broker.operations import OPERATIONS
 from yunohost_mcp.broker.helper import (
     _CONFIRMATION_ARGUMENT_KEYS,
     _POLICY_NAME_BY_OPERATION,
+    _policy_name_for_operation,
     _format_internal_broker_error,
     authorize_request,
 )
@@ -203,6 +204,13 @@ def test_confirmation_argument_keys_covers_every_confirmable_broker_operation():
     }
     missing = sorted(confirmable_operations - _CONFIRMATION_ARGUMENT_KEYS.keys())
     assert missing == [], f"operations missing from _CONFIRMATION_ARGUMENT_KEYS: {missing}"
+
+
+def test_broker_selects_owner_cosign_policy_for_admin_grants():
+    assert _policy_name_for_operation("user.create", {"admin": True}) == "users.admin_access"
+    assert _policy_name_for_operation("user.create", {"admin": False}) == "users.write"
+    assert _policy_name_for_operation("user.group_update", {"groupname": "admins"}) == "users.admin_access"
+    assert _policy_name_for_operation("user.group_update", {"groupname": "editors"}) == "users.write"
 
 
 def test_helper_revalidates_a_real_nip98_signature(tmp_path):

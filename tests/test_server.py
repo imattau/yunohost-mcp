@@ -590,6 +590,43 @@ async def test_user_mgmt_plain_confirmable_write_requires_then_accepts_confirmat
 @pytest.mark.parametrize(
     ("tool", "args"),
     [
+        (
+            "user_create",
+            {
+                "username": "admin-alice",
+                "domain": "example.com",
+                "password": "hunter2",
+                "fullname": "Admin Alice",
+                "admin": True,
+            },
+        ),
+        ("user_group_update", {"groupname": "admins", "add": ["alice"]}),
+    ],
+)
+async def test_admin_grant_requires_owner_cosign(tool: str, args: dict):
+    async with Client(mcp) as client:
+        first = await client.call_tool(tool, args)
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is True
+        confirmation_id = plan_response["confirmation_id"]
+
+        not_yet_approved = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert not_yet_approved.is_error is True
+
+        await _approve_as_second_admin(client, confirmation_id)
+
+        confirmed = await client.call_tool(tool, {**args, "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
         ("user_delete", {"username": "alice"}),
         ("user_group_delete", {"groupname": "editors"}),
         ("user_permission_add", {"permission": "myapp.main", "names": ["alice"]}),

@@ -112,6 +112,16 @@ _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
     "package.run_tests": ("source", "app_id"),
 }
 
+
+def _policy_name_for_operation(operation_name: str, arguments: dict) -> str | None:
+    """Resolve argument-sensitive policy tiers at the root boundary."""
+    policy_name = _POLICY_NAME_BY_OPERATION.get(operation_name)
+    if operation_name == "user.create" and arguments.get("admin", False) is True:
+        return "users.admin_access"
+    if operation_name == "user.group_update" and arguments.get("groupname") == "admins":
+        return "users.admin_access"
+    return policy_name
+
 logger = logging.getLogger("yunohost_mcp.broker")
 _UCRED_FORMAT = "3i"
 
@@ -250,7 +260,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
         here.  The helper owns the final check immediately before invoking
         the root-side adapter.
         """
-        policy_name = _POLICY_NAME_BY_OPERATION.get(operation_name)
+        policy_name = _policy_name_for_operation(operation_name, request.arguments)
         if policy_name is None:
             return None
         rule = self.server.policy_rules.get(policy_name)

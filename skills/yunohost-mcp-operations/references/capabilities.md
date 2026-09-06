@@ -149,9 +149,9 @@ The built-in policy requires:
 | `firewall_open` / `firewall_close` / `firewall_reload` | confirmation plus different administrator identity co-signature |
 | `settings_set` | confirmation plus different administrator identity co-signature |
 | `regenconf_apply` | confirmation plus different administrator identity co-signature |
-| `user_create` / `user_update` | confirmation |
+| `user_create` / `user_update` | confirmation; `user_create(admin=true)` additionally requires owner co-signature |
 | `user_delete` | confirmation plus different administrator identity co-signature |
-| `user_group_create` / `user_group_update` | confirmation |
+| `user_group_create` / `user_group_update` | confirmation; updates targeting the `admins` group additionally require owner co-signature |
 | `user_group_delete` | confirmation plus different administrator identity co-signature |
 | `user_permission_add` / `user_permission_remove` / `user_permission_update` | confirmation plus different administrator identity co-signature |
 | `domain_remove` | confirmation plus different administrator identity co-signature |

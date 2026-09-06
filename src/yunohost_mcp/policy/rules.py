@@ -143,6 +143,9 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # cautious for the more routine migrations.
     "system.migrate": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "users.write": PolicyRule(require_confirmation=True),
+    # Granting membership in YunoHost's admins group (or creating a user
+    # there directly) is privilege escalation, not routine user management.
+    "users.admin_access": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "users.delete": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "users.permissions": PolicyRule(require_confirmation=True, require_owner_signature=True),
     # PLAN.md's own example of the risk this tier exists for: a wrong
@@ -168,6 +171,16 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     # per-call approval rather than being a standing grant.
     "audit.read": PolicyRule(require_confirmation=True, require_owner_signature=True),
 }
+
+
+def user_create_policy_key(**arguments: object) -> str:
+    """Select the policy tier for user creation from its admin flag."""
+    return "users.admin_access" if arguments.get("admin", False) is True else "users.write"
+
+
+def user_group_update_policy_key(**arguments: object) -> str:
+    """Select the policy tier for group updates from their target group."""
+    return "users.admin_access" if arguments.get("groupname") == "admins" else "users.write"
 
 
 def load_policy(path: Path) -> dict[str, PolicyRule]:

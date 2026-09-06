@@ -119,7 +119,7 @@ def require_scope(scope: Scope) -> Callable[[F], F]:
 
 
 def require_confirmation(
-    policy_key: str,
+    policy_key: str | Callable[..., str],
     *,
     policy: dict[str, PolicyRule],
     confirmation_store: ConfirmationStore,
@@ -136,7 +136,8 @@ def require_confirmation(
         def wrapper(*args, **kwargs):
             confirmation_id = kwargs.pop("confirmation_id", None)
             request = require_current_request()
-            rule = policy.get(policy_key, PolicyRule())
+            resolved_policy_key = policy_key(**kwargs) if callable(policy_key) else policy_key
+            rule = policy.get(resolved_policy_key, PolicyRule())
 
             if checks is not None:
                 checks(rule)  # PolicyViolation here is never confirmable away
@@ -145,7 +146,7 @@ def require_confirmation(
                 try:
                     if confirmation_id and defer_to_broker is not None and defer_to_broker():
                         ticket = confirmation_store.peek(confirmation_id)
-                        if ticket.pubkey != request.pubkey or ticket.tool != policy_key:
+                        if ticket.pubkey != request.pubkey or ticket.tool != resolved_policy_key:
                             raise ConfirmationError("confirmation does not match this request")
                         if ticket.arguments_hash != _hash_arguments(kwargs):
                             raise ConfirmationError("confirmation does not match this request arguments")
@@ -155,7 +156,7 @@ def require_confirmation(
                         ticket = confirmation_store.consume(
                             confirmation_id or "",
                             pubkey=request.pubkey,
-                            tool=policy_key,
+                            tool=resolved_policy_key,
                             arguments=kwargs,
                             require_owner_approval=rule.require_owner_signature,
                         )
@@ -167,10 +168,10 @@ def require_confirmation(
                 except ConfirmationError:
                     if confirmation_id:
                         raise
-                    plan = plan_builder(**kwargs) if plan_builder else {"tool": policy_key, "arguments": kwargs}
+                    plan = plan_builder(**kwargs) if plan_builder else {"tool": resolved_policy_key, "arguments": kwargs}
                     ticket = confirmation_store.create(
                         pubkey=request.pubkey,
-                        tool=policy_key,
+                        tool=resolved_policy_key,
                         arguments=kwargs,
                         plan=plan,
                         require_owner_signature=rule.require_owner_signature,

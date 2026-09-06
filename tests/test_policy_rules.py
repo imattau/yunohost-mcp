@@ -14,6 +14,8 @@ from yunohost_mcp.policy.rules import (
     check_free_space,
     check_recent_backup,
     load_policy,
+    user_create_policy_key,
+    user_group_update_policy_key,
 )
 
 
@@ -61,6 +63,16 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["domains.remove"].require_owner_signature is True
     assert DEFAULT_POLICY["system.power"].require_confirmation is True
     assert DEFAULT_POLICY["system.power"].require_owner_signature is True
+    assert DEFAULT_POLICY["users.admin_access"].require_confirmation is True
+    assert DEFAULT_POLICY["users.admin_access"].require_owner_signature is True
+
+
+def test_admin_access_policy_is_argument_sensitive():
+    assert user_create_policy_key(admin=False) == "users.write"
+    assert user_create_policy_key() == "users.write"
+    assert user_create_policy_key(admin=True) == "users.admin_access"
+    assert user_group_update_policy_key(groupname="editors") == "users.write"
+    assert user_group_update_policy_key(groupname="admins") == "users.admin_access"
 
 
 def test_missing_policy_file_yields_defaults(tmp_path: Path):
