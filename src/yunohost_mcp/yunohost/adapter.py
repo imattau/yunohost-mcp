@@ -2180,14 +2180,25 @@ class YunohostAdapter:
         return {"fake": False, "stopped": names}
 
     def service_start(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
-        """Start one or more stopped services (yunohost.service.service_start)."""
+        """Start one or more stopped services (yunohost.service.service_start).
+
+        Unlike service_restart/service_stop, real yunohost.service.
+        service_start IS @is_unit_operation-decorated - confirmed live: it
+        constructs an OperationLogger whose SSE registration reads a Bottle
+        request header, which raises "Request context not initialized."
+        when there is no real HTTP request (the privileged broker is a
+        local worker, not an HTTP request). Same fix as app_remove above:
+        run it in a system-python subprocess with a CLI-style headless
+        context instead of importing and calling it in-process.
+        """
         brokered = self._broker_call("service.start", {"names": names, "confirmation_id": confirmation_id})
         if brokered is not None:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "started": names}
-        service_start = _import_attr("yunohost.service", "service_start")
-        service_start(names)
+        _call_via_system_python(
+            "yunohost.service", "service_start", {"names": names}, self.settings, interface_type="cli"
+        )
         return {"fake": False, "started": names}
 
     def backup_create(

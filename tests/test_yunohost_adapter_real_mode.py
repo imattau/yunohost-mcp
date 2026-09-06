@@ -149,18 +149,20 @@ def real_mode_adapter(monkeypatch: pytest.MonkeyPatch) -> YunohostAdapter:
     def service_restart(names, **_):
         calls["service_restart"] = {"names": names}
 
-    # service_stop/service_start are NOT @is_unit_operation-decorated either
-    # - same "must not receive an operation_logger" check as service_restart.
+    # service_stop is NOT @is_unit_operation-decorated either - same "must
+    # not receive an operation_logger" check as service_restart.
+    # service_start is NOT stubbed here - unlike restart/stop, real
+    # yunohost.service.service_start IS @is_unit_operation-decorated
+    # (confirmed live: it crashes with "Request context not initialized."
+    # constructing an OperationLogger outside a real Bottle request), so
+    # the adapter now routes it through _call_via_system_python like
+    # app_remove below - this in-process fake module is never reached.
     def service_stop(names, **_):
         calls["service_stop"] = {"names": names}
-
-    def service_start(names, **_):
-        calls["service_start"] = {"names": names}
 
     yunohost_service = types.ModuleType("yunohost.service")
     yunohost_service.service_restart = service_restart
     yunohost_service.service_stop = service_stop
-    yunohost_service.service_start = service_start
 
     # None of firewall_{list,is_open,open,close,reload} are
     # @is_unit_operation-decorated either - same "must not receive an
@@ -337,9 +339,30 @@ def test_service_stop_unaffected(real_mode_adapter: YunohostAdapter):
     assert real_mode_adapter._test_calls["service_stop"] == {"names": ["nginx"]}
 
 
-def test_service_start_unaffected(real_mode_adapter: YunohostAdapter):
-    real_mode_adapter.service_start(["nginx"])
-    assert real_mode_adapter._test_calls["service_start"] == {"names": ["nginx"]}
+def test_service_start_routes_through_system_python_with_cli_interface(
+    real_mode_adapter: YunohostAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    # Confirmed live on a real host: yunohost.service.service_start IS
+    # @is_unit_operation-decorated (unlike restart/stop), so calling it
+    # in-process crashes with "Request context not initialized." building
+    # an OperationLogger with no real Bottle request. Same fix, and same
+    # test shape, as app_remove above.
+    captured = {}
+
+    def fake_system_call(module_name, attr, kwargs, settings, *, interface_type="api"):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs, interface_type=interface_type)
+        return None
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._call_via_system_python", fake_system_call)
+    result = real_mode_adapter.service_start(["nginx"])
+
+    assert captured == {
+        "module_name": "yunohost.service",
+        "attr": "service_start",
+        "kwargs": {"names": ["nginx"]},
+        "interface_type": "cli",
+    }
+    assert result == {"fake": False, "started": ["nginx"]}
 
 
 def test_app_setting_get_unaffected(real_mode_adapter: YunohostAdapter):
