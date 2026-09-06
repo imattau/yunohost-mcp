@@ -869,6 +869,38 @@ def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
     )
 
 
+def _domain_dns_suggest(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"domain"}
+    if set(arguments) - allowed:
+        raise ValueError("unknown domain dns suggest argument")
+    domain = _bounded_string(arguments, "domain", 253, required=True)
+    return adapter.domain_dns_suggest(domain)
+
+
+def _domain_dns_push_args(arguments: dict[str, Any], allowed: set[str]) -> tuple[str, bool, bool]:
+    if set(arguments) - allowed:
+        raise ValueError("unknown domain dns push argument")
+    domain = _bounded_string(arguments, "domain", 253, required=True)
+    force = arguments.get("force", False)
+    purge = arguments.get("purge", False)
+    if not isinstance(force, bool) or not isinstance(purge, bool):
+        raise ValueError("force and purge must be booleans")
+    return domain, force, purge
+
+
+def _domain_dns_push_preview(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    domain, force, purge = _domain_dns_push_args(arguments, {"domain", "force", "purge"})
+    return adapter.domain_dns_push_preview(domain, force=force, purge=purge)
+
+
+def _domain_dns_push(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
+    domain, force, purge = _domain_dns_push_args(arguments, {"domain", "force", "purge", "confirmation_id"})
+    confirmation_id = arguments.get("confirmation_id")
+    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
+        raise ValueError("confirmation_id must be a string")
+    return adapter.domain_dns_push(domain, force=force, purge=purge, confirmation_id=confirmation_id)
+
+
 def _settings_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"full"}
     if set(arguments) - allowed:
@@ -1013,6 +1045,9 @@ OPERATIONS: dict[str, BrokerOperation] = {
     "user.permission_remove": BrokerOperation("user.permission_remove", "users.write", _permission_remove),
     "domain.add": BrokerOperation("domain.add", "domains.write", _domain_add),
     "domain.cert_install": BrokerOperation("domain.cert_install", "domains.write", _domain_cert_install),
+    "domain.dns_suggest": BrokerOperation("domain.dns_suggest", "domains.read", _domain_dns_suggest),
+    "domain.dns_push_preview": BrokerOperation("domain.dns_push_preview", "domains.read", _domain_dns_push_preview),
+    "domain.dns_push": BrokerOperation("domain.dns_push", "domains.write", _domain_dns_push),
     "settings.list": BrokerOperation("settings.list", "settings.read", _settings_list),
     "settings.get": BrokerOperation("settings.get", "settings.read", _settings_get),
     "settings.set": BrokerOperation("settings.set", "settings.write", _settings_set),

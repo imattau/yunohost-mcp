@@ -65,6 +65,9 @@ Role bundles are strictly hierarchical below `administrator`: `readonly` < `oper
 - `domains_list`, `domain_add` — `domains.read`/`domains.write`.
 - `domain_cert_info` — `domains.read`. Certificate status (CA type, remaining validity, ACME-eligibility, wildcard coverage) for an already-registered domain - check this before `domain_cert_install`.
 - `domain_cert_install` — `domains.write`, confirmation-gated (not owner-signature-gated). Issues/renews in place via YunoHost's own cert-install path, not a remove-and-recreate; `staging=True` is rejected outright (no ACME staging endpoint configured) rather than silently falling back to production. Check the response's `certificate.CA_type` and `acme_error` fields rather than assuming success - an ACME failure still returns normally.
+- `domain_dns_suggest` — `domains.read`. Locally-computed recommended DNS records (basic/mail/extra) as zone-file-style text; does not contact the registrar.
+- `domain_dns_push_preview` — `domains.read`. Diffs `domain_dns_suggest`'s records against what's actually live at the domain's configured registrar (create/update/delete/unchanged), without changing anything. Requires a registrar to already be configured on the domain - fails clearly otherwise. Always call before `domain_dns_push`.
+- `domain_dns_push` — `domains.write`, confirmation-gated (not owner-signature-gated) - same tier as `domain_add`/`domain_cert_install`. Applies the diff `domain_dns_push_preview` shows. Without `force`, only touches records YunoHost itself previously created; `force=True` extends that to any matching record; `purge=True` deletes every YunoHost-managed record instead of syncing (almost always paired with removing the domain itself).
 
 ### Firewall
 
@@ -122,6 +125,7 @@ The built-in policy requires:
 | `catalog_publish` | confirmation |
 | `domain_add` | confirmation |
 | `domain_cert_install` | confirmation |
+| `domain_dns_push` | confirmation |
 | `app_change_url` | confirmation |
 | `app_config_set` | confirmation |
 | `app_upgrade` / `execute_plan` / `safe_upgrade` | recent backup and at least 2 GB free; hard blockers, not confirmable overrides |

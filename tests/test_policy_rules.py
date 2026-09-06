@@ -55,6 +55,8 @@ def test_default_policy_matches_plan_examples():
     assert DEFAULT_POLICY["settings.write"].require_owner_signature is True
     assert DEFAULT_POLICY["regenconf.write"].require_confirmation is True
     assert DEFAULT_POLICY["regenconf.write"].require_owner_signature is True
+    assert DEFAULT_POLICY["domains.dns"].require_confirmation is True
+    assert DEFAULT_POLICY["domains.dns"].require_owner_signature is False
 
 
 def test_missing_policy_file_yields_defaults(tmp_path: Path):

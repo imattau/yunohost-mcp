@@ -1869,6 +1869,87 @@ class YunohostAdapter:
             "certificate": certificate,
         }
 
+    # -- DNS ----------------------------------------------------------------
+    #
+    # domain_dns_suggest() and domain_dns_push() (yunohost.dns) both
+    # transitively call domain_config_get() (yunohost.domain -> ConfigPanel
+    # -> utils.form) - the same pydantic v1 machinery that forces domain_add
+    # through the system-python subprocess (see _call_via_system_python's
+    # docstring), so both go through it too rather than a plain
+    # _import_attr. domain_dns_push is additionally @is_unit_operation-
+    # decorated, same no-manual-operation_logger convention as domain_add;
+    # unlike app_remove it isn't known (from live testing against a real
+    # host) to need interface_type="cli" - if it turns out to hit
+    # app_remove's "NoneType.removeHandler" failure mode in practice,
+    # switch it the same way.
+    #
+    # Split into three tool-facing calls (suggest / push-preview / push)
+    # rather than exposing domain_dns_push's own `dry_run` flag directly:
+    # a dry-run diff against the live registrar is a read (domains.read),
+    # not a write, and @require_confirmation gates a tool call as a whole,
+    # not per-argument - same reasoning as the plan_app_upgrade/
+    # execute_plan and regenconf_pending/regenconf_apply splits.
+
+    def domain_dns_suggest(self, domain: str) -> dict[str, Any]:
+        brokered = self._broker_call("domain.dns_suggest", {"domain": domain})
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "domain": domain,
+                "dns_conf": "; Basic ipv4/ipv6 records\n@ 3600 IN A 203.0.113.1",
+            }
+        dns_conf = _call_via_system_python(
+            "yunohost.dns", "domain_dns_suggest", {"domain": domain}, self.settings
+        )
+        return {"fake": False, "domain": domain, "dns_conf": dns_conf}
+
+    def domain_dns_push_preview(
+        self, domain: str, force: bool = False, purge: bool = False
+    ) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "domain.dns_push_preview", {"domain": domain, "force": force, "purge": purge}
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {
+                "fake": True,
+                "domain": domain,
+                "changes": {"create": [], "update": [], "delete": [], "unchanged": []},
+            }
+        changes = _call_via_system_python(
+            "yunohost.dns",
+            "domain_dns_push",
+            {"domain": domain, "dry_run": True, "force": force, "purge": purge},
+            self.settings,
+        )
+        return {"fake": False, "domain": domain, "changes": changes}
+
+    def domain_dns_push(
+        self,
+        domain: str,
+        force: bool = False,
+        purge: bool = False,
+        confirmation_id: str | None = None,
+    ) -> dict[str, Any]:
+        brokered = self._broker_call(
+            "domain.dns_push",
+            {"domain": domain, "force": force, "purge": purge, "confirmation_id": confirmation_id},
+        )
+        if brokered is not None:
+            return brokered
+        if self.settings.fake_yunohost:
+            return {"fake": True, "operation_id": "20260903-000000-domain_dns_push", "domain": domain, "result": {}}
+        result = _call_via_system_python(
+            "yunohost.dns",
+            "domain_dns_push",
+            {"domain": domain, "dry_run": False, "force": force, "purge": purge},
+            self.settings,
+        )
+        return {"fake": False, "operation_id": _latest_operation_id(), "domain": domain, "result": result}
+
     def service_restart(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call("service.restart", {"names": names, "confirmation_id": confirmation_id})
         if brokered is not None:

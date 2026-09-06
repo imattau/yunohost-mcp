@@ -94,6 +94,17 @@ stays administrator-only) was already the real per-call safety gate, so
 restricting the scope itself to administrator too just made those two
 tools unreachable by any agent identity that isn't separately granted
 "administrator", not more protected.
+Phase 16: domain_dns_suggest/domain_dns_push_preview/domain_dns_push
+(yunohost.dns) - the last of the gap-filled tools from the same admin-
+capability audit. Reuses DOMAINS_READ/DOMAINS_WRITE rather than new
+scopes (same choice as domain_cert_info/domain_cert_install), and
+"domains.dns" is confirmation-gated but not owner-signature-gated - scoped
+to one domain's already-configured registrar, same tier as domains.write/
+domains.cert, not system-wide. Split into a suggest/preview/push trio
+(rather than exposing domain_dns_push's own `dry_run` argument) for the
+same reason as regenconf_pending/regenconf_apply: a dry-run diff against
+the live registrar is a read, and @require_confirmation gates a whole
+tool call, not one argument's value.
 """
 
 from __future__ import annotations
@@ -776,6 +787,85 @@ def domain_cert_install(
     return adapter.domain_cert_install(
         domain, letsencrypt=letsencrypt, staging=staging, confirmation_id=confirmation_id
     )
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DOMAINS_READ)
+def domain_dns_suggest(domain: str) -> dict[str, Any]:
+    """Suggest DNS records for an already-registered domain - basic
+    A/AAAA, mail (MX/SPF/DKIM/DMARC), and any extra records YunoHost's
+    installed apps contribute - as a formatted zone-file-style block of
+    text, the same output `yunohost domain dns suggest` prints. Read-only,
+    computed locally from this server's own state; does not contact or
+    compare against the domain's actual registrar (see
+    domain_dns_push_preview for that). Useful to hand the user something
+    to paste at their DNS provider by hand, or to sanity-check before
+    domain_dns_push."""
+    return adapter.domain_dns_suggest(domain)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DOMAINS_READ)
+def domain_dns_push_preview(domain: str, force: bool = False, purge: bool = False) -> dict[str, Any]:
+    """Compute what domain_dns_push would actually change on the domain's
+    configured DNS registrar - a create/update/delete/unchanged diff
+    against the records currently live there - without touching anything.
+    Read-only; requires the domain to already have a registrar configured
+    (fails clearly if not - see domain_dns_push's docstring). Without
+    `force`, the diff only considers records YunoHost itself previously
+    created; `force=True` extends that to any matching record regardless
+    of origin, matching what domain_dns_push would do with the same flag.
+    Always call this before domain_dns_push, especially with
+    force=True/purge=True."""
+    return adapter.domain_dns_push_preview(domain, force=force, purge=purge)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.DOMAINS_WRITE)
+@audited_write("domains.dns", lock=write_lock, audit_log=audit_log)
+@require_confirmation(
+    "domains.dns",
+    policy=policy_rules,
+    confirmation_store=confirmation_store,
+    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    plan_builder=lambda domain, force=False, purge=False, **_: {
+        "action": "push DNS records to registrar",
+        "domain": domain,
+        "force": force,
+        "purge": purge,
+        "warning": "Requires this domain to already have a DNS registrar configured, or fails "
+        "cleanly. force=true additionally touches records not created by YunoHost; purge=true "
+        "deletes every YunoHost-managed record instead of syncing them - almost always paired "
+        "with removing the domain itself, not a normal sync. Externally visible once applied.",
+    },
+)
+def domain_dns_push(
+    domain: str,
+    force: bool = False,
+    purge: bool = False,
+    confirmation_id: str | None = None,
+) -> dict[str, Any]:
+    """Push domain_dns_suggest's recommended records to the domain's
+    configured DNS registrar. Requires a registrar to already be set up
+    via the domain's own `dns.registrar` config panel (`app_config_get`/
+    `app_config_set` don't cover per-domain config panels - this fails
+    with a clear error if none is configured, it does not silently no-op).
+    Call domain_dns_push_preview first, always - it shows the exact same
+    diff this call would apply, without touching anything. Without
+    `force`, only records YunoHost itself previously created are touched;
+    `force=True` extends that to any matching record regardless of
+    origin. `purge=True` deletes every YunoHost-managed record instead of
+    syncing them - almost always combined with removing the domain
+    itself, not a normal sync. Requires confirmation, same tier as
+    domain_add/domain_cert_install (not owner-signature-gated - scoped to
+    one domain, not system-wide)."""
+    return adapter.domain_dns_push(domain, force=force, purge=purge, confirmation_id=confirmation_id)
 
 
 @mcp.tool()

@@ -29,6 +29,7 @@ MIGRATIONS_TOOLS = {"migrations_list", "migrations_state", "migrations_run"}
 FIREWALL_TOOLS = {"firewall_list", "firewall_is_open", "firewall_open", "firewall_close", "firewall_reload"}
 SETTINGS_TOOLS = {"settings_list", "settings_get", "settings_set"}
 REGENCONF_TOOLS = {"regenconf_pending", "regenconf_apply"}
+DNS_TOOLS = {"domain_dns_suggest", "domain_dns_push_preview", "domain_dns_push"}
 PHASE7_TOOLS = {"plan_app_upgrade", "execute_plan"}
 PHASE8_TOOLS = {
     "package_inspect",
@@ -128,6 +129,7 @@ async def test_list_tools_exposes_all_v01_read_tools():
             | FIREWALL_TOOLS
             | SETTINGS_TOOLS
             | REGENCONF_TOOLS
+            | DNS_TOOLS
             | PHASE7_TOOLS
             | PHASE8_TOOLS
             | PHASE10_TOOLS
@@ -172,6 +174,8 @@ async def test_list_tools_exposes_all_v01_read_tools():
         ("settings_list", {}),
         ("settings_get", {"key": "example.setting"}),
         ("regenconf_pending", {}),
+        ("domain_dns_suggest", {"domain": "example.com"}),
+        ("domain_dns_push_preview", {"domain": "example.com"}),
     ],
 )
 async def test_phase4_tool_succeeds_for_local_stdio_identity(tool: str, args: dict):
@@ -339,6 +343,27 @@ async def test_domain_cert_install_requires_then_accepts_a_plain_confirmation():
         assert confirmed.structured_content.get("fake") is True
         assert confirmed.structured_content["domain"] == "example.com"
         assert confirmed.structured_content["requested"] == "letsencrypt"
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_domain_dns_push_requires_then_accepts_a_plain_confirmation():
+    # domains.dns has require_confirmation but not require_owner_signature -
+    # same single-caller confirmation shape as domain_add above.
+    async with Client(mcp) as client:
+        first = await client.call_tool("domain_dns_push", {"domain": "example.com"})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "domain_dns_push", {"domain": "example.com", "confirmation_id": confirmation_id}
+        )
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert confirmed.structured_content["domain"] == "example.com"
         assert "confirmation_required" not in confirmed.structured_content
 
 

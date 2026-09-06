@@ -93,6 +93,9 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
     "catalog.publish": PolicyRule(require_confirmation=True),
     "domains.write": PolicyRule(require_confirmation=True),
     "domains.cert": PolicyRule(require_confirmation=True),
+    # Scoped to one domain's already-configured registrar, not system-wide -
+    # same tier as domains.write/domains.cert, not owner-signature-gated.
+    "domains.dns": PolicyRule(require_confirmation=True),
     "apps.upgrade": PolicyRule(require_backup=True, minimum_free_space_bytes=_parse_size("2GB")),
     "apps.remove": PolicyRule(
         require_confirmation=True, require_backup=True, max_backup_age_seconds=_parse_duration("24h")
