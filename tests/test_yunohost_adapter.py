@@ -18,11 +18,56 @@ def make_adapter() -> YunohostAdapter:
     return YunohostAdapter(settings=Settings(fake_yunohost=True))
 
 
-def test_broker_mode_fails_closed_for_unregistered_adapter_operations(tmp_path):
+def test_broker_mode_fails_closed_for_unregistered_adapter_operations(tmp_path, monkeypatch):
+    # A synthetic, definitely-unregistered method name - test_http_endpoint
+    # itself used to be the example here, but it's a real (if internal-only)
+    # method that belongs in _BROKERED_METHODS (see the regression test
+    # below), so asserting it's guarded was actually pinning a bug.
+    monkeypatch.setattr(YunohostAdapter, "not_a_real_operation", lambda self: None, raising=False)
     adapter = YunohostAdapter(settings=Settings(broker_socket_path=tmp_path / "broker.sock"))
 
     with pytest.raises(YunohostUnavailableError, match="not yet available through the privileged broker"):
-        adapter.test_http_endpoint("https://example.test")
+        adapter.not_a_real_operation()
+
+
+def test_broker_mode_does_not_guard_test_http_endpoint(tmp_path):
+    """Regression test: test_http_endpoint isn't its own MCP tool, but
+    safe_upgrade() (itself brokered) calls self.test_http_endpoint(...) as
+    an internal step - __post_init__'s per-instance guard shadows that call
+    too if the method's own name is missing from _BROKERED_METHODS, which
+    silently turned safe_upgrade's post-upgrade HTTP check into a
+    guaranteed failure under broker mode (caught and reported as a failed
+    step, not a crash - easy to miss). Found alongside the settings/
+    regenconf/dns/etc. omissions this test file's completeness test below
+    now guards against."""
+    adapter = YunohostAdapter(settings=Settings(broker_socket_path=tmp_path / "broker.sock", fake_yunohost=True))
+
+    result = adapter.test_http_endpoint("https://example.test")
+    assert result["fake"] is True
+
+
+def test_brokered_methods_covers_every_public_adapter_method():
+    """Completeness check for _BROKERED_METHODS itself - regression test
+    for the bug class this session found live: settings_list, settings_get,
+    settings_set, regenconf_pending, regenconf_apply, domain_dns_suggest,
+    domain_dns_push_preview, domain_dns_push, domain_remove,
+    user_permission_info, user_permission_update, backup_info,
+    system_reboot, system_shutdown, and test_http_endpoint were all added
+    as adapter methods without ever being added to this allowlist, so every
+    one of them failed with "not yet available through the privileged
+    broker" on both real deployments despite being fully implemented,
+    tested (in fake mode), and documented. Fake-mode tests never catch this
+    because they never construct an adapter with broker_socket_path set.
+    """
+    import inspect
+
+    public_methods = {
+        name
+        for name, _ in inspect.getmembers(YunohostAdapter, predicate=inspect.isfunction)
+        if not name.startswith("_")
+    }
+    missing = sorted(public_methods - YunohostAdapter._BROKERED_METHODS)
+    assert missing == [], f"adapter methods missing from _BROKERED_METHODS: {missing}"
 
 
 def test_broker_mode_does_not_guard_the_polypack_memory_methods(tmp_path):

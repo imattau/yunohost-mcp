@@ -446,6 +446,31 @@ class YunohostAdapter:
             "migrations_state",
             "firewall_list",
             "firewall_is_open",
+            "settings_list",
+            "settings_get",
+            "settings_set",
+            "regenconf_pending",
+            "regenconf_apply",
+            "domain_dns_suggest",
+            "domain_dns_push_preview",
+            "domain_dns_push",
+            "domain_remove",
+            "user_permission_info",
+            "user_permission_update",
+            "backup_info",
+            "system_reboot",
+            "system_shutdown",
+            # Not its own MCP tool - an internal step safe_upgrade() (already
+            # listed above) calls on itself via self.test_http_endpoint(...).
+            # __post_init__ replaces any public method not in this set with a
+            # raising stub *on the instance*, which shadows the real method
+            # even for this kind of same-object internal call - so leaving it
+            # out silently turned safe_upgrade's post-upgrade HTTP check into
+            # a guaranteed "not yet available through the privileged broker"
+            # failure under broker mode, caught by run_step() and reported as
+            # a normal failed step rather than a crash. Found alongside the
+            # settings/regenconf/dns/etc. omissions above, same root cause.
+            "test_http_endpoint",
             "memory_get",
             "memory_list_contexts",
             "memory_recall",
