@@ -4,7 +4,12 @@ name: Publish MCP Registry metadata
   release:
     types:
       - published
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish without the v prefix (for example, 0.1.1)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -28,9 +33,9 @@ jobs:
         run: "$RUNNER_TEMP/mcp-publisher login github-oidc"
 
       - name: Set release version
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.version != ''
         env:
-          RELEASE_VERSION: ${{ github.event.release.tag_name }}
+          RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
         run: |
           set -euo pipefail
           version="${RELEASE_VERSION#v}"

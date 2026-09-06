@@ -101,3 +101,16 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           gh workflow run publish-pypi.yml --ref master -f tag="${tag}"
+
+      # release: published never fires a workflow run for this repo (verified:
+      # no GitHub Release has been created since v0.8.10, and dispatching one
+      # manually still produced zero triggered runs) - so publish-registry.yml
+      # must be dispatched explicitly here rather than relying on that trigger.
+      - name: Trigger MCP Registry publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run publish-registry.yml --ref master -f version="${VERSION}"
