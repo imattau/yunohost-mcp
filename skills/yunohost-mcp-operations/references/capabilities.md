@@ -1,0 +1,128 @@
+# YunoHost MCP capability reference
+
+This is a reviewed snapshot of the upstream tool inventory and policy model (checked against `yunohost-mcp-server`'s own `policy/scopes.py`, `policy/roles.py`, and `policy/rules.py` source, plus a live tool listing, 2026-09-06 / v0.8.26). The connected server's live tool list (discovered via `ToolSearch`) and `whoami` response win if they differ. Tool base names below map to `mcp__<yunohost-server-name>__<tool>` in this harness — search for the exact prefix with `ToolSearch` before first use.
+
+## Scopes and roles
+
+Scopes: `server.read`, `diagnosis.read`, `apps.read`, `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.read`, `apps.config.write`, `services.read`, `services.restart`, `logs.read`, `backups.read`, `backups.create`, `backups.restore`, `backups.delete`, `users.read`, `users.write`, `users.delete`, `domains.read`, `domains.write`, `system.update`, `system.upgrade`, `system.migrate`, `firewall.read`, `firewall.write`, `packages.inspect`, `packages.test`, `catalog.inspect`, `catalog.verify`, `catalog.publish`, `audit.read`, `owner.approve`, `memory.read`, `memory.write`, and `memory.feedback` (the last three gate the optional Polypack bridge - see "Memory" below, and are deliberately kept separate from all YunoHost administration scopes).
+
+Role bundles:
+
+| Role | Capability |
+|---|---|
+| `readonly` | `server.read`, `diagnosis.read`, `system.update`, `apps.read`, `apps.config.read`, `services.read`, `logs.read`, `backups.read`, `users.read`, `domains.read`, `packages.inspect`, `catalog.inspect`, `catalog.verify`, `firewall.read` |
+| `operator` | `readonly` plus `services.restart`, `backups.create` |
+| `app-admin` | `operator` plus `apps.install`, `apps.upgrade`, `apps.remove`, `apps.config.write`, `backups.restore`, `backups.delete`, `domains.write`, `users.write`, `users.delete`, `system.upgrade`, `audit.read` (audit reads still additionally require owner co-signature per call - the scope only lets an identity *ask*) |
+| `package-developer` | `app-admin` plus `packages.test`, `catalog.publish`, `memory.read`, `memory.write`, `memory.feedback` |
+| `administrator` | Every scope, including `system.migrate`, `firewall.write`, and `owner.approve` |
+
+Role bundles are strictly hierarchical below `administrator`: `readonly` < `operator` < `app-admin` < `package-developer`, each a superset of the one before. This changed from an earlier "package-developer is not app-admin, roles combine by union" model - don't assume that older shape if you've seen it described elsewhere. An identity with no roles has no operational scopes. A valid NIP-98 signature authenticates identity; it does not grant authorization.
+
+Two scopes are never granted by any role except `administrator`: `system.migrate` (`migrations_run` - can carry irreversible OS/schema changes) and `firewall.write` (`firewall_open`/`firewall_close`/`firewall_reload` - a wrong rule can lock the admin out with no MCP-level undo). `owner.approve` (`approve_operation`) is administrator-only for the same reason as `audit.read` needing per-call owner co-signature: both touch cross-identity state, not just the caller's own.
+
+## Tool inventory by capability
+
+### Identity and governance
+
+- `whoami` — resolved caller identity, roles, and scopes.
+- `server_identity` — server npub/hex identity needed when constructing delegations.
+- `audit_list`, `audit_get` — administrator-only audit trail reads (also owner-co-signed per call).
+- `approve_operation` — administrator owner co-signature for a pending high-risk confirmation; approval does not execute.
+- `approval_get`, `approval_status` — inspect a pending confirmation's own computed plan/operation_hash, or lightweight-poll whether it's been owner-approved yet (e.g. after a NIP-46 push-approval request) before retrying the original call.
+
+### Server, diagnosis, and incident response
+
+- `server_info`, `validate_server`, `health_check` — `server.read`/broad snapshot.
+- `diagnosis_run`, `diagnosis_get`, `diagnose_app` — `diagnosis.read`.
+- `operations_list`, `operation_status`, `operation_logs`
+- `services_list`, `service_status`, `service_logs`, `service_restart`
+- `system_snapshot`, `network_snapshot` — `server.read`. Host uptime/resources/processes/disk/OOM evidence, and local addresses/routes/listening sockets, respectively.
+- `service_history` — `services.read`. Per-service state, exit details, restart counts, timestamps (distinct from `service_logs`' raw log lines).
+- `journal_query`, `web_logs` — `logs.read`. `journal_query` reads a deliberately allowlisted set of system journals (kernel, OOM, SSH, fail2ban, firewall, systemd, and specific app units) - not a generic journalctl passthrough; `web_logs` reads bounded, structured Nginx access/error logs.
+- `ssh_diagnose` — `diagnosis.read`. SSH listener, fail2ban, firewall, service, and auth evidence in one call.
+- `http_probe` — `diagnosis.read`. Probes one HTTP(S) endpoint's status/timing/content-type; refuses private/loopback/link-local/reserved targets unless the deployment opts in.
+- `incident_snapshot` — `diagnosis.read`. Composite: system + service_history + web_logs(5xx) + journal_query(err..emerg across the allowlisted units) + ssh_diagnose + network_snapshot for one time window - the first call for "something's wrong, what happened," before reaching for the narrower tools above to drill in.
+
+### Apps and updates
+
+- `apps_list`, `app_info`, `app_resources` — `apps.read`.
+- `app_config_get` — `apps.config.read`. Read an installed app's config-panel schema and current values; call with `full=True` first to get the exact dotted `<panel>.<section>.<option>` id `app_config_set` needs - a shortened or guessed key can silently target the wrong setting if a panel reuses a bare option name across sections.
+- `app_config_set` — `apps.config.write`. Confirmation-gated, not owner-signature-gated (bounded to one already-installed app's own declared options, not system-wide).
+- `app_install`, `app_upgrade`, `app_remove` — `apps.install`/`apps.upgrade`/`apps.remove`.
+- `app_change_url` — `apps.upgrade`, confirmation-gated. Moves an app in place via its own `scripts/change_url`, preserving data/settings - prefer over remove-and-reinstall; fails if the app ships no such script.
+- `plan_app_upgrade`, `execute_plan`, `safe_upgrade`, `repair_app`
+- `updates_check`, `updates_refresh`
+- `migrations_list`, `migrations_state` — `system.update`. Read-only; listing/state sit under the same scope as `updates_check`, not `system.migrate`.
+- `migrations_run` — `system.migrate`, administrator-only, confirmation plus owner co-signature. Defaults to all pending migrations if `targets` is empty; `skip`/`force_rerun` require explicit `targets`.
+
+### Backups
+
+- `backups_list`, `backup_create`, `backup_restore` — `backups.read`/`backups.create`/`backups.restore`.
+- A `backups.delete` scope exists in the policy model (app-admin and above) for an owner-approved backup-deletion capability, but no corresponding tool was found in a live listing as of this writing - confirm via `ToolSearch` before assuming it's callable on a given server.
+
+### Domains and certificates
+
+- `domains_list`, `domain_add` — `domains.read`/`domains.write`.
+- `domain_cert_info` — `domains.read`. Certificate status (CA type, remaining validity, ACME-eligibility, wildcard coverage) for an already-registered domain - check this before `domain_cert_install`.
+- `domain_cert_install` — `domains.write`, confirmation-gated (not owner-signature-gated). Issues/renews in place via YunoHost's own cert-install path, not a remove-and-recreate; `staging=True` is rejected outright (no ACME staging endpoint configured) rather than silently falling back to production. Check the response's `certificate.CA_type` and `acme_error` fields rather than assuming success - an ACME failure still returns normally.
+
+### Firewall
+
+- `firewall_is_open`, `firewall_list` — `firewall.read`, safe for every role.
+- `firewall_open`, `firewall_close`, `firewall_reload` — `firewall.write`, administrator-only, confirmation plus owner co-signature - same risk tier as `system_upgrade`/`backup_restore`: a wrong port/protocol/rule is externally visible and reachable, or can lock the admin out, with no MCP-level undo. `firewall_reload` is the point any pending rule change actually takes effect.
+
+### Users, groups, and app permissions
+
+- `users_list`, `user_create`, `user_update`, `user_delete`
+- `user_group_list`, `user_group_create`, `user_group_update`, `user_group_delete`
+- `user_permission_list`, `user_permission_add`, `user_permission_remove`
+
+### Package development
+
+- `package_inspect`, `package_lint`, `package_logs`
+- `package_install_test`, `package_upgrade_test`, `package_backup_test`, `package_restore_test`
+- `package_change_url_test`, `package_remove_test`, `package_run_tests`, `test_package`
+
+### Catalog
+
+- `catalog_list` — `catalog.inspect`. The whole Nostr-catalogue snapshot (every declared app across every publisher, not just what's installed here) - queries the configured relays fresh on every call, no local cache. Can be slow with many declared apps; a per-app-verification budget bounds worst-case time (nostr-yunohost v0.1.18+) but this is still the heaviest read tool in the inventory.
+- `catalog_package_inspect`, `catalog_publish_plan`, `catalog_verify`, `catalog_publish` — `catalog.inspect`/`catalog.publish`.
+
+### Memory (optional Polypack integration)
+
+Not YunoHost administration - a bridge to an optional local Polypack MCP memory service, reachable only when the deployment sets `YUNOHOST_MCP_POLYPACK_URL` to a loopback (`127.0.0.1`/`::1`/`localhost`) HTTP(S) endpoint. Every `memory_*` tool below is always registered (not conditionally exposed), but every call fails with a clear "Polypack integration is not configured" error if that URL is unset - as of 2026-09-06 it is unset on both connected servers (`mcp.lostcause.nohost.me`, `mcp.3nostr.com`), so treat these as documented-but-unavailable until confirmed otherwise via a live call. Requires `package-developer` or `administrator` - no other role, including `app-admin`, carries `memory.read`/`memory.write`/`memory.feedback`.
+
+- `memory_get` — `memory.read`. One memory by exact ID.
+- `memory_list_contexts` — `memory.read`. Context namespaces and per-context memory counts.
+- `memory_recall` — `memory.read`. Bounded semantic search (`query`, optional `context`, `include_neighbors`/`edge_types`/`depth`/`neighbor_limit` to hydrate graph neighbors, `limit`, `token_budget`).
+- `memory_context` — `memory.read`. Assembles a bounded working-context set for one `context` namespace (`strict_context` to isolate it, `limit`, `token_budget`).
+- `memory_thread` — `memory.read`. Walks a bounded response/supersession thread from `start_id`.
+- `memory_store` — `memory.write`, audited write. Stores durable memory with server-authored provenance (content, optional `context`, `memory_class`, `confidence`, `metadata`).
+- `memory_feedback` — `memory.feedback`, audited write. Records whether a recalled memory was useful, attributed to the caller's own pubkey as `agent_id`.
+
+This is a distinct, smaller tool set than the separate standalone `polypack-mcp` MCP server (which additionally exposes `memory_delete`, `memory_update`, `memory_supersede`, `memory_suppress`, `memory_link`, `memory_link_batch`, `memory_store_batch`, `memory_store_with_link`, and `graph_query`) - don't assume parity between the two when only one is connected.
+
+## Policy gates
+
+The built-in policy requires:
+
+| Operation | Gate |
+|---|---|
+| `catalog_publish` | confirmation |
+| `domain_add` | confirmation |
+| `domain_cert_install` | confirmation |
+| `app_change_url` | confirmation |
+| `app_config_set` | confirmation |
+| `app_upgrade` / `execute_plan` / `safe_upgrade` | recent backup and at least 2 GB free; hard blockers, not confirmable overrides |
+| `app_remove` | confirmation and backup within 24 hours by default |
+| `backup_restore` | confirmation plus different administrator identity co-signature |
+| `system_upgrade` | confirmation plus different administrator identity co-signature |
+| `migrations_run` | confirmation plus different administrator identity co-signature |
+| `firewall_open` / `firewall_close` / `firewall_reload` | confirmation plus different administrator identity co-signature |
+| `user_create` / `user_update` | confirmation |
+| `user_delete` | confirmation plus different administrator identity co-signature |
+| `user_group_create` / `user_group_update` | confirmation |
+| `user_group_delete` | confirmation plus different administrator identity co-signature |
+| `user_permission_add` / `user_permission_remove` | confirmation plus different administrator identity co-signature |
+
+The local `policy.toml` may change confirmation settings, but the live server's response is authoritative. Every write is serialized and audited; responses are redacted for secret-shaped values.
