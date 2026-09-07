@@ -482,17 +482,7 @@ def test_user_group_delete_receives_correct_groupname_not_operation_logger(real_
     assert real_mode_adapter._test_calls["user_group_delete"] == {"groupname": "editors"}
 
 
-def test_user_permission_add_unaffected(real_mode_adapter: YunohostAdapter):
-    # user_permission_add/remove are @is_flash_unit_operation (flash=True),
-    # so - like service_restart - they never receive an OperationLogger at
-    # all; nothing for the corruption bug to have a chance to hit.
-    real_mode_adapter.user_permission_add("myapp.main", ["alice"])
-    assert real_mode_adapter._test_calls["user_permission_add"] == {"permission": "myapp.main", "names": ["alice"]}
-
-
-def test_user_permission_remove_unaffected(real_mode_adapter: YunohostAdapter):
-    real_mode_adapter.user_permission_remove("myapp.main", ["alice"])
-    assert real_mode_adapter._test_calls["user_permission_remove"] == {
-        "permission": "myapp.main",
-        "names": ["alice"],
-    }
+# user_permission_add/remove/update now go through _call_via_system_python
+# (the same pydantic v1/v2 conflict as domain_add/backup_create) rather than
+# this file's in-process _import_attr path - see
+# test_yunohost_adapter_system_python.py for their coverage.

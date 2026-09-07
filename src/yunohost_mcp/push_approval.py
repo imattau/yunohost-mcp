@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import urllib.parse
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
@@ -59,15 +58,6 @@ logger = logging.getLogger(__name__)
 # that one for an unrelated purpose) so a signer app's own kind-specific
 # handling never conflates the two.
 PUSH_APPROVAL_KIND = 24243
-
-
-def _bunker_matches_owner(bunker_uri: str, owner_pubkey_hex: str) -> bool:
-    """Check the transport URI's signer authority before connecting."""
-    try:
-        parsed = urllib.parse.urlparse(bunker_uri)
-    except Exception:
-        return False
-    return parsed.scheme == "bunker" and parsed.netloc.lower() == owner_pubkey_hex.lower()
 
 
 def _build_push_content(
@@ -109,14 +99,13 @@ async def _request_owner_signature_async(
         logger.info("push owner approval skipped for %s - no signer paired yet (%s)", confirmation_id, session_path)
         return False
 
-    # The bunker URI is only a transport address, but its authority component
-    # names the signer.  Refuse a stale or replaced session before opening a
-    # network connection; the signed-event check below remains the final
-    # proof of approval.
-    if not _bunker_matches_owner(session.bunker_uri, owner_pubkey_hex):
-        logger.warning("push owner approval bunker is not the configured owner for %s - refusing", confirmation_id)
-        return False
-
+    # The bunker URI's authority component names the *transport/remote-signer*,
+    # which NIP-46 never guarantees equals the account pubkey it signs for -
+    # approve.py's _pair has the same asymmetry and instead trusts only a live
+    # round trip's result. So there is no cheap pre-check to do here either:
+    # connect and let _verify_and_extract's signature check below (author ==
+    # owner_pubkey_hex, over exactly this ticket) be the sole proof of
+    # ownership - anything weaker risks refusing a legitimately-owned session.
     try:
         app_keys = session.app_keys()
         connect = NostrConnect(

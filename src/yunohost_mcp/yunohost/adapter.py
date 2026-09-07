@@ -1641,6 +1641,16 @@ class YunohostAdapter:
     # corrupting here, no _latest_operation_id() to recover either (a flash
     # operation's log entry isn't findable the same way - PLAN.md's
     # operation_status/operation_logs tools won't have an id for this call).
+    #
+    # Both also transitively import yunohost.utils.form (via yunohost.
+    # permission) - the same pydantic v1 @validator(field=..., config=...)
+    # conflict documented on _call_via_system_python's docstring and on
+    # domain_add above - so like domain_add these must go through the
+    # system-python subprocess rather than a plain in-process _import_attr.
+    # Confirmed against a real deployment: an in-process call crashes with
+    # "PydanticUserError: The `field` and `config` parameters are not
+    # available in Pydantic V2" (this venv's v2 shadows the system's v1
+    # once anything here has imported pydantic once).
     def user_permission_add(self, permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
         brokered = self._broker_call(
             "user.permission_add", {"permission": permission, "names": names, "confirmation_id": confirmation_id}
@@ -1649,8 +1659,9 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "permission": permission, "names": names}
-        user_permission_add = _import_attr("yunohost.user", "user_permission_add")
-        result = user_permission_add(permission=permission, names=names)
+        result = _call_via_system_python(
+            "yunohost.user", "user_permission_add", {"permission": permission, "names": names}, self.settings
+        )
         return {"fake": False, "permission": permission, "result": result}
 
     def user_permission_remove(self, permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
@@ -1661,8 +1672,9 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "permission": permission, "names": names}
-        user_permission_remove = _import_attr("yunohost.user", "user_permission_remove")
-        result = user_permission_remove(permission=permission, names=names)
+        result = _call_via_system_python(
+            "yunohost.user", "user_permission_remove", {"permission": permission, "names": names}, self.settings
+        )
         return {"fake": False, "permission": permission, "result": result}
 
     def user_permission_info(self, permission: str) -> dict[str, Any]:
@@ -1701,13 +1713,29 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "permission": permission, "label": label, "show_tile": show_tile, "protected": protected}
-        user_permission_update = _import_attr("yunohost.user", "user_permission_update")
+        if protected is not None:
+            # yunohost.user.user_permission_update's real signature (confirmed
+            # against the exact installed version, debian/12.1.41.2) only takes
+            # label/show_tile/logo/description/hide_from_public/order - never
+            # protected. Only user_permission_add/user_permission_remove accept
+            # it, and only alongside a names change, so there is no equivalent
+            # call this method can make on protected's behalf; raise rather
+            # than silently drop a security-relevant flag or crash on an
+            # unexpected keyword argument.
+            raise ValueError(
+                "protected cannot be changed via user_permission_update on this YunoHost version - "
+                "it is only settable via user_permission_add/user_permission_remove, alongside a names change"
+            )
         # add/remove are deliberately not exposed here - user_permission_add/
         # user_permission_remove above already cover that, with their own
         # narrower @is_flash_unit_operation write path; this method is for
-        # the label/show_tile/protected fields those two don't touch.
-        result = user_permission_update(
-            permission=permission, label=label, show_tile=show_tile, protected=protected
+        # the label/show_tile fields those two don't touch. Same pydantic v1
+        # conflict as user_permission_add/remove above - see their comment.
+        result = _call_via_system_python(
+            "yunohost.user",
+            "user_permission_update",
+            {"permission": permission, "label": label, "show_tile": show_tile},
+            self.settings,
         )
         return {"fake": False, "permission": permission, "result": result}
 

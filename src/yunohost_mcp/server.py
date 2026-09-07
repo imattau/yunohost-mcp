@@ -1314,13 +1314,17 @@ def user_permission_update(
     protected: bool | None = None,
     confirmation_id: str | None = None,
 ) -> dict[str, Any]:
-    """Update a permission's label, dashboard tile visibility
-    (`show_tile`), or SSO-protection flag (`protected`) - not who has
-    access, use user_permission_add/user_permission_remove for that.
-    Leave an argument None to leave it unchanged. `protected=False` on a
-    permission that's meant to require login is a real access-control
-    change, not cosmetic - same tier as user_permission_add/remove
-    (requires owner co-signature)."""
+    """Update a permission's label or dashboard tile visibility
+    (`show_tile`) - not who has access, use user_permission_add/
+    user_permission_remove for that. Leave an argument None to leave it
+    unchanged. `protected` is accepted for backward compatibility but, on
+    the currently-installed YunoHost version, raises rather than silently
+    doing nothing - the real user_permission_update() has no such
+    parameter; protected is only settable via user_permission_add/
+    user_permission_remove, alongside a names change. `protected=False`
+    on a permission that's meant to require login is a real
+    access-control change, not cosmetic - same tier as
+    user_permission_add/remove (requires owner co-signature)."""
     return adapter.user_permission_update(
         permission, label=label, show_tile=show_tile, protected=protected, confirmation_id=confirmation_id
     )

@@ -505,3 +505,81 @@ def test_firewall_reload_calls_call_via_system_python_with_correct_kwargs(monkey
     assert captured["attr"] == "firewall_reload"
     assert captured["kwargs"] == {"skip_upnp": False}
     assert result == {"fake": False, "reloaded": True}
+
+
+def test_user_permission_add_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # yunohost.user.user_permission_add transitively imports yunohost.utils.form
+    # (via yunohost.permission) - same pydantic v1/v2 conflict as domain_add.
+    # Confirmed against a real deployment: the prior in-process _import_attr
+    # call crashed with PydanticUserError before this fix.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"allowed": ["alice"]}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.user_permission_add("myapp.main", ["alice"])
+
+    assert captured["module_name"] == "yunohost.user"
+    assert captured["attr"] == "user_permission_add"
+    assert captured["kwargs"] == {"permission": "myapp.main", "names": ["alice"]}
+    assert result == {"fake": False, "permission": "myapp.main", "result": {"allowed": ["alice"]}}
+
+
+def test_user_permission_remove_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"allowed": []}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.user_permission_remove("myapp.main", ["alice"])
+
+    assert captured["module_name"] == "yunohost.user"
+    assert captured["attr"] == "user_permission_remove"
+    assert captured["kwargs"] == {"permission": "myapp.main", "names": ["alice"]}
+    assert result == {"fake": False, "permission": "myapp.main", "result": {"allowed": []}}
+
+
+def test_user_permission_update_calls_call_via_system_python_with_correct_kwargs(monkeypatch: pytest.MonkeyPatch):
+    # Same pydantic v1/v2 conflict as user_permission_add/remove above.
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings):
+        captured["module_name"] = module_name
+        captured["attr"] = attr
+        captured["kwargs"] = kwargs
+        return {"label": "New label"}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.user_permission_update("myapp.main", label="New label", show_tile=True)
+
+    assert captured["module_name"] == "yunohost.user"
+    assert captured["attr"] == "user_permission_update"
+    assert captured["kwargs"] == {"permission": "myapp.main", "label": "New label", "show_tile": True}
+    assert result == {"fake": False, "permission": "myapp.main", "result": {"label": "New label"}}
+
+
+def test_user_permission_update_rejects_protected_on_this_yunohost_version():
+    # yunohost.user.user_permission_update's real signature (confirmed
+    # against the exact installed version, debian/12.1.41.2) has no
+    # `protected` parameter at all - only user_permission_add/remove accept
+    # it, and only alongside a names change. Raising here (rather than
+    # silently dropping the flag, or forwarding it and crashing on an
+    # unexpected keyword argument) keeps a security-relevant argument from
+    # being silently ignored.
+    adapter = YunohostAdapter(settings=_settings())
+    with pytest.raises(ValueError, match="protected cannot be changed via user_permission_update"):
+        adapter.user_permission_update("myapp.main", protected=True)
