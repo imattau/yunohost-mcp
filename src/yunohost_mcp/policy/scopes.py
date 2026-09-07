@@ -129,6 +129,11 @@ class Scope(StrEnum):
     CATALOG_VERIFY = "catalog.verify"
     CATALOG_PUBLISH = "catalog.publish"
 
+    # Optional post-publication announcements to a configured Concord/Armada
+    # community. This is separate from catalog.publish so the future tool can
+    # remain explicitly scoped while staying in the package-developer bundle.
+    ARMADA_WRITE = "communications.armada.write"
+
     # Optional local Polypack integration.  These are intentionally separate
     # from YunoHost administration scopes: memory is durable shared context,
     # not a substitute for server/app authorization.

@@ -203,6 +203,30 @@ This fetches the authoritative pending-operation record from the server (never t
 
 **Automatic push approval.** Once paired, this step usually isn't needed at all: the moment a `require_owner_signature` operation is requested, the server itself reuses the same paired session to open a live NIP-46 connection and ask your signer app to sign a small, human-readable approval event right then - a real push prompt on your signer app, no command to run. Approving there marks the ticket approved directly; declining, timing out (`YUNOHOST_MCP_OWNER_PUSH_APPROVAL_TIMEOUT_SECONDS`, default 90s), or no session being paired yet just leaves the ticket pending for a manual `yunohost-mcp-approve approve` as above. Disable entirely with `YUNOHOST_MCP_OWNER_PUSH_APPROVAL_ENABLED=false`.
 
+## Optional Armada announcements
+
+The package-developer role includes `communications.armada.write`. With the
+Armada integration enabled, `armada_join` explicitly accepts the configured
+Concord invite for the bot by publishing a Guestbook Join. After a successful
+`catalog_publish`, call `catalog_announce` with its JSON result to post to the
+channel whose name matches the package repository (for example,
+`ditto_ynh`). `catalog_announcement_status` checks durable delivery state.
+
+Announcements are disabled by default and are best-effort. To enable them,
+provide a root-owned, mode-0600 bot key and invite URL file, then set:
+
+```text
+YUNOHOST_MCP_ARMADA_ENABLED=true
+YUNOHOST_MCP_ARMADA_BOT_KEY_PATH=/etc/yunohost-mcp/armada-bot.key
+YUNOHOST_MCP_ARMADA_COMMUNITY_INVITE_PATH=/etc/yunohost-mcp/armada-community.invite
+```
+
+Set `YUNOHOST_MCP_ARMADA_AUTO_ANNOUNCE=true` to have `catalog_publish` attempt
+the announcement automatically after catalogue success. A failed or
+unverified Armada operation never changes the catalogue result. The bot must
+already have the required channel key; invite acceptance and role assignment
+are separate operations.
+
 ## Development
 
 ```

@@ -128,9 +128,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import hashlib
 import inspect
+import json
 import time
 from typing import Any
 
@@ -152,6 +154,17 @@ from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
+from yunohost_mcp.concord_announcement_publish import publish_package_announcement
+from yunohost_mcp.concord_announcements import build_announcement_draft
+from yunohost_mcp.concord_bundle import ConcordBundleError
+from yunohost_mcp.concord_control_crypto import ControlPlaneError
+from yunohost_mcp.concord_control_reader import load_control_rumors
+from yunohost_mcp.concord_credentials import CredentialFileError, load_bot_private_key, read_credential_file
+from yunohost_mcp.concord_invite_event import ConcordInviteEventError
+from yunohost_mcp.concord_invites import ConcordInviteError, load_invite_bundle
+from yunohost_mcp.concord_join import publish_join
+from yunohost_mcp.concord_delivery import ConcordDeliveryStore
+from yunohost_mcp.concord_transport import fetch_control_events, fetch_invite_events, publish_signed_event
 from yunohost_mcp.notify import notify_owner_best_effort, parse_relay_list
 from yunohost_mcp.push_approval import request_owner_signature_in_background
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket, SQLiteConfirmationStore
@@ -210,6 +223,33 @@ package_test_sessions = PackageTestSessionStore(
 # transport itself authenticates against, on stdio too (LOCAL_STDIO_REQUEST
 # never has a real npub, but approve_operation is still reachable there).
 identity_store = identity_store_for_settings(settings)
+armada_delivery_store: ConcordDeliveryStore | None = None
+
+
+def _armada_delivery_store() -> ConcordDeliveryStore:
+    global armada_delivery_store
+    if armada_delivery_store is None or armada_delivery_store.path != settings.armada_delivery_path():
+        armada_delivery_store = ConcordDeliveryStore(settings.armada_delivery_path())
+    return armada_delivery_store
+
+
+def _run_async_blocking(factory):
+    """Run one async integration from a synchronous MCP tool wrapper.
+
+    FastMCP may invoke synchronous wrappers from a worker while its parent
+    event loop is already running. ``asyncio.run`` is valid for direct calls
+    but not in that situation, so isolate the coroutine in one short-lived
+    worker thread when a loop is present.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+    def run_in_thread():
+        return asyncio.run(factory())
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="armada") as executor:
+        return executor.submit(run_in_thread).result()
 
 
 def get_owner_pubkey() -> str | None:
@@ -2748,12 +2788,197 @@ def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[st
         )
     except (ConfirmationError, KeyError) as exc:
         raise ConfirmationError(f"invalid catalog plan_id: {exc}") from exc
-    return adapter.catalog_publish(
+    result = adapter.catalog_publish(
         source=plan_ticket.plan["source"],
         ref=plan_ticket.plan.get("ref"),
         confirmation_id=confirmation_id,
         plan_id=plan_id,
     )
+    if settings.armada_enabled and settings.armada_auto_announce and result.get("published") is True:
+        try:
+            result["announcement"] = _catalog_announce_impl(
+                plan_ticket.plan["source"],
+                json.dumps(result, separators=(",", ":")),
+            )
+        except Exception:  # noqa: BLE001 - Armada is explicitly best-effort
+            result["announcement"] = {
+                "status": "unavailable",
+                "warning": "Armada announcement failed after catalogue publication",
+            }
+    return result
+
+
+def _catalog_announce_impl(source: str, catalogue_publication: str) -> dict[str, Any]:
+    """Optionally announce a successful catalogue publication in Armada.
+
+    ``catalogue_publication`` is the JSON response returned by
+    ``catalog_publish``. This is deliberately a separate, best-effort call:
+    catalogue publication remains authoritative, and missing Armada
+    configuration or a missing channel returns a warning status instead of
+    changing the catalogue result. The bot must already be a community member
+    with access to the matching channel.
+    """
+    if not settings.armada_enabled:
+        return {"status": "disabled", "warning": "Armada announcements are disabled"}
+    try:
+        publication = json.loads(catalogue_publication)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ToolInputError("catalogue_publication must be a JSON object") from exc
+    if not isinstance(publication, dict):
+        raise ToolInputError("catalogue_publication must be a JSON object")
+    if publication.get("published") is not True:
+        raise ToolInputError("catalogue_publication must confirm a successful publication")
+    draft = build_announcement_draft(source, publication)
+    existing = _armada_delivery_store().get(draft.idempotency_key)
+    if existing is not None:
+        return {
+            "status": "already_published",
+            "draft": draft.__dict__,
+            "publication": {"event_id": existing.event_id},
+        }
+
+    try:
+        bot_key = load_bot_private_key(settings.armada_bot_key_path)
+        invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
+    except CredentialFileError as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+    async def run() -> dict[str, Any]:
+        async def invite_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_invite_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        async def control_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_control_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        async def announcement_publisher(event, relays):
+            return await publish_signed_event(
+                event,
+                relays,
+                timeout_seconds=settings.armada_timeout_seconds,
+            )
+
+        bundle = await load_invite_bundle(invite_url, fetcher=invite_fetcher)
+        control_rumors = await load_control_rumors(bundle, fetcher=control_fetcher)
+        result = await publish_package_announcement(
+            source=source,
+            catalogue_publication=publication,
+            bundle=bundle,
+            control_rumors=control_rumors,
+            bot_key=bot_key,
+            created_at=int(time.time()),
+            publisher=announcement_publisher,
+        )
+        response: dict[str, Any] = {"status": result.status, "draft": result.draft.__dict__}
+        if result.reason:
+            response["warning"] = result.reason
+        if result.status == "published" and result.publication:
+            _armada_delivery_store().record(result.draft.idempotency_key, result.publication.event_id)
+            response["publication"] = {
+                "event_id": result.publication.event_id,
+                "relays": list(result.publication.relays),
+            }
+        elif result.publication:
+            response["publication"] = {
+                "event_id": result.publication.event_id,
+                "relays": list(result.publication.relays),
+            }
+        return response
+
+    try:
+        return _run_async_blocking(run)
+    except (ConcordBundleError, ConcordInviteError, ConcordInviteEventError, ControlPlaneError, ValueError) as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.publish", lock=write_lock, audit_log=audit_log)
+def catalog_announce(source: str, catalogue_publication: str) -> dict[str, Any]:
+    """Optionally announce a successful catalogue publication in Armada."""
+    return _catalog_announce_impl(source, catalogue_publication)
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+def catalog_announcement_status(idempotency_key: str) -> dict[str, Any]:
+    """Check durable delivery state for one announcement idempotency key."""
+    if (
+        len(idempotency_key) != len("catalogue:") + 32
+        or not idempotency_key.startswith("catalogue:")
+        or idempotency_key[10:].lower() != idempotency_key[10:]
+    ):
+        raise ToolInputError("idempotency_key must use the catalogue:<32-hex> format")
+    try:
+        bytes.fromhex(idempotency_key[10:])
+    except ValueError as exc:
+        raise ToolInputError("idempotency_key must use the catalogue:<32-hex> format") from exc
+    record = _armada_delivery_store().get(idempotency_key)
+    if record is None:
+        return {"status": "not_found", "idempotency_key": idempotency_key}
+    return {
+        "status": "published",
+        "idempotency_key": record.idempotency_key,
+        "event_id": record.event_id,
+        "recorded_at": record.recorded_at,
+    }
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.join", lock=write_lock, audit_log=audit_log)
+def armada_join() -> dict[str, Any]:
+    """Explicitly accept the configured Armada invite for the bot.
+
+    This publishes only the bot's self-signed Guestbook Join. It does not
+    grant roles, post an announcement, or imply that the bot holds private
+    channel keys not present in the invite bundle.
+    """
+    if not settings.armada_enabled:
+        return {"status": "disabled", "warning": "Armada integration is disabled"}
+    try:
+        bot_key = load_bot_private_key(settings.armada_bot_key_path)
+        invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
+    except CredentialFileError as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+    async def run() -> dict[str, Any]:
+        async def invite_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_invite_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        async def join_publisher(event, relays):
+            return await publish_signed_event(
+                event,
+                relays,
+                timeout_seconds=settings.armada_timeout_seconds,
+            )
+
+        bundle = await load_invite_bundle(invite_url, fetcher=invite_fetcher)
+        result = await publish_join(
+            bundle=bundle,
+            bot_key=bot_key,
+            created_at=int(time.time()),
+            publisher=join_publisher,
+        )
+        return {
+            "status": result.status,
+            "community_id": result.community_id,
+            "verified": result.verified,
+            "publication": {
+                "event_id": result.publication.event_id,
+                "relays": list(result.publication.relays),
+            },
+        }
+
+    try:
+        return _run_async_blocking(run)
+    except (ConcordBundleError, ConcordInviteError, ConcordInviteEventError, ValueError) as exc:
+        return {"status": "unavailable", "warning": str(exc)}
 
 
 @mcp.tool()

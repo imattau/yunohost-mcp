@@ -54,6 +54,21 @@ class NostrEvent(BaseModel):
         return None
 
 
+class UnsignedNostrEvent(BaseModel):
+    """NIP-01 event-shaped payload without a signature.
+
+    Concord seals carry an unsigned rumor inside their encrypted content; it
+    must not be serialized with a dummy ``sig`` field.
+    """
+
+    id: str
+    pubkey: str
+    created_at: int
+    kind: int
+    tags: list[list[str]]
+    content: str
+
+
 def _is_hex(v: str) -> bool:
     try:
         bytes.fromhex(v)
@@ -62,7 +77,7 @@ def _is_hex(v: str) -> bool:
     return v == v.lower()
 
 
-def compute_event_id(event: NostrEvent) -> str:
+def compute_event_id(event: NostrEvent | UnsignedNostrEvent) -> str:
     """NIP-01 event id: sha256 of the canonical serialization form.
 
     Canonical form is [0, pubkey, created_at, kind, tags, content] serialized
