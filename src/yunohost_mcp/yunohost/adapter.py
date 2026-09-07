@@ -194,6 +194,42 @@ def _bounded_output(value: str, limit: int) -> str:
     return value[:limit] + "\n[output truncated]"
 
 
+def _recent_operation_failure_context(*, limit: int = 5, tail_lines: int = 40) -> str:
+    """Return bounded, redacted context for a failed native YunoHost call.
+
+    Lifecycle calls are executed in a system-python subprocess, so their
+    exception often contains only YunoHost's generic wrapper message. The
+    operation log is the authoritative place where the app script's failure
+    and any automatic rollback are recorded; include a small recent tail in
+    the propagated error so an MCP caller can diagnose the failure without a
+    second manual log lookup.
+    """
+    try:
+        log_list = _import_attr("yunohost.log", "log_list")
+        log_show = _import_attr("yunohost.log", "log_show")
+        operations = log_list(limit=limit).get("operation", [])
+        rendered: list[str] = []
+        for operation in operations:
+            name = operation.get("name")
+            if not name:
+                continue
+            status = operation.get("success", "?")
+            try:
+                details = log_show(name, number=tail_lines)
+                logs = details.get("logs", [])
+            except Exception:  # noqa: BLE001 - diagnostics must not mask the original failure
+                logs = []
+            if isinstance(logs, list):
+                lines = [redact_text(line) for line in logs if isinstance(line, str)]
+            else:
+                lines = [redact_text(str(logs))]
+            suffix = "\n".join(lines[-tail_lines:])
+            rendered.append(f"{name} success={status}" + (f"\n{suffix}" if suffix else ""))
+        return "\n---\n".join(rendered)
+    except Exception:  # noqa: BLE001 - diagnostics must never mask the original failure
+        return ""
+
+
 _POLYPACK_MEMORY_CLASSES = frozenset({"entity", "episodic", "procedural", "semantic"})
 _POLYPACK_EDGE_TYPES = frozenset({"RESPONDS_TO", "SUPERSEDES", "SUPERSEDED_BY", "CONSOLIDATED_FROM"})
 
@@ -390,9 +426,11 @@ def _call_via_system_python(
         timeout=settings.system_python_timeout_seconds,
     )
     if proc.returncode != 0:
+        context = _recent_operation_failure_context()
         raise YunohostUnavailableError(
             f"{module_name}.{attr} failed in the system-python subprocess "
             f"(exit {proc.returncode}): {proc.stderr[-4000:]}"
+            + (f"\nRecent YunoHost operation context:\n{context}" if context else "")
         )
     try:
         return json.loads(proc.stdout)
