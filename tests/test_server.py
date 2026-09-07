@@ -11,6 +11,7 @@ context themselves, the way server.py's stdio branch of main() does.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -972,6 +973,32 @@ async def test_phase13_owner_may_approve_and_consume_its_own_request():
 
             second = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
             assert second.is_error is not True, second.content
+    finally:
+        set_current_request(LOCAL_STDIO_REQUEST)
+
+
+@pytest.mark.anyio
+async def test_phase13_delegated_identity_cannot_approve_even_matching_configured_owner():
+    """A delegated (agent) identity must never be able to self-approve its
+    own request, even in the degenerate misconfiguration where owner_npub
+    or the bootstrap administrator fallback happens to coincide with the
+    agent's own pubkey (policy/roles.py's own comment: "no deployed agent
+    identity is ever granted administrator" - an operational convention,
+    not something identity.toml itself enforces). The distinguishing
+    signal is X-Nostr-Delegation: a request carrying it is by construction
+    an agent acting on delegated authority, never the owner calling in
+    person - see server.py's approve_operation."""
+    delegated_owner_lookalike = dataclasses.replace(
+        SECOND_ADMIN_REQUEST, delegation="kind27236-delegation-event-json"
+    )
+    set_current_request(delegated_owner_lookalike)
+    try:
+        async with Client(mcp) as client:
+            first = await client.call_tool("system_upgrade", {})
+            confirmation_id = first.structured_content["confirmation_id"]
+
+            result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            assert result.is_error is True
     finally:
         set_current_request(LOCAL_STDIO_REQUEST)
 

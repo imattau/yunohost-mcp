@@ -2468,6 +2468,23 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
     own npub through an external NIP-46 signer.
     """
     request = require_current_request()
+    if request.delegation is not None:
+        # A delegated identity is by construction an agent acting on
+        # authority someone else granted it (auth/delegation.py) - never
+        # the owner in person, regardless of what pubkey/scopes it
+        # resolves to. Without this check, an owner_npub or bootstrap
+        # "administrator" misconfigured to coincide with an agent's own
+        # key (the exact thing policy/roles.py's _APP_ADMIN comment says
+        # should never happen in practice) would let that agent's own
+        # delegated call satisfy approver_pubkey == owner_pubkey below -
+        # i.e. an agent approving its own request. The legitimate v1 flow
+        # this must not break - a human owner calling a protected tool
+        # directly and then self-approving (confirmation.py's own
+        # docstring) - never carries an X-Nostr-Delegation header, so it's
+        # unaffected.
+        raise ConfirmationError(
+            "owner co-signature must come from the owner's own key directly, not a delegated identity"
+        )
     owner_pubkey = get_owner_pubkey()
     if owner_pubkey is None:
         raise ConfirmationError(
