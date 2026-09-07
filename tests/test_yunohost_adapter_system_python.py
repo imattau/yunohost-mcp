@@ -572,6 +572,35 @@ def test_user_permission_update_calls_call_via_system_python_with_correct_kwargs
     assert result == {"fake": False, "permission": "myapp.main", "result": {"label": "New label"}}
 
 
+def test_diagnosis_run_uses_cli_context_in_system_python(monkeypatch: pytest.MonkeyPatch):
+    # diagnosis_run is @is_unit_operation-decorated - same "Request context
+    # not initialized" failure mode as app_remove/service_start above when
+    # called in-process from the broker (a local worker, not a real HTTP
+    # request). Confirmed against a real deployment: a plain _import_attr
+    # call crashed with RuntimeError("Request context not initialized.")
+    # every time, blocking domain_cert_install's ACME readiness check (which
+    # requires a fresh 'dnsrecords'/'web' diagnosis to exist for the domain).
+    captured = {}
+
+    def fake_call(module_name, attr, kwargs, settings, *, interface_type="api"):
+        captured.update(module_name=module_name, attr=attr, kwargs=kwargs, interface_type=interface_type)
+        return {"errors": 0}
+
+    monkeypatch.setattr(adapter_module, "_call_via_system_python", fake_call)
+    monkeypatch.setattr(adapter_module, "_latest_operation_id", lambda: "20260907-000000-diagnosis_run")
+
+    adapter = YunohostAdapter(settings=_settings())
+    result = adapter.diagnosis_run(categories=["dnsrecords", "web"], force=True)
+
+    assert captured == {
+        "module_name": "yunohost.diagnosis",
+        "attr": "diagnosis_run",
+        "kwargs": {"categories": ["dnsrecords", "web"], "force": True},
+        "interface_type": "cli",
+    }
+    assert result == {"fake": False, "operation_id": "20260907-000000-diagnosis_run", "errors": 0}
+
+
 def test_user_permission_update_rejects_protected_on_this_yunohost_version():
     # yunohost.user.user_permission_update's real signature (confirmed
     # against the exact installed version, debian/12.1.41.2) has no

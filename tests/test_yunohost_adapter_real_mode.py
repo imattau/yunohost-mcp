@@ -300,9 +300,10 @@ def test_system_upgrade_receives_correct_target_not_operation_logger(real_mode_a
     assert real_mode_adapter._test_calls["tools_upgrade"] == {"target": "system"}
 
 
-def test_diagnosis_run_receives_correct_categories_not_operation_logger(real_mode_adapter: YunohostAdapter):
-    real_mode_adapter.diagnosis_run(categories=["ip"])
-    assert real_mode_adapter._test_calls["diagnosis_run"] == {"categories": ["ip"]}
+# diagnosis_run now goes through _call_via_system_python (interface_type=
+# "cli") instead of this file's in-process _import_attr path - same
+# "Request context not initialized" failure mode as service_start, see
+# test_yunohost_adapter_system_python.py for its coverage.
 
 
 def test_updates_refresh_receives_correct_target_not_operation_logger(

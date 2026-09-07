@@ -921,8 +921,23 @@ class YunohostAdapter:
         # "Errata" section of PHASE0_INVESTIGATION.md for how this was
         # originally gotten wrong, and _latest_operation_id()'s docstring for
         # how the id is recovered without one.
-        diagnosis_run = _import_attr("yunohost.diagnosis", "diagnosis_run")
-        result = diagnosis_run(categories=categories or [], force=force)
+        #
+        # That OperationLogger's SSE registration reads a Bottle request
+        # header - same "Request context not initialized" failure mode as
+        # service_start below when called in-process from the broker (a
+        # local worker, not a real HTTP request). Confirmed live: a plain
+        # _import_attr call here raises RuntimeError("Request context not
+        # initialized.") every time. Same fix: system-python subprocess with
+        # a CLI-style headless context, which _latest_operation_id() can
+        # still recover an id from afterward since it reads the operation
+        # log directory, not any in-process state.
+        result = _call_via_system_python(
+            "yunohost.diagnosis",
+            "diagnosis_run",
+            {"categories": categories or [], "force": force},
+            self.settings,
+            interface_type="cli",
+        )
         return {"fake": False, "operation_id": _latest_operation_id(), **(result or {})}
 
     def diagnosis_get(self) -> dict[str, Any]:
