@@ -38,6 +38,7 @@ def test_package_developer_can_publish_a_tested_package_to_the_catalog():
     # itself still requires confirmation (see policy/rules.py's
     # PolicyRule for "catalog.publish").
     assert Scope.CATALOG_PUBLISH in ROLE_SCOPES["package-developer"]
+    assert Scope.ARMADA_WRITE in ROLE_SCOPES["package-developer"]
 
 
 def test_every_role_can_refresh_update_metadata():

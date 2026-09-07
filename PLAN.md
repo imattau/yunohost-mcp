@@ -961,3 +961,97 @@ returns verified result
 ```
 
 That is a good boundary for the project: not giving an AI root access, but giving it a secure, cryptographically authenticated YunoHost administration interface with deterministic limits.
+
+# Phase 18 — optional Concord/Armada package announcements (in progress)
+
+Catalogue publication remains the authoritative operation.  After a
+successful publication, the package-developer-scoped agent may prepare an
+optional announcement for the Armada channel whose name matches the source
+repository (for example, `ditto_ynh`).  Channel discovery and exact matching
+are isolated from publication, and drafts carry a deterministic idempotency
+key so a later Concord writer can retry without duplicate posts.
+
+Still to implement: authenticated Concord community/channel discovery,
+agent-bot membership/invite handling, CORD-01/02 encrypted message writing,
+and a non-blocking delivery status or retry tool. Configuration now reserves
+file-backed bot-key and community-invite paths, with the integration disabled
+by default. The credential boundary rejects symlinks and group/world-readable
+files before a future protocol adapter can use either secret. The first
+CORD-02 HKDF/group-key primitive is now covered locally; event envelopes and
+relay transport remain separate. A local CORD-01 envelope builder now covers
+the unsigned rumor, signed seal, and stream-signed wrap, with encryption
+injected until the NIP-44 conversation-key adapter is finalized. A local
+NIP-44 v2 self-conversation adapter is now available. A bounded, injectable
+relay publisher now accepts only a completed signed event; community-state
+acquisition and post-publish verification remain separate. Its read-side
+counterpart now fetches a bounded batch of Control Plane kind-1059 wraps by
+derived stream address, without decrypting or trusting them yet.
+Control Plane decoding now verifies the outer wrap, actor-signed plaintext
+seal, rumor binding, and rumor ID before the channel metadata fold sees it;
+the fold now accepts an explicit CORD-04 authorization predicate, but the
+roster evaluator itself remains outstanding.
+The shareable invite parser now keeps the public naddr separate from the
+opaque secret fragment; CORD-05 fragment decoding and bundle validation remain
+outstanding. Fragment v4 decoding now handles the stock relay dictionary and
+bounded custom relay entries. Bundle validation now checks the self-certifying
+community identity and bounds hostile channel/relay allocations; bundle
+decryption now derives the CORD-05 token key and validates the plaintext;
+public invite-event verification now checks the kind, coordinate, signer, and
+revocation marker; relay event lookup and bot join acceptance remain
+outstanding. The read transport now fetches the bounded kind-33301 empty-`d`
+coordinate for a link signer, and strict NIP-19 decoding now derives that
+signer from the invite naddr.
+The explicit Guestbook join envelope is now constructible from a validated
+bundle, but invite loading still does not publish it automatically; an
+acceptance gate and post-join verification are still required.
+Protected bot-key loading is now available as a local credential primitive;
+the MCP acceptance gate, join publication, and post-join verification remain
+unimplemented.
+The optional announcement workflow now routes a validated package publication
+to the folded channel, derives its public/private channel key, builds the
+encrypted chat envelope, and delegates the signed wrap to the bounded relay
+publisher. MCP wiring and delivery persistence remain outstanding.
+The Control Plane reader now composes bounded relay lookup, derived read-key
+decryption, and envelope validation into a local helper; roster authorization
+and MCP integration remain outstanding.
+The first MCP integration slice is now a separate `catalog_announce` tool,
+gated by `communications.armada.write` and therefore available to the
+package-developer role. It consumes a prior catalogue publication response,
+keeps Armada disabled by default, and returns a non-blocking disabled or
+routing status. Its network path still requires a bot that has already joined
+the community; automatic invite acceptance, CORD-04 authorization, and
+delivery persistence remain future work.
+CORD-04 roster authorization is now implemented for this path: owner-rooted
+Role and Grant heads are folded with bounded convergence, non-owner edits must
+carry an exact current `vac` citation, and Channel metadata requires the
+resolved `MANAGE_CHANNELS` permission. Unresolved or unauthorized metadata is
+dropped before repository-to-channel routing.
+An explicit `armada_join` MCP tool now accepts the configured invite by
+publishing the bot's self-signed Guestbook Join, without changing roles or
+triggering an announcement. It now performs bounded best-effort Guestbook
+lookup and reports whether the exact Join wrap was observed; a relay timeout
+therefore yields `published_unverified` rather than a false membership claim.
+Guestbook Join/Leave decoding and state folding are now implemented with
+signature/seal binding checks, millisecond ordering, deterministic tie-breaks,
+and future-time rejection. Full Kick/Ban/snapshot handling remains separate
+follow-up work. Authorized kind-3309 Kick folding is now supported through an
+explicit CORD-04 predicate; unverified kicks remain ignored. Banlist and
+epoch-snapshot inputs are now supported through explicit authorization and
+bounded filtering parameters; wiring the folded Control Plane banlist and
+refounder authority into the live membership reader remains follow-up work.
+The configured Armada timeout is now propagated through invite lookup, Control
+Plane lookup, Guestbook Join verification, and announcement/Join publishing,
+so every network leg remains bounded by the deployment setting.
+Invite bundle validation now also rejects expired bundles, non-ws(s) relay
+URLs, and duplicate channel IDs before any membership or announcement action.
+Successful announcement event IDs are now persisted in a small SQLite delivery
+store keyed by the deterministic draft idempotency key; repeated requests
+return `already_published` instead of reposting. Failed or unroutable
+announcements are not recorded as delivered.
+The scoped `catalog_announcement_status` tool now exposes persisted delivery
+state by idempotency key, allowing an agent to inspect delivery before retrying
+without posting another event.
+An opt-in `armada_auto_announce` setting now lets `catalog_publish` invoke the
+same best-effort announcement path after a successful catalogue result and
+attach its status; announcement exceptions are isolated so they cannot turn a
+successful catalogue publication into a failure. The default remains false.

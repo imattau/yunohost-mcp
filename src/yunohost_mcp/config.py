@@ -188,6 +188,19 @@ class Settings(BaseSettings):
     catalog_cli_timeout_seconds: int = 120
     catalog_require_remote_ref: bool = True
 
+    # Optional Concord/Armada bot integration. Disabled by default: catalogue
+    # publication must never become dependent on announcement delivery. The
+    # bot secret and invite are file-backed so they are not passed through MCP
+    # calls, logs, or environment values. The eventual adapter must validate
+    # ownership and file permissions before reading either file.
+    armada_enabled: bool = False
+    armada_relays: str = ""
+    armada_bot_key_path: Path = Path("/etc/yunohost-mcp/armada-bot.key")
+    armada_community_invite_path: Path = Path("/etc/yunohost-mcp/armada-community.invite")
+    armada_delivery_store_file: Path | None = None
+    armada_timeout_seconds: int = 30
+    armada_auto_announce: bool = False
+
     # HTTP exposure limits. These are deliberately bounded defaults; a
     # deployment can lower them, but should not silently run unbounded.
     max_request_body_bytes: int = 1_048_576
@@ -205,6 +218,10 @@ class Settings(BaseSettings):
     def audit_log_path(self) -> Path:
         """JSON-lines audit trail for write tools (Phase 5/10). Created on first write."""
         return self.config_dir / "audit.jsonl"
+
+    def armada_delivery_path(self) -> Path:
+        """Durable idempotency store for successful Armada announcements."""
+        return self.armada_delivery_store_file or self.config_dir / "armada-deliveries.sqlite3"
 
     def policy_file_path(self) -> Path:
         """Safeguard overrides (Phase 6). A missing file means the built-in

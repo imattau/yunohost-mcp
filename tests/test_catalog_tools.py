@@ -7,8 +7,13 @@ from mcp.client import Client
 
 from yunohost_mcp.config import Settings
 from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOCAL_STDIO_REQUEST, set_current_request
+from yunohost_mcp.concord_announcement_publish import AnnouncementPublishResult
+from yunohost_mcp.concord_announcements import build_announcement_draft
+from yunohost_mcp.concord_credentials import CredentialFileError
+from yunohost_mcp.concord_transport import RelayPublishResult
 from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import mcp
+import yunohost_mcp.server as server_module
 import yunohost_mcp.yunohost.adapter as adapter_module
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
@@ -217,12 +222,173 @@ async def test_catalog_list_tool_is_read_only_no_confirmation_needed():
 
 
 @pytest.mark.anyio
+async def test_catalog_announce_is_optional_and_disabled_by_default(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(server_module.settings, "armada_enabled", False)
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {"source": "https://github.com/example/ditto_ynh", "catalogue_publication": "{}"},
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content == {
+                "status": "disabled",
+                "warning": "Armada announcements are disabled",
+            }
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_armada_join_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(server_module.settings, "armada_enabled", False)
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool("armada_join", {})
+            assert result.is_error is not True, result.content
+            assert result.structured_content["status"] == "disabled"
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_requires_armada_write_scope():
+    readonly = AuthenticatedRequest(
+        pubkey="readonly-announcer",
+        event_id="r" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="readonly-announcer",
+            name="readonly announcer",
+            roles=("readonly",),
+            scopes=scopes_for_roles(("readonly",)),
+        ),
+    )
+    set_current_request(readonly)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {"source": "ditto_ynh", "catalogue_publication": "{}"},
+            )
+            assert result.is_error is True
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_enabled_path_is_composed_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    draft = build_announcement_draft(
+        "https://github.com/example/ditto_ynh",
+        {"published": True},
+    )
+    expected = AnnouncementPublishResult(
+        status="published",
+        draft=draft,
+        publication=RelayPublishResult(event_id="e" * 64, relays=("wss://relay.test",)),
+    )
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return object()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return []
+
+    async def fake_publish(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module, "load_bot_private_key", lambda _path: object())
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+    monkeypatch.setattr(server_module, "publish_package_announcement", fake_publish)
+
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content == {
+                "status": "published",
+                "draft": draft.__dict__,
+                "publication": {"event_id": "e" * 64, "relays": ["wss://relay.test"]},
+            }
+            duplicate = await client.call_tool(
+                "catalog_announce",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            assert duplicate.is_error is not True, duplicate.content
+            assert duplicate.structured_content["status"] == "already_published"
+            assert duplicate.structured_content["publication"]["event_id"] == "e" * 64
+            status = await client.call_tool(
+                "catalog_announcement_status",
+                {"idempotency_key": draft.idempotency_key},
+            )
+            assert status.is_error is not True, status.content
+            assert status.structured_content["status"] == "published"
+            assert status.structured_content["event_id"] == "e" * 64
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_reports_missing_configuration_as_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+
+    def missing_key(_path):
+        raise CredentialFileError("Concord bot credential file is unavailable")
+
+    monkeypatch.setattr(server_module, "load_bot_private_key", missing_key)
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {"source": "ditto_ynh", "catalogue_publication": '{"published": true}'},
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content == {
+                "status": "unavailable",
+                "warning": "Concord bot credential file is unavailable",
+            }
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
 async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     owner = AuthenticatedRequest(
         pubkey="catalog-owner", event_id="o" * 64, event_created_at=0,
         identity=IdentityRecord(pubkey="catalog-owner", name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
     )
     monkeypatch.setattr("yunohost_mcp.server.get_owner_pubkey", lambda: owner.pubkey)
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_auto_announce", True)
+    monkeypatch.setattr(
+        server_module,
+        "_catalog_announce_impl",
+        lambda source, publication: {"status": "published", "source": source},
+    )
     set_current_request(LOCAL_STDIO_REQUEST)
     try:
         async with Client(mcp) as client:
@@ -249,5 +415,6 @@ async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Pat
             )
             assert published.is_error is not True
             assert published.structured_content["published"] is True
+            assert published.structured_content["announcement"]["status"] == "published"
     finally:
         set_current_request(None)
