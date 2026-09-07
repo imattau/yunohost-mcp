@@ -2124,6 +2124,19 @@ class YunohostAdapter:
             acme_error = str(exc)
         certificate_status = _import_attr("yunohost.certificate", "certificate_status")
         certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+        # certificate_install() can raise YunohostError even when the
+        # certificate it was asked to install actually did get placed - e.g.
+        # a later step (nginx reload) failing after the CSR/cert itself
+        # succeeded. Confirmed live: a real call raised "Let's Encrypt
+        # certificate install failed for <domain>" while certificate_status()
+        # immediately after showed CA_type == "letsencrypt" with normal
+        # validity (a real cert, not a stale selfsigned one) - trusting the
+        # exception alone would have reported a working install as failed.
+        # Reconcile against the actual resulting certificate rather than the
+        # exception, the same principle the silent-no-op check below applies
+        # in the opposite direction.
+        if acme_error is not None and letsencrypt and certificate.get("CA_type") == "letsencrypt":
+            acme_error = None
         # yunohost.certificate._certificate_install_letsencrypt() runs a
         # pre-ACME readiness check (_check_domain_is_ready_for_ACME) per
         # domain and, on failure, just logs the error and `continue`s to the

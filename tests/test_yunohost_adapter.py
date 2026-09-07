@@ -364,6 +364,75 @@ def test_domain_cert_install_selfsigned_request_is_not_flagged_as_a_skip(monkeyp
     assert result["acme_error"] is None
 
 
+def test_domain_cert_install_reconciles_a_spurious_exception_against_the_real_result(monkeypatch):
+    """Regression: certificate_install() can raise YunohostError even when
+    the certificate it was asked to install actually got placed - e.g. a
+    later step (nginx reload) failing after the CSR/cert itself succeeded.
+    Confirmed live: a real call against catalog.3nostr.com raised "Let's
+    Encrypt certificate install failed for catalog.3nostr.com" while
+    certificate_status() immediately after showed CA_type == "letsencrypt"
+    with normal (89-day) validity - a real cert, not a stale selfsigned
+    one. Before this fix, that spurious exception was reported to the
+    caller as a failure despite the install actually having succeeded."""
+
+    class _FakeYunohostError(Exception):
+        pass
+
+    def fake_import_attr(module_name: str, attr: str):
+        if (module_name, attr) == ("yunohost.certificate", "certificate_install"):
+            def _raise(domains, **kwargs):
+                raise _FakeYunohostError(f"Let's Encrypt certificate install failed for {domains[0]}")
+
+            return _raise
+        if (module_name, attr) == ("yunohost.utils.error", "YunohostError"):
+            return _FakeYunohostError
+        if (module_name, attr) == ("yunohost.certificate", "certificate_status"):
+            return lambda domains, full=False: {
+                "certificates": {domains[0]: {"CA_type": "letsencrypt", "summary": "letsencrypt", "validity": 89}}
+            }
+        raise AssertionError(f"unexpected _import_attr({module_name!r}, {attr!r})")
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._import_attr", fake_import_attr)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._latest_operation_id", lambda: "op-1")
+
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+    result = adapter.domain_cert_install("catalog.3nostr.com")
+
+    assert result["certificate"]["CA_type"] == "letsencrypt"
+    assert result["acme_error"] is None
+
+
+def test_domain_cert_install_still_reports_a_genuine_failed_exception(monkeypatch):
+    """The reconciliation above must not swallow a real failure - only a
+    resulting letsencrypt certificate proves the exception was spurious."""
+
+    class _FakeYunohostError(Exception):
+        pass
+
+    def fake_import_attr(module_name: str, attr: str):
+        if (module_name, attr) == ("yunohost.certificate", "certificate_install"):
+            def _raise(domains, **kwargs):
+                raise _FakeYunohostError(f"Let's Encrypt certificate install failed for {domains[0]}")
+
+            return _raise
+        if (module_name, attr) == ("yunohost.utils.error", "YunohostError"):
+            return _FakeYunohostError
+        if (module_name, attr) == ("yunohost.certificate", "certificate_status"):
+            return lambda domains, full=False: {
+                "certificates": {domains[0]: {"CA_type": "selfsigned", "summary": "selfsigned"}}
+            }
+        raise AssertionError(f"unexpected _import_attr({module_name!r}, {attr!r})")
+
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._import_attr", fake_import_attr)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._latest_operation_id", lambda: "op-1")
+
+    adapter = YunohostAdapter(settings=Settings(fake_yunohost=False))
+    result = adapter.domain_cert_install("catalog.3nostr.com")
+
+    assert result["certificate"]["CA_type"] == "selfsigned"
+    assert result["acme_error"] is not None
+
+
 def test_free_space_bytes_reports_a_large_fake_figure_regardless_of_real_disk():
     # fake_yunohost must never touch the real filesystem of whatever
     # machine happens to be running this process - a disk-constrained CI
