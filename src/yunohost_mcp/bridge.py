@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import copy
 import os
 import secrets
 import sys
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, TypeVar
+from typing import Any, Awaitable, Callable, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 import anyio
 import httpx2
@@ -40,6 +43,7 @@ from mcp_types import (
     PaginatedRequestParams,
     ReadResourceRequestParams,
     TextContent,
+    Tool,
 )
 
 from yunohost_mcp.auth.signing import ClientIdentity, KeyLoadError
@@ -204,12 +208,20 @@ class Nip98BridgeAuth(httpx2.Auth):
         yield request
 
 
+def load_identity_from_key_file(key_file: Path) -> ClientIdentity:
+    key = Path(key_file).read_text().strip()
+    try:
+        return ClientIdentity.from_key_string(key)
+    except KeyLoadError as exc:
+        raise BridgeConfigError(str(exc)) from exc
+
+
 def load_identity(args: argparse.Namespace) -> ClientIdentity:
     key = args.key or os.environ.get("YUNOHOST_MCP_CLIENT_KEY")
     key_file = args.key_file or os.environ.get("YUNOHOST_MCP_CLIENT_KEY_FILE")
 
     if key_file:
-        key = Path(key_file).read_text().strip()
+        return load_identity_from_key_file(Path(key_file))
     if not key:
         raise BridgeConfigError(
             "no private key given - pass --key/--key-file, or set "
@@ -324,6 +336,199 @@ def _build_local_server(remote: Client | RemoteSession, *, name: str) -> MCPServ
     return local
 
 
+def _prefix_resource_uri(host: str, uri: str) -> str:
+    parts = urlsplit(uri)
+    return urlunsplit((parts.scheme, f"{host}.{parts.netloc}", parts.path, parts.query, parts.fragment))
+
+
+def _split_resource_uri(uri: str) -> tuple[str, str]:
+    """Inverse of `_prefix_resource_uri`: returns (host, original_uri)."""
+    parts = urlsplit(uri)
+    host, _, original_netloc = parts.netloc.partition(".")
+    if not original_netloc:
+        raise KeyError(f"resource URI {uri!r} is not host-prefixed")
+    original = urlunsplit((parts.scheme, original_netloc, parts.path, parts.query, parts.fragment))
+    return host, original
+
+
+#: How often the multi-host bridge re-polls every host's tool list in the
+#: background, purely to notice a previously-down host coming back (or vice
+#: versa) and push `notifications/tools/list_changed` - independent of, and
+#: much less frequent than, whatever polling a connected client does itself.
+TOOL_POLL_INTERVAL_SECONDS = 30.0
+
+
+async def _collect_tools_by_host(sessions: dict[str, RemoteSession]) -> dict[str, dict[str, Tool]]:
+    tools_by_host: dict[str, dict[str, Tool]] = {}
+    for host, session in sessions.items():
+        try:
+            result = await session.request(lambda connected: connected.list_tools())
+        except RemoteUnavailable:
+            continue
+        for tool in result.tools:
+            tools_by_host.setdefault(tool.name, {})[host] = tool
+    return tools_by_host
+
+
+def _merge_tools(tools_by_host: dict[str, dict[str, Tool]]) -> list[Tool]:
+    merged: list[Tool] = []
+    for tool_name, by_host in tools_by_host.items():
+        hosts_for_tool = sorted(by_host)
+        reference_host = hosts_for_tool[0]
+        reference = by_host[reference_host]
+        schemas_differ = any(by_host[h].input_schema != reference.input_schema for h in hosts_for_tool[1:])
+        if schemas_differ:
+            print(
+                f"yunohost-mcp-connect: tool {tool_name!r} has a different schema on "
+                f"{hosts_for_tool} - merging using {reference_host}'s schema",
+                file=sys.stderr,
+            )
+        schema = copy.deepcopy(reference.input_schema)
+        schema.setdefault("properties", {})["host"] = {
+            "type": "string",
+            "enum": hosts_for_tool,
+            "description": "Which YunoHost server to run this tool on.",
+        }
+        required = schema.setdefault("required", [])
+        if "host" not in required:
+            required.append("host")
+        merged.append(
+            Tool(
+                name=tool_name,
+                description=reference.description,
+                input_schema=schema,
+                output_schema=reference.output_schema,
+            )
+        )
+    return merged
+
+
+def _host_signature(tools_by_host: dict[str, dict[str, Tool]]) -> dict[str, tuple[str, ...]]:
+    """A cheap fingerprint of which hosts serve which tools - enough to tell
+    whether a background poll should push tools/list_changed, without caring
+    about description/schema text changes that don't affect the `host` enum."""
+    return {name: tuple(sorted(by_host)) for name, by_host in tools_by_host.items()}
+
+
+def _build_multi_host_local_server(sessions: dict[str, RemoteSession], *, name: str) -> MCPServer:
+    """Bridge several remote yunohost-mcp servers as one local MCP server.
+
+    Tools that exist on more than one host are merged into a single tool
+    definition with a `host` parameter added to its schema, so a mainstream
+    MCP client sees each distinct capability once instead of once per host -
+    the whole point of multi-host mode. `resources/*` URIs are disambiguated
+    by splicing the host name into the URI's netloc instead (resources take
+    no arguments to add a `host` field to).
+
+    The returned `MCPServer` also carries a `_poll_for_host_changes`
+    coroutine function (stashed as an attribute, since `MCPServer` has no
+    extension point for a caller-supplied background task): `_async_main_multi_host`
+    starts it in the same task group as the `RemoteSession`s so a host
+    recovering or dropping mid-session pushes `tools/list_changed` instead of
+    silently waiting for the next client-initiated `tools/list` call.
+    """
+    local = MCPServer(name)
+    lowlevel = local._lowlevel_server  # noqa: SLF001 - see _build_local_server's note on this being the documented override point
+
+    # tool_name -> {host_name: Tool}, refreshed on every tools/list (and by
+    # the background poller) so a newly-appeared or newly-unavailable host is
+    # reflected without a restart.
+    _tools_by_host: dict[str, dict[str, Tool]] = {}
+    _current_session: list[Any] = [None]  # mutable box: closures below fill this in on any request
+
+    async def handle_list_tools(ctx, params: PaginatedRequestParams | None):
+        _current_session[0] = ctx.session
+        _tools_by_host.clear()
+        _tools_by_host.update(await _collect_tools_by_host(sessions))
+        return ListToolsResult(tools=_merge_tools(_tools_by_host))
+
+    async def handle_call_tool(ctx, params: CallToolRequestParams):
+        _current_session[0] = ctx.session
+        arguments = dict(params.arguments or {})
+        hosts_for_tool = sorted(_tools_by_host.get(params.name, {}))
+        host = arguments.pop("host", None)
+        if host is None:
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        text=f"tool {params.name!r} requires a 'host' argument: one of {hosts_for_tool}"
+                    )
+                ],
+                isError=True,
+            )
+        if host not in hosts_for_tool:
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        text=f"unknown host {host!r} for tool {params.name!r}: valid hosts are {hosts_for_tool}"
+                    )
+                ],
+                isError=True,
+            )
+        session = sessions[host]
+        try:
+            return await session.request(lambda connected: connected.call_tool(params.name, arguments))
+        except RemoteUnavailable:
+            return CallToolResult(content=[TextContent(text=session.unavailable_message)], isError=True)
+
+    async def handle_list_resources(ctx, params: PaginatedRequestParams | None):
+        _current_session[0] = ctx.session
+        resources = []
+        for host, session in sessions.items():
+            try:
+                result = await session.request(
+                    lambda connected: connected.list_resources(cursor=params.cursor if params else None)
+                )
+            except RemoteUnavailable:
+                continue
+            for resource in result.resources:
+                resources.append(resource.model_copy(update={"uri": _prefix_resource_uri(host, str(resource.uri))}))
+        return ListResourcesResult(resources=resources)
+
+    async def handle_read_resource(ctx, params: ReadResourceRequestParams):
+        _current_session[0] = ctx.session
+        host, original_uri = _split_resource_uri(str(params.uri))
+        session = sessions[host]
+        return await session.request(lambda connected: connected.read_resource(original_uri))
+
+    lowlevel.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
+    lowlevel.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
+    lowlevel.add_request_handler("resources/list", PaginatedRequestParams, handle_list_resources)
+    lowlevel.add_request_handler("resources/read", ReadResourceRequestParams, handle_read_resource)
+
+    async def poll_for_host_changes() -> None:
+        last_signature = _host_signature(await _collect_tools_by_host(sessions))
+        while True:
+            await anyio.sleep(TOOL_POLL_INTERVAL_SECONDS)
+            try:
+                tools_by_host = await _collect_tools_by_host(sessions)
+            except anyio.get_cancelled_exc_class():
+                raise
+            except Exception as exc:  # noqa: BLE001 - a poll failure must not kill the bridge
+                print(f"yunohost-mcp-connect: background tool-list poll failed: {exc}", file=sys.stderr)
+                continue
+
+            signature = _host_signature(tools_by_host)
+            if signature == last_signature:
+                continue
+            last_signature = signature
+            _tools_by_host.clear()
+            _tools_by_host.update(tools_by_host)
+            print("yunohost-mcp-connect: host availability changed, notifying client", file=sys.stderr)
+            session = _current_session[0]
+            if session is None:
+                continue
+            try:
+                await session.send_tool_list_changed()
+            except anyio.get_cancelled_exc_class():
+                raise
+            except Exception as exc:  # noqa: BLE001 - a dead/detached client session must not kill the poller
+                print(f"yunohost-mcp-connect: failed to notify client of tool list change: {exc}", file=sys.stderr)
+
+    local._poll_for_host_changes = poll_for_host_changes  # noqa: SLF001 - see docstring: stashed for _async_main_multi_host
+    return local
+
+
 async def _async_main(args: argparse.Namespace) -> None:
     identity = load_identity(args)
     delegation_header = _load_delegation_header(args)
@@ -341,16 +546,53 @@ async def _async_main(args: argparse.Namespace) -> None:
                 await remote.close()
 
 
+async def _async_main_multi_host(args: argparse.Namespace) -> None:
+    from yunohost_mcp.hosts import load_hosts_file
+
+    hosts = load_hosts_file(Path(args.hosts_file))
+
+    async with contextlib.AsyncExitStack() as stack:
+        async with anyio.create_task_group() as task_group:
+            sessions: dict[str, RemoteSession] = {}
+            for host in hosts:
+                identity = load_identity_from_key_file(host.key_file)
+                auth = Nip98BridgeAuth(identity)
+                print(
+                    f"yunohost-mcp-connect: signing as {identity.npub} for host {host.name!r}, "
+                    f"connecting to {host.remote_url}",
+                    file=sys.stderr,
+                )
+                http_client = await stack.enter_async_context(
+                    httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(120.0))
+                )
+                sessions[host.name] = RemoteSession(host.remote_url, http_client, task_group)
+
+            local = _build_multi_host_local_server(sessions, name=args.name)
+            task_group.start_soon(local._poll_for_host_changes)  # noqa: SLF001 - see _build_multi_host_local_server's docstring
+            try:
+                await local.run_stdio_async()
+            finally:
+                for session in sessions.values():
+                    await session.close()
+                # poll_for_host_changes loops forever by design - cancel it (and
+                # anything else left in this task group) so the group's
+                # __aexit__ doesn't hang once the client disconnects and the
+                # stdio handshake is over.
+                task_group.cancel_scope.cancel()
+
+
 def main() -> None:
     # Keep the original flag-based bridge invocation stable for MCP clients,
     # while exposing agent-friendly lifecycle commands as subcommands.
-    if len(sys.argv) > 1 and sys.argv[1] in {"setup", "doctor"}:
-        from yunohost_mcp.onboarding import add_doctor_parser, add_setup_parser
+    if len(sys.argv) > 1 and sys.argv[1] in {"setup", "doctor", "migrate", "hosts"}:
+        from yunohost_mcp.onboarding import add_doctor_parser, add_hosts_parser, add_migrate_parser, add_setup_parser
 
         command_parser = argparse.ArgumentParser(prog="yunohost-mcp-connect")
         subparsers = command_parser.add_subparsers(dest="command", required=True)
         add_setup_parser(subparsers)
         add_doctor_parser(subparsers)
+        add_migrate_parser(subparsers)
+        add_hosts_parser(subparsers)
         args = command_parser.parse_args()
         raise SystemExit(args.handler(args))
 
@@ -362,6 +604,13 @@ def main() -> None:
         "--remote-url",
         default=os.environ.get("YUNOHOST_MCP_CLIENT_REMOTE_URL"),
         help="e.g. https://your-domain/mcp (or $YUNOHOST_MCP_CLIENT_REMOTE_URL)",
+    )
+    parser.add_argument(
+        "--hosts-file",
+        default=os.environ.get("YUNOHOST_MCP_CLIENT_HOSTS_FILE"),
+        help="path to a TOML file listing multiple [[host]] servers to bridge at once, each with its own "
+        "name/remote_url/key_file (or $YUNOHOST_MCP_CLIENT_HOSTS_FILE) - mutually exclusive with --remote-url; "
+        "merges same-named tools across hosts into one tool with an added 'host' argument",
     )
     parser.add_argument("--key", help="hex or nsec1... private key (prefer --key-file; see $YUNOHOST_MCP_CLIENT_KEY)")
     parser.add_argument(
@@ -393,6 +642,12 @@ def main() -> None:
             "not the role you already gave a different client.",
             file=sys.stderr,
         )
+        return
+
+    if args.hosts_file:
+        if args.remote_url:
+            raise BridgeConfigError("--hosts-file and --remote-url are mutually exclusive")
+        anyio.run(_async_main_multi_host, args)
         return
 
     if not args.remote_url:

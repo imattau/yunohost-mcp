@@ -32,7 +32,28 @@ Use the local signed bridge so Hermes can connect to a YunoHost MCP endpoint.
 
 If the connection fails, verify the remote URL, confirm the npub has the
 required YunoHost role, check that the key file is readable only by the user,
-and rerun the printed doctor command.
+and rerun the printed doctor command. A `forbidden`/`identity_not_enrolled`
+result points at server-side enrollment (the npub is missing from that
+server's `identity.toml`, e.g. after a reinstall) rather than a broken
+connection - re-enrolling it there fixes it, not re-running setup.
+
+## Multiple hosts
+
+Never create a second independent `setup` entry for a second YunoHost host -
+each is a separate MCP server, so Hermes ends up listing every tool twice.
+Consolidate into one multi-host bridge instead:
+
+- If two or more single-host entries already exist, run
+  `uvx --from yunohost-mcp-connect yunohost-mcp-connect migrate --client hermes --print-only`
+  to see the proposed consolidation, then rerun without `--print-only` once
+  the user confirms it.
+- To add a host directly (new or on top of an existing multi-host bridge), use
+  `uvx --from yunohost-mcp-connect yunohost-mcp-connect hosts add --hosts-file <path> --name <name> --server <url>`
+  (generates a key if none is given) and `hosts list` to see current entries -
+  never hand-edit the hosts-file's TOML.
+- Either way, tell the user to restart Hermes afterward. Tools then appear
+  once each, with an added `host` argument selecting which server a call
+  targets.
 
 ## Optional shared memory
 

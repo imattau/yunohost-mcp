@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
@@ -284,6 +285,275 @@ def write_client_config(client: str, name: str, key_file: Path, remote_url: str,
     return _write_hermes_config(path, name, server, print_only=print_only)
 
 
+# Clients whose config is a plain JSON dict of server entries, so migrate()
+# can read/rewrite it in memory instead of doing regex text surgery like
+# _write_codex_config/_write_hermes_config do for their non-JSON formats.
+_JSON_CLIENTS = ("claude-desktop", "claude-code", "gemini", "opencode", "openclaw")
+
+
+def _servers_dict(client: str, current: dict[str, Any]) -> dict[str, Any]:
+    if client in {"claude-desktop", "claude-code", "gemini"}:
+        servers = current.setdefault("mcpServers", {})
+    elif client in {"opencode", "openclaw"}:
+        servers = current.setdefault("mcp", {}).setdefault("servers", {})
+    else:
+        raise BridgeConfigError(f"migrate does not support client {client!r} yet - edit its config by hand")
+    if not isinstance(servers, dict):
+        raise BridgeConfigError(f"server list for {client!r} in its config is not an object")
+    return servers
+
+
+def _entry_env(entry: dict[str, Any]) -> dict[str, Any] | None:
+    env = entry.get("env")
+    if not isinstance(env, dict):
+        env = entry.get("environment")
+    return env if isinstance(env, dict) else None
+
+
+def _entry_is_yunohost_mcp_connect(entry: dict[str, Any]) -> bool:
+    """True for an entry shaped like write_client_config's own output: run
+    via `uvx --from yunohost-mcp-connect yunohost-mcp-connect` or a direct
+    path to the `yunohost-mcp-connect` binary (opencode's `command` is a
+    list; every other client's is a bare string)."""
+    command = entry.get("command")
+    args: list[Any] = entry.get("args") if isinstance(entry.get("args"), list) else []
+    if isinstance(command, list):
+        args = command[1:]
+        command = command[0] if command else None
+    if not isinstance(command, str):
+        return False
+    if Path(command).name == "yunohost-mcp-connect":
+        return True
+    return Path(command).name in {"uvx", "uv"} and any("yunohost-mcp-connect" in str(a) for a in args)
+
+
+def _find_single_host_entries(servers: dict[str, Any]) -> dict[str, tuple[str, str, dict[str, Any]]]:
+    """server-entry-name -> (remote_url, key_file, entry) for every entry
+    that looks like a single-host `setup`-generated yunohost-mcp-connect
+    config (not already in hosts-file mode)."""
+    found: dict[str, tuple[str, str, dict[str, Any]]] = {}
+    for name, entry in servers.items():
+        if not isinstance(entry, dict) or not _entry_is_yunohost_mcp_connect(entry):
+            continue
+        env = _entry_env(entry)
+        if not env or env.get("YUNOHOST_MCP_CLIENT_HOSTS_FILE"):
+            continue
+        remote_url = env.get("YUNOHOST_MCP_CLIENT_REMOTE_URL")
+        key_file = env.get("YUNOHOST_MCP_CLIENT_KEY_FILE")
+        if not remote_url or not key_file:
+            continue
+        found[name] = (remote_url, key_file, entry)
+    return found
+
+
+def _sanitize_host_name(name: str) -> str:
+    """Host names get spliced into resource URIs (see bridge.py's multi-host
+    mode) and can't contain '.'; collapse anything unsuitable to '-'."""
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")
+    return sanitized or "host"
+
+
+def _build_migrated_entry(client: str, reference_entry: dict[str, Any], hosts_file: Path) -> dict[str, Any]:
+    """Keep the reference entry's own command/args (whichever invocation
+    style - uvx or a pinned binary path - the user's config already uses)
+    and swap its env for hosts-file mode."""
+    entry = copy.deepcopy(reference_entry)
+    env_key = "environment" if client == "opencode" else "env"
+    entry[env_key] = {"YUNOHOST_MCP_CLIENT_HOSTS_FILE": str(hosts_file)}
+    return entry
+
+
+def migrate(args: argparse.Namespace) -> int:
+    client = args.client
+    path = config_path(client)
+
+    if client not in _JSON_CLIENTS:
+        payload = _result(
+            "unsupported_client_format",
+            client=client,
+            path=str(path),
+            message=f"migrate does not yet support {client}'s config format - consolidate its "
+            "yunohost-mcp-connect entries into a --hosts-file by hand",
+        )
+        emit(payload, args.format)
+        return 1
+
+    if not path.exists():
+        payload = _result("no_action_needed", client=client, path=str(path), message="no config file found")
+        emit(payload, args.format)
+        return 0
+
+    try:
+        current = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BridgeConfigError(f"cannot read JSON configuration {path}: {exc}") from exc
+    if not isinstance(current, dict):
+        raise BridgeConfigError(f"JSON configuration {path} must contain an object")
+
+    servers = _servers_dict(client, current)
+    candidates = _find_single_host_entries(servers)
+
+    if len(candidates) < 2:
+        payload = _result(
+            "no_action_needed",
+            client=client,
+            path=str(path),
+            candidates_found=len(candidates),
+            message="fewer than two split single-host yunohost-mcp-connect entries found; nothing to merge",
+        )
+        emit(payload, args.format)
+        return 0
+
+    used_names: set[str] = set()
+    hosts: list[tuple[str, str, str]] = []
+    for server_name, (remote_url, key_file, _entry) in candidates.items():
+        base = _sanitize_host_name(server_name)
+        host_name = base
+        suffix = 2
+        while host_name in used_names:
+            host_name = f"{base}-{suffix}"
+            suffix += 1
+        used_names.add(host_name)
+        hosts.append((host_name, remote_url, key_file))
+
+    merged_name = args.name
+    if merged_name in servers and merged_name not in candidates:
+        raise BridgeConfigError(
+            f"MCP server {merged_name!r} already exists with a different configuration in {path}; choose --name"
+        )
+
+    hosts_file = Path(args.hosts_file).expanduser() if args.hosts_file else _config_root() / "yunohost-mcp" / "hosts.toml"
+    reference_entry = next(iter(candidates.values()))[2]
+    merged_entry = _build_migrated_entry(client, reference_entry, hosts_file)
+
+    if args.print_only:
+        payload = _result(
+            "would_migrate",
+            client=client,
+            path=str(path),
+            hosts_file=str(hosts_file),
+            hosts=[{"name": name, "remote_url": url} for name, url, _key in hosts],
+            merged_name=merged_name,
+            consolidated_from=sorted(candidates),
+        )
+        emit(payload, args.format)
+        return 0
+
+    from yunohost_mcp.hosts import HostConfig, render_hosts_toml
+
+    hosts_file.parent.mkdir(parents=True, exist_ok=True)
+    hosts_file_backup = _backup(hosts_file)
+    hosts_file.write_text(
+        render_hosts_toml([HostConfig(name=n, remote_url=u, key_file=Path(k)) for n, u, k in hosts])
+    )
+
+    for server_name in candidates:
+        del servers[server_name]
+    servers[merged_name] = merged_entry
+
+    config_backup = _backup(path)
+    path.write_text(json.dumps(current, indent=2) + "\n")
+
+    payload = _result(
+        "migrated",
+        client=client,
+        path=str(path),
+        config_backup=str(config_backup) if config_backup else None,
+        hosts_file=str(hosts_file),
+        hosts_file_backup=str(hosts_file_backup) if hosts_file_backup else None,
+        hosts=[{"name": name, "remote_url": url} for name, url, _key in hosts],
+        merged_name=merged_name,
+        consolidated_from=sorted(candidates),
+        next_action="Restart or reload the MCP client to pick up the merged connection.",
+    )
+    emit(payload, args.format)
+    return 0
+
+
+def _default_hosts_file() -> Path:
+    return _config_root() / "yunohost-mcp" / "hosts.toml"
+
+
+def hosts_list(args: argparse.Namespace) -> int:
+    from yunohost_mcp.hosts import load_hosts_file
+
+    path = Path(args.hosts_file).expanduser() if args.hosts_file else _default_hosts_file()
+    if not path.exists():
+        payload = _result("no_hosts_file", path=str(path))
+        emit(payload, args.format)
+        return 0
+
+    hosts = load_hosts_file(path)
+    payload = _result(
+        "ok",
+        path=str(path),
+        hosts=[{"name": h.name, "remote_url": h.remote_url, "key_file": str(h.key_file)} for h in hosts],
+    )
+    emit(payload, args.format)
+    return 0
+
+
+def hosts_add(args: argparse.Namespace) -> int:
+    from yunohost_mcp.hosts import HostConfig, load_hosts_file, render_hosts_toml, validate_host_name
+
+    if not args.server.startswith(("http://", "https://")):
+        raise BridgeConfigError("--server must start with http:// or https://")
+
+    path = Path(args.hosts_file).expanduser() if args.hosts_file else _default_hosts_file()
+    existing = load_hosts_file(path, missing_ok=True)
+    validate_host_name(args.name, {h.name for h in existing})
+
+    key_file = (
+        Path(args.key_file).expanduser()
+        if args.key_file
+        else _config_root() / "yunohost-mcp" / "hosts" / f"{args.name}.key"
+    )
+    key_exists = key_file.exists()
+
+    if args.print_only:
+        payload = _result(
+            "would_add",
+            path=str(path),
+            name=args.name,
+            server=args.server,
+            key_file=str(key_file),
+            key_would_be_generated=not key_exists,
+        )
+        emit(payload, args.format)
+        return 0
+
+    if key_exists:
+        try:
+            identity = ClientIdentity.from_key_string(key_file.read_text().strip())
+        except (OSError, ValueError) as exc:
+            raise BridgeConfigError(f"cannot load key file {key_file}: {exc}") from exc
+        generated = False
+    else:
+        identity = generate_key(key_file)
+        generated = True
+
+    updated = [*existing, HostConfig(name=args.name, remote_url=args.server, key_file=key_file)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = _backup(path)
+    path.write_text(render_hosts_toml(updated))
+
+    payload = _result(
+        "added",
+        path=str(path),
+        backup=str(backup) if backup else None,
+        name=args.name,
+        server=args.server,
+        key_file=str(key_file),
+        npub=identity.npub,
+        generated_key=generated,
+        enrollment_required=True,
+        next_action=f"Grant {identity.npub} the desired role in {args.name}'s identity.toml, then restart or "
+        "reload the MCP client (or wait for the next background poll) to pick it up.",
+    )
+    emit(payload, args.format)
+    return 0
+
+
 def _result(status: str, **values: Any) -> dict[str, Any]:
     return {"status": status, **values}
 
@@ -420,3 +690,43 @@ def add_doctor_parser(subparsers: Any) -> None:
     parser.add_argument("--key-file", required=True)
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.set_defaults(handler=doctor)
+
+
+def add_migrate_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "migrate",
+        help="consolidate a client's split single-host yunohost-mcp-connect entries into one hosts-file entry",
+    )
+    parser.add_argument("--client", choices=CLIENTS, required=True)
+    parser.add_argument("--name", default=DEFAULT_NAME, help="name for the merged MCP server entry")
+    parser.add_argument(
+        "--hosts-file", help="where to write the generated hosts-file (default: ~/.config/yunohost-mcp/hosts.toml)"
+    )
+    parser.add_argument("--print-only", action="store_true", help="show what would change without writing anything")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.set_defaults(handler=migrate)
+
+
+def add_hosts_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("hosts", help="manage a --hosts-file's [[host]] entries")
+    hosts_subparsers = parser.add_subparsers(dest="hosts_command", required=True)
+
+    add_parser = hosts_subparsers.add_parser(
+        "add", help="add a host to a hosts-file, generating a key for it if none is given"
+    )
+    add_parser.add_argument(
+        "--hosts-file", help="path to the hosts-file (default: ~/.config/yunohost-mcp/hosts.toml)"
+    )
+    add_parser.add_argument("--name", required=True, help="unique name; this is the value clients pass as `host`")
+    add_parser.add_argument("--server", required=True, help="remote YunoHost MCP endpoint")
+    add_parser.add_argument("--key-file", help="use an existing key file instead of generating a new one")
+    add_parser.add_argument("--print-only", action="store_true", help="show what would change without writing anything")
+    add_parser.add_argument("--format", choices=("text", "json"), default="text")
+    add_parser.set_defaults(handler=hosts_add)
+
+    list_parser = hosts_subparsers.add_parser("list", help="list a hosts-file's entries")
+    list_parser.add_argument(
+        "--hosts-file", help="path to the hosts-file (default: ~/.config/yunohost-mcp/hosts.toml)"
+    )
+    list_parser.add_argument("--format", choices=("text", "json"), default="text")
+    list_parser.set_defaults(handler=hosts_list)

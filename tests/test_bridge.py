@@ -23,7 +23,12 @@ from mcp.client.streamable_http import streamable_http_client
 from yunohost_mcp import server as server_module
 from yunohost_mcp.auth.signing import ClientIdentity
 from yunohost_mcp import bridge as bridge_module
-from yunohost_mcp.bridge import Nip98BridgeAuth, RemoteSession, _build_local_server
+from yunohost_mcp.bridge import (
+    Nip98BridgeAuth,
+    RemoteSession,
+    _build_local_server,
+    _build_multi_host_local_server,
+)
 
 
 class _LiveServer:
@@ -244,6 +249,207 @@ async def test_remote_session_retries_after_a_failed_connection(monkeypatch):
         assert attempts == 2
 
         await remote.close()
+
+
+def _seed_identities(entries: list[tuple[str, str, list[str]]]) -> None:
+    """Like _seed_identity, but writes several identities into one file at
+    once - both `_LiveServer` instances in a multi-host test share the same
+    global `server_module.settings` identity store, so each host's identity
+    must coexist in it rather than overwrite the other's."""
+    identity_path = server_module.settings.identity_file_path()
+    identity_path.parent.mkdir(parents=True, exist_ok=True)
+    blocks = []
+    for npub, name, roles in entries:
+        roles_toml = ", ".join(f'"{r}"' for r in roles)
+        blocks.append(f'[identity."{npub}"]\nname = "{name}"\nroles = [{roles_toml}]\n')
+    identity_path.write_text("\n".join(blocks))
+
+
+@pytest.mark.anyio
+async def test_multi_host_bridge_merges_tools_and_routes_calls_by_host():
+    identity_a = ClientIdentity.from_key_string("a" * 64)
+    identity_b = ClientIdentity.from_key_string("d" * 64)
+    _seed_identities(
+        [
+            (identity_a.npub, "host a", ["administrator"]),
+            (identity_b.npub, "host b", ["administrator"]),
+        ]
+    )
+    try:
+        async with _LiveServer() as live_a, _LiveServer() as live_b:
+            async with anyio.create_task_group() as task_group:
+                async with httpx2.AsyncClient(auth=Nip98BridgeAuth(identity_a)) as http_a, httpx2.AsyncClient(
+                    auth=Nip98BridgeAuth(identity_b)
+                ) as http_b:
+                    session_a = RemoteSession(live_a.url, http_a, task_group)
+                    session_b = RemoteSession(live_b.url, http_b, task_group)
+                    local = _build_multi_host_local_server({"a": session_a, "b": session_b}, name="multi-test")
+
+                    async with Client(local) as local_client:
+                        tools = await local_client.list_tools()
+                        by_name = {t.name: t for t in tools.tools}
+                        assert [t.name for t in tools.tools].count("whoami") == 1
+
+                        schema = by_name["whoami"].input_schema
+                        assert schema["properties"]["host"]["enum"] == ["a", "b"]
+                        assert "host" in schema["required"]
+
+                        result_a = await local_client.call_tool("whoami", {"host": "a"})
+                        assert result_a.is_error is not True
+                        assert result_a.structured_content["pubkey"] == identity_a.pubkey_hex
+
+                        result_b = await local_client.call_tool("whoami", {"host": "b"})
+                        assert result_b.is_error is not True
+                        assert result_b.structured_content["pubkey"] == identity_b.pubkey_hex
+
+                        missing_host = await local_client.call_tool("whoami", {})
+                        assert missing_host.is_error is True
+
+                        bad_host = await local_client.call_tool("whoami", {"host": "c"})
+                        assert bad_host.is_error is True
+
+                    await session_a.close()
+                    await session_b.close()
+    finally:
+        server_module.settings.identity_file_path().unlink(missing_ok=True)
+
+
+@pytest.mark.anyio
+async def test_multi_host_bridge_prefixes_resource_uris_by_host_and_round_trips_reads():
+    identity_a = ClientIdentity.from_key_string("a" * 64)
+    identity_b = ClientIdentity.from_key_string("d" * 64)
+    _seed_identities(
+        [
+            (identity_a.npub, "host a", ["administrator"]),
+            (identity_b.npub, "host b", ["administrator"]),
+        ]
+    )
+    try:
+        async with _LiveServer() as live_a, _LiveServer() as live_b:
+            async with anyio.create_task_group() as task_group:
+                async with httpx2.AsyncClient(auth=Nip98BridgeAuth(identity_a)) as http_a, httpx2.AsyncClient(
+                    auth=Nip98BridgeAuth(identity_b)
+                ) as http_b:
+                    session_a = RemoteSession(live_a.url, http_a, task_group)
+                    session_b = RemoteSession(live_b.url, http_b, task_group)
+                    local = _build_multi_host_local_server({"a": session_a, "b": session_b}, name="multi-test")
+
+                    async with Client(local) as local_client:
+                        resources = await local_client.list_resources()
+                        uris = {str(r.uri) for r in resources.resources}
+                        assert "yunohost://a.server" in uris
+                        assert "yunohost://b.server" in uris
+
+                        read = await local_client.read_resource("yunohost://a.server")
+                        assert read.contents
+
+                    await session_a.close()
+                    await session_b.close()
+    finally:
+        server_module.settings.identity_file_path().unlink(missing_ok=True)
+
+
+@pytest.mark.anyio
+async def test_multi_host_bridge_still_lists_other_hosts_tools_when_one_is_down(monkeypatch):
+    identity_a = ClientIdentity.from_key_string("a" * 64)
+    _seed_identity(identity_a.npub, name="host a", roles=["administrator"])
+
+    real_streamable_http_client = bridge_module.streamable_http_client
+
+    def flaky_streamable_http_client(url, *args, **kwargs):
+        if url == "https://offline.example/mcp":
+            raise OSError("connection refused")
+        return real_streamable_http_client(url, *args, **kwargs)
+
+    monkeypatch.setattr(bridge_module, "streamable_http_client", flaky_streamable_http_client)
+
+    try:
+        async with _LiveServer() as live_a:
+            async with anyio.create_task_group() as task_group:
+                async with httpx2.AsyncClient(auth=Nip98BridgeAuth(identity_a)) as http_a:
+                    session_a = RemoteSession(live_a.url, http_a, task_group)
+                    session_down = RemoteSession("https://offline.example/mcp", http_a, task_group)
+                    local = _build_multi_host_local_server(
+                        {"a": session_a, "down": session_down}, name="multi-test"
+                    )
+
+                    async with Client(local) as local_client:
+                        tools = await local_client.list_tools()
+                        names = {t.name for t in tools.tools}
+                        assert "whoami" in names
+
+                        # "down"'s tools never made it into the merged list, so it's
+                        # simply not a valid `host` value for any tool - not a crash.
+                        result = await local_client.call_tool("whoami", {"host": "down"})
+                        assert result.is_error is True
+
+                    await session_a.close()
+                    await session_down.close()
+    finally:
+        server_module.settings.identity_file_path().unlink(missing_ok=True)
+
+
+@pytest.mark.anyio
+async def test_multi_host_bridge_notifies_client_when_a_host_recovers(monkeypatch):
+    identity_a = ClientIdentity.from_key_string("a" * 64)
+    identity_b = ClientIdentity.from_key_string("d" * 64)
+    _seed_identities(
+        [
+            (identity_a.npub, "host a", ["administrator"]),
+            (identity_b.npub, "host b", ["administrator"]),
+        ]
+    )
+
+    monkeypatch.setattr(bridge_module, "TOOL_POLL_INTERVAL_SECONDS", 0.05)
+
+    notified: list[bool] = []
+
+    async def fake_send_tool_list_changed(self) -> None:
+        notified.append(True)
+
+    monkeypatch.setattr("mcp.server.session.ServerSession.send_tool_list_changed", fake_send_tool_list_changed)
+
+    try:
+        async with _LiveServer() as live_a, _LiveServer() as live_b:
+            host_b_reachable = [False]
+            real_streamable_http_client = bridge_module.streamable_http_client
+
+            def flaky_streamable_http_client(url, *args, **kwargs):
+                if url == live_b.url and not host_b_reachable[0]:
+                    raise OSError("connection refused")
+                return real_streamable_http_client(url, *args, **kwargs)
+
+            monkeypatch.setattr(bridge_module, "streamable_http_client", flaky_streamable_http_client)
+
+            async with anyio.create_task_group() as task_group:
+                async with httpx2.AsyncClient(auth=Nip98BridgeAuth(identity_a)) as http_a, httpx2.AsyncClient(
+                    auth=Nip98BridgeAuth(identity_b)
+                ) as http_b:
+                    session_a = RemoteSession(live_a.url, http_a, task_group)
+                    session_b = RemoteSession(live_b.url, http_b, task_group)
+                    session_b.RETRY_DELAY_SECONDS = 0
+                    local = _build_multi_host_local_server({"a": session_a, "b": session_b}, name="multi-test")
+                    task_group.start_soon(local._poll_for_host_changes)  # noqa: SLF001 - exercising the stashed poller
+
+                    async with Client(local) as local_client:
+                        baseline = await local_client.list_tools()
+                        by_name = {t.name: t for t in baseline.tools}
+                        assert by_name["whoami"].input_schema["properties"]["host"]["enum"] == ["a"]
+
+                        host_b_reachable[0] = True
+                        with anyio.fail_after(5):
+                            while not notified:
+                                await anyio.sleep(0.05)
+
+                        recovered = await local_client.list_tools()
+                        by_name = {t.name: t for t in recovered.tools}
+                        assert by_name["whoami"].input_schema["properties"]["host"]["enum"] == ["a", "b"]
+
+                    await session_a.close()
+                    await session_b.close()
+                task_group.cancel_scope.cancel()
+    finally:
+        server_module.settings.identity_file_path().unlink(missing_ok=True)
 
 
 @pytest.fixture

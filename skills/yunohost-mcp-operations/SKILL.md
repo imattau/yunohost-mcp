@@ -13,6 +13,14 @@ YunoHost MCP tools are deferred like other MCP tools in this harness — they do
 
 Do not assume this skill's tool inventory is newer than the connected server — the live schema wins on any conflict. If a tool named here doesn't resolve, search for its likely rename before giving up on the workflow.
 
+## Bridge connection health
+
+These tools ride through a `yunohost-mcp-connect` bridge (an entry in this harness's own MCP client config), not a direct connection to the server — its health is worth checking in its own right, separately from the YunoHost server it forwards to:
+
+- More than one MCP-server entry that's clearly the same YunoHost bridge (same `yunohost-mcp-connect` binary/`uvx` invocation, differing only in `--remote-url`/`--key-file` or their env-var equivalents) is a split single-host leftover, not an intentional multi-server setup — multi-host mode merges these into one bridge with an added `host` argument per tool. If you notice this, or the user asks about redundant/duplicated tool listings, offer `yunohost-mcp-connect migrate --client <client> --print-only` to show the proposed consolidation before applying it for real.
+- A tool missing from a host's `host` enum, or any call to it returning unauthenticated/forbidden/unavailable, is not automatically a bridge or code bug. The most common real cause is the connecting identity's npub not being enrolled in that host's `identity.toml` (an app reinstall resetting it, or an `identity_backend`/YunoHost-group change, are both real incidents this has happened from before) — run `yunohost-mcp-connect doctor --server <url> --key-file <key>` for a clear status (e.g. `identity_not_enrolled`) before assuming otherwise.
+- To add another host to an existing multi-host bridge, use `yunohost-mcp-connect hosts add --hosts-file <path> --name <name> --server <url>` (it generates a key when none is given) rather than hand-editing the hosts-file's TOML; `yunohost-mcp-connect hosts list` shows what is currently configured.
+
 ## Runtime preflight
 
 Before a meaningful operation:
