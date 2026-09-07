@@ -296,8 +296,18 @@ def _catalog_verify(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     return adapter.catalog_verify(value)
 
 
+def _validate_ci_result_arguments(arguments: dict[str, Any]) -> None:
+    ci_result = arguments.get("ci_result")
+    if ci_result is not None and not isinstance(ci_result, dict):
+        raise ValueError("ci_result must be an object")
+    for key in ("ci_provider", "ci_ref"):
+        value = arguments.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > 512):
+            raise ValueError(f"{key} must be a bounded string")
+
+
 def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"source", "ref"}:
+    if set(arguments) - {"source", "ref", "ci_result", "ci_provider", "ci_ref"}:
         raise ValueError("unknown catalog publish-plan argument")
     source = arguments.get("source")
     ref = arguments.get("ref")
@@ -305,11 +315,18 @@ def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -
         raise ValueError("source must be a bounded non-empty string")
     if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
         raise ValueError("ref must be a bounded string")
-    return adapter.catalog_publish_plan(source, ref=ref)
+    _validate_ci_result_arguments(arguments)
+    return adapter.catalog_publish_plan(
+        source,
+        ref=ref,
+        ci_result=arguments.get("ci_result"),
+        ci_provider=arguments.get("ci_provider"),
+        ci_ref=arguments.get("ci_ref"),
+    )
 
 
 def _catalog_publish(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"source", "ref", "confirmation_id", "plan_id"}
+    allowed = {"source", "ref", "confirmation_id", "plan_id", "ci_result", "ci_provider", "ci_ref"}
     if set(arguments) - allowed:
         raise ValueError("unknown catalog publish argument")
     source = arguments.get("source")
@@ -322,11 +339,15 @@ def _catalog_publish(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
         value = arguments.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > 128):
             raise ValueError(f"{key} must be a string")
+    _validate_ci_result_arguments(arguments)
     return adapter.catalog_publish(
         source=source,
         ref=ref,
         confirmation_id=arguments.get("confirmation_id"),
         plan_id=arguments.get("plan_id"),
+        ci_result=arguments.get("ci_result"),
+        ci_provider=arguments.get("ci_provider"),
+        ci_ref=arguments.get("ci_ref"),
     )
 
 

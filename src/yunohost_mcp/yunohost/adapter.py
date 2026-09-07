@@ -22,6 +22,7 @@ live YunoHost.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import ipaddress
 import json
@@ -2983,9 +2984,27 @@ class YunohostAdapter:
         package = self.package_inspect(source)
         return {"fake": False, "source": str(Path(source).resolve()), **package}
 
-    def catalog_publish_plan(self, source: str, ref: str | None = None) -> dict[str, Any]:
-        """Build and sign a declaration locally, without contacting relays."""
-        brokered = self._broker_call("catalog.publish_plan", {"source": source, "ref": ref})
+    def catalog_publish_plan(
+        self,
+        source: str,
+        ref: str | None = None,
+        ci_result: dict[str, Any] | None = None,
+        ci_provider: str | None = None,
+        ci_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Build and sign a declaration locally, without contacting relays.
+
+        ci_result is optional: a ci-result.json body (internal/ciresult
+        schema in nostr-yunohost) for this exact revision. When given, the
+        underlying `nostr-ynh publish --ci-result` also builds and signs a
+        kind-30080 CI attestation alongside the declaration, with the same
+        publisher key - self-attestation, not a second verifier identity.
+        See nostr-yunohost's docs/attestations.md.
+        """
+        brokered = self._broker_call(
+            "catalog.publish_plan",
+            {"source": source, "ref": ref, "ci_result": ci_result, "ci_provider": ci_provider, "ci_ref": ci_ref},
+        )
         if brokered is not None:
             return brokered
         self._validate_catalog_source(source, ref)
@@ -2998,7 +3017,7 @@ class YunohostAdapter:
         else:
             args += ["--repo", source]
         if self.settings.fake_yunohost:
-            return {
+            plan: dict[str, Any] = {
                 "fake": True,
                 "source": source,
                 "ref": ref,
@@ -3010,8 +3029,15 @@ class YunohostAdapter:
                 "content_hash": "sha256:" + "1" * 64,
                 "naddr": "naddr1qqxyz",
                 "event": {"id": "0" * 64, "kind": 30078},
+                "ci_result": ci_result,
+                "ci_provider": ci_provider,
+                "ci_ref": ci_ref,
             }
-        result = self._run_catalog_json(args, requires_key=True)
+            if ci_result is not None:
+                plan["attestation"] = {"event": {"id": "1" * 64, "kind": 30080}, "naddr": "naddr1qqxyz-attest", "published": False}
+            return plan
+        with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
+            result = self._run_catalog_json(args, requires_key=True)
         event = result.get("event", {})
         tags = {tag[0]: tag[1] for tag in event.get("tags", []) if len(tag) >= 2}
         return {
@@ -3024,16 +3050,61 @@ class YunohostAdapter:
             "commit": tags.get("commit"),
             "manifest_hash": tags.get("manifest"),
             "content_hash": tags.get("content"),
+            # Echoed back (not just consumed) so a subsequent catalog_publish
+            # call for this plan_id can re-derive them from the stored plan,
+            # the same way it already does for source/ref.
+            "ci_result": ci_result,
+            "ci_provider": ci_provider,
+            "ci_ref": ci_ref,
             **result,
         }
 
+    @contextlib.contextmanager
+    def _ci_result_arg(
+        self, args: list[str], ci_result: dict[str, Any] | None, ci_provider: str | None, ci_ref: str | None
+    ):
+        """Append --ci-result (writing ci_result to a cleaned-up tempfile,
+        the same pattern catalog_verify uses for an inline event) plus
+        --ci-provider/--ci-ref to args, only when ci_result is given."""
+        if ci_result is None:
+            yield
+            return
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(ci_result, handle)
+            ci_result_path = handle.name
+        try:
+            args += ["--ci-result", ci_result_path]
+            if ci_provider:
+                args += ["--ci-provider", ci_provider]
+            if ci_ref:
+                args += ["--ci-ref", ci_ref]
+            yield
+        finally:
+            Path(ci_result_path).unlink(missing_ok=True)
+
     def catalog_publish(
-        self, source: str, ref: str | None = None, confirmation_id: str | None = None, plan_id: str | None = None
+        self,
+        source: str,
+        ref: str | None = None,
+        confirmation_id: str | None = None,
+        plan_id: str | None = None,
+        ci_result: dict[str, Any] | None = None,
+        ci_provider: str | None = None,
+        ci_ref: str | None = None,
     ) -> dict[str, Any]:
-        """Publish a previously planned package declaration to configured relays."""
+        """Publish a previously planned package declaration to configured
+        relays. ci_result mirrors catalog_publish_plan's - see there."""
         brokered = self._broker_call(
             "catalog.publish",
-            {"source": source, "ref": ref, "confirmation_id": confirmation_id, "plan_id": plan_id},
+            {
+                "source": source,
+                "ref": ref,
+                "confirmation_id": confirmation_id,
+                "plan_id": plan_id,
+                "ci_result": ci_result,
+                "ci_provider": ci_provider,
+                "ci_ref": ci_ref,
+            },
         )
         if brokered is not None:
             return brokered
@@ -3047,7 +3118,7 @@ class YunohostAdapter:
         else:
             args += ["--repo", source]
         if self.settings.fake_yunohost:
-            return {
+            result: dict[str, Any] = {
                 "fake": True,
                 "source": source,
                 "ref": ref,
@@ -3057,7 +3128,16 @@ class YunohostAdapter:
                 "event": {"id": "0" * 64, "kind": 30078},
                 "verification": {"valid": True, "mode": "local-event"},
             }
-        result = self._run_catalog_json(args, requires_key=True)
+            if ci_result is not None:
+                result["attestation"] = {
+                    "event": {"id": "1" * 64, "kind": 30080},
+                    "naddr": "naddr1qqxyz-attest",
+                    "published": True,
+                    "relays": [{"relay": r, "published": True} for r in relays],
+                }
+            return result
+        with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
+            result = self._run_catalog_json(args, requires_key=True)
         event = result.get("event")
         if result.get("published") and isinstance(event, dict):
             result["verification"] = self.catalog_verify(json.dumps(event))

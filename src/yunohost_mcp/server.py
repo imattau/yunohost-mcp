@@ -2724,13 +2724,30 @@ def catalog_package_inspect(source: str, ref: str | None = None) -> dict[str, An
 @redact_response
 @translate_known_errors
 @require_scope(Scope.CATALOG_INSPECT)
-def catalog_publish_plan(source: str, ref: str | None = None) -> dict[str, Any]:
-    """Build a signed catalogue declaration without contacting any relay."""
-    plan = adapter.catalog_publish_plan(source, ref=ref)
+def catalog_publish_plan(
+    source: str,
+    ref: str | None = None,
+    ci_result: dict[str, Any] | None = None,
+    ci_provider: str | None = None,
+    ci_ref: str | None = None,
+) -> dict[str, Any]:
+    """Build a signed catalogue declaration without contacting any relay.
+
+    ci_result is optional: a ci-result.json body (internal/ciresult schema
+    in nostr-yunohost) for this exact revision - e.g. the artifact
+    static-security.yml produces. When given, the plan also builds a
+    kind-30080 CI attestation for the same revision, signed by the same
+    publisher key - self-attestation, folded into the normal publish flow
+    rather than a separate tool or a second verifier identity. The plan
+    refuses to build (and catalog_publish will refuse to publish) if
+    ci_result's app_id/repository/commit/manifest/content don't match the
+    declaration being built from source/ref.
+    """
+    plan = adapter.catalog_publish_plan(source, ref=ref, ci_result=ci_result, ci_provider=ci_provider, ci_ref=ci_ref)
     ticket = catalog_plan_store.create(
         pubkey=require_current_request().pubkey,
         tool="catalog.publish",
-        arguments={"source": source, "ref": ref},
+        arguments={"source": source, "ref": ref, "ci_result": ci_result, "ci_provider": ci_provider, "ci_ref": ci_ref},
         plan=plan,
     )
     return {**plan, "plan_id": ticket.confirmation_id, "expires_at": ticket.expires_at}
@@ -2775,11 +2792,22 @@ def catalog_list() -> dict[str, Any]:
     },
 )
 def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
-    """Publish an existing catalogue plan after administrator confirmation."""
+    """Publish an existing catalogue plan after administrator confirmation.
+
+    If the plan was built with ci_result (see catalog_publish_plan), the
+    same CI attestation is published alongside the declaration here, signed
+    by the same publisher key - nothing further to pass at this step.
+    """
     request = require_current_request()
     try:
         pending = catalog_plan_store.peek(plan_id)
-        arguments = {"source": pending.plan.get("source"), "ref": pending.plan.get("ref")}
+        arguments = {
+            "source": pending.plan.get("source"),
+            "ref": pending.plan.get("ref"),
+            "ci_result": pending.plan.get("ci_result"),
+            "ci_provider": pending.plan.get("ci_provider"),
+            "ci_ref": pending.plan.get("ci_ref"),
+        }
         plan_ticket = catalog_plan_store.consume(
             plan_id,
             pubkey=request.pubkey,
@@ -2793,6 +2821,9 @@ def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[st
         ref=plan_ticket.plan.get("ref"),
         confirmation_id=confirmation_id,
         plan_id=plan_id,
+        ci_result=plan_ticket.plan.get("ci_result"),
+        ci_provider=plan_ticket.plan.get("ci_provider"),
+        ci_ref=plan_ticket.plan.get("ci_ref"),
     )
     if settings.armada_enabled and settings.armada_auto_announce and result.get("published") is True:
         try:

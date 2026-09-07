@@ -418,3 +418,74 @@ async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Pat
             assert published.structured_content["announcement"]["status"] == "published"
     finally:
         set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_publish_with_ci_result_attests_alongside_the_declaration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The plan->confirm->publish round trip must carry ci_result through
+    correctly - this is what actually exercises the confirmation store's
+    arguments_hash check (create-time and consume-time arguments must be
+    byte-for-byte the same JSON, including the nested ci_result object) -
+    not just that individual functions accept the parameter."""
+    owner = AuthenticatedRequest(
+        pubkey="catalog-owner-2", event_id="p" * 64, event_created_at=0,
+        identity=IdentityRecord(pubkey="catalog-owner-2", name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
+    )
+    monkeypatch.setattr("yunohost_mcp.server.get_owner_pubkey", lambda: owner.pubkey)
+    ci_result = {
+        "schema": 1,
+        "app_id": "example",
+        "repository": "https://github.com/example/app_ynh",
+        "commit": "a" * 40,
+        "manifest": "sha256:" + "0" * 64,
+        "content": "sha256:" + "1" * 64,
+        "checks": {"yunohost_lint": "pass"},
+        "result": "pass",
+    }
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            planned = await client.call_tool(
+                "catalog_publish_plan",
+                {"source": str(tmp_path), "ci_result": ci_result, "ci_provider": "github-actions", "ci_ref": "https://example/run/1"},
+            )
+            assert planned.is_error is not True
+            plan_id = planned.structured_content["plan_id"]
+            assert planned.structured_content["attestation"]["event"]["kind"] == 30080
+
+            pending = await client.call_tool("catalog_publish", {"plan_id": plan_id})
+            assert pending.structured_content["confirmation_required"] is True
+
+            set_current_request(owner)
+            approved = await client.call_tool("approve_operation", {"confirmation_id": pending.structured_content["confirmation_id"]})
+            assert approved.is_error is not True
+            set_current_request(LOCAL_STDIO_REQUEST)
+
+            published = await client.call_tool(
+                "catalog_publish",
+                {"plan_id": plan_id, "confirmation_id": pending.structured_content["confirmation_id"]},
+            )
+            assert published.is_error is not True, published.structured_content
+            assert published.structured_content["published"] is True
+            assert published.structured_content["attestation"]["published"] is True
+            assert published.structured_content["attestation"]["event"]["kind"] == 30080
+    finally:
+        set_current_request(None)
+
+
+def test_catalog_publish_plan_echoes_ci_result_for_the_later_publish_call(tmp_path: Path):
+    """catalog_publish reads ci_result/ci_provider/ci_ref back out of the
+    stored plan (not fresh caller input) - this is the wiring that must
+    round-trip, or a real publish would silently drop the attestation."""
+    adapter = YunohostAdapter(Settings(fake_yunohost=True, catalog_relays="wss://relay.test"))
+    ci_result = {"schema": 1, "app_id": "example"}
+    plan = adapter.catalog_publish_plan(
+        str(tmp_path),
+        ci_result=ci_result,
+        ci_provider="github-actions",
+        ci_ref="https://example/run/2",
+    )
+    assert plan["ci_result"] == ci_result
+    assert plan["ci_provider"] == "github-actions"
+    assert plan["ci_ref"] == "https://example/run/2"
+    assert plan["attestation"]["event"]["kind"] == 30080
