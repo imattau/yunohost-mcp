@@ -23,6 +23,16 @@ class RelayPublishResult:
     relays: tuple[str, ...]
 
 
+def _event_id(event: Any) -> str | None:
+    """Return an event id from either an SDK event or a test-shaped mapping."""
+
+    if isinstance(event, dict):
+        value = event.get("id")
+    else:
+        value = getattr(event, "id", None)
+    return value if isinstance(value, str) and value else None
+
+
 async def publish_signed_event(
     event: NostrEvent,
     relays: list[str],
@@ -85,19 +95,53 @@ async def fetch_control_events(
         author = PublicKey.parse(control_pubkey_hex)
     except Exception as exc:  # noqa: BLE001 - normalize SDK-specific errors
         raise ValueError("control public key must be valid lowercase hex") from exc
-    client = client_factory()
+    # nostr-sdk applies max_events to the aggregate result set, but a single
+    # multi-relay fetch can still receive up to max_events from each relay.
+    # That makes the SDK raise "too many fetched events" before callers can
+    # deduplicate the control stream. Fetch each relay independently and cap
+    # the merged result locally instead.
+    events: list[Any] = []
+    seen_ids: set[str] = set()
+    failures = 0
+    request = ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)])
+
     try:
         with anyio.fail_after(timeout_seconds):
             for relay in relay_values:
-                await client.add_relay(RelayUrl.parse(relay))
-            await client.connect()
-            return await client.fetch_events(
-                ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)]),
-                timeout=timedelta(seconds=timeout_seconds),
-                max_events=max_events,
-            )
-    finally:
-        await client.shutdown()
+                client = client_factory()
+                try:
+                    await client.add_relay(RelayUrl.parse(relay))
+                    await client.connect()
+                    try:
+                        fetched = await client.fetch_events(
+                            request,
+                            timeout=timedelta(seconds=timeout_seconds),
+                            max_events=max_events,
+                        )
+                    except Exception:  # noqa: BLE001 - normalize SDK relay errors below
+                        failures += 1
+                        continue
+                    for event in fetched:
+                        event_id = _event_id(event)
+                        if event_id is not None:
+                            if event_id in seen_ids:
+                                continue
+                            seen_ids.add(event_id)
+                        events.append(event)
+                        if len(events) >= max_events:
+                            return events[:max_events]
+                except Exception:  # noqa: BLE001 - one bad relay must not block others
+                    failures += 1
+                finally:
+                    await client.shutdown()
+    except TimeoutError as exc:
+        raise ValueError("timed out fetching Concord control events") from exc
+
+    if events:
+        return events
+    if failures:
+        raise ValueError("unable to fetch Concord control events from configured relays")
+    return events
 
 
 async def fetch_invite_events(
