@@ -21,6 +21,7 @@ from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from yunohost_mcp import server as server_module
+from yunohost_mcp.auth.nostr import NostrEvent, verify_event
 from yunohost_mcp.auth.signing import ClientIdentity
 from yunohost_mcp import bridge as bridge_module
 from yunohost_mcp.bridge import (
@@ -450,6 +451,84 @@ async def test_multi_host_bridge_notifies_client_when_a_host_recovers(monkeypatc
                 task_group.cancel_scope.cancel()
     finally:
         server_module.settings.identity_file_path().unlink(missing_ok=True)
+
+
+@pytest.mark.anyio
+async def test_bridge_sign_nostr_event_signs_locally_without_touching_remote():
+    """The whole point of sign_nostr_event: it must work even with the
+    remote completely unreachable, since it never talks to it - the key
+    never leaves this process either way."""
+    identity = ClientIdentity.from_key_string("c" * 64)
+    async with anyio.create_task_group() as task_group:
+        remote = RemoteSession("https://offline.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        local = _build_local_server(remote, name="signing-bridge", identity=identity)
+
+        async with Client(local) as local_client:
+            tools = await local_client.list_tools()
+            assert "sign_nostr_event" in {t.name for t in tools.tools}
+
+            result = await local_client.call_tool(
+                "sign_nostr_event",
+                {"kind": 20013, "tags": [], "content": "hello", "created_at": 1_700_000_000},
+            )
+            assert result.is_error is not True, result.content
+            signed = result.structured_content
+            assert signed["pubkey"] == identity.pubkey_hex
+            assert signed["kind"] == 20013
+            verify_event(NostrEvent(**signed))
+
+        await remote.close()
+
+
+@pytest.mark.anyio
+async def test_bridge_sign_nostr_event_rejects_a_disallowed_kind():
+    identity = ClientIdentity.from_key_string("c" * 64)
+    async with anyio.create_task_group() as task_group:
+        remote = RemoteSession("https://offline.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        local = _build_local_server(remote, name="signing-bridge", identity=identity)
+
+        async with Client(local) as local_client:
+            result = await local_client.call_tool(
+                "sign_nostr_event",
+                {"kind": 1, "tags": [], "content": "hello", "created_at": 1_700_000_000},
+            )
+            assert result.is_error is True
+
+        await remote.close()
+
+
+@pytest.mark.anyio
+async def test_multi_host_bridge_sign_nostr_event_signs_with_the_named_hosts_own_key():
+    identity_a = ClientIdentity.from_key_string("a" * 64)
+    identity_b = ClientIdentity.from_key_string("b" * 64)
+    async with anyio.create_task_group() as task_group:
+        session_a = RemoteSession("https://a.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        session_b = RemoteSession("https://b.example/mcp", http_client=None, task_group=task_group)  # type: ignore[arg-type]
+        local = _build_multi_host_local_server(
+            {"a": session_a, "b": session_b},
+            name="multi-signing-bridge",
+            identities={"a": identity_a, "b": identity_b},
+        )
+
+        async with Client(local) as local_client:
+            tools = await local_client.list_tools()
+            assert "sign_nostr_event" in {t.name for t in tools.tools}
+
+            result = await local_client.call_tool(
+                "sign_nostr_event",
+                {"kind": 20013, "tags": [], "content": "hi", "created_at": 1_700_000_000, "host": "b"},
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content["pubkey"] == identity_b.pubkey_hex
+
+            missing_host = await local_client.call_tool(
+                "sign_nostr_event",
+                {"kind": 20013, "tags": [], "content": "hi", "created_at": 1_700_000_000},
+            )
+            assert missing_host.is_error is True
+
+        await session_a.close()
+        await session_b.close()
 
 
 @pytest.fixture

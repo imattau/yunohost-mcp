@@ -223,6 +223,11 @@ class Settings(BaseSettings):
         """Durable idempotency store for successful Armada announcements."""
         return self.armada_delivery_store_file or self.config_dir / "armada-deliveries.sqlite3"
 
+    def armada_pending_signature_path(self) -> Path:
+        """Short-lived holding area for a split (caller-signed) Concord
+        envelope between its *_draft and *_submit calls."""
+        return self.config_dir / "armada-pending-signatures.sqlite3"
+
     def policy_file_path(self) -> Path:
         """Safeguard overrides (Phase 6). A missing file means the built-in
         defaults in policy/rules.py apply unmodified - a safety floor, not

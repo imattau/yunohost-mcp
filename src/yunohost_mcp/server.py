@@ -134,6 +134,7 @@ import hashlib
 import inspect
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -143,6 +144,7 @@ from yunohost_mcp.audit.decorator import audited_write
 from yunohost_mcp.audit.log import AuditLog
 from yunohost_mcp.auth.identity import (
     LOCAL_STDIO_REQUEST,
+    AuthenticatedRequest,
     get_current_request,
     require_current_request,
     set_current_request,
@@ -154,17 +156,28 @@ from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.revocation import RevocationStore
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.config import load_settings
-from yunohost_mcp.concord_announcement_publish import publish_package_announcement
-from yunohost_mcp.concord_announcements import build_announcement_draft
+from yunohost_mcp.concord_announcement_publish import (
+    AnnouncementPublishResult,
+    PreparedAnnouncementEnvelope,
+    finish_announcement_envelope,
+    prepare_announcement_envelope,
+    publish_package_announcement,
+)
+from yunohost_mcp.concord_announcements import AnnouncementDraft, build_announcement_draft
 from yunohost_mcp.concord_bundle import ConcordBundleError
 from yunohost_mcp.concord_control_crypto import ControlPlaneError
 from yunohost_mcp.concord_control_reader import load_control_rumors
 from yunohost_mcp.concord_credentials import CredentialFileError, load_bot_private_key, read_credential_file
+from yunohost_mcp.concord_envelope import ConcordEnvelopeError, SealTemplate
 from yunohost_mcp.concord_invite_event import ConcordInviteEventError
 from yunohost_mcp.concord_invites import ConcordInviteError, load_invite_bundle
-from yunohost_mcp.concord_join import publish_join
+from yunohost_mcp.concord_join import publish_join, verify_join_publication
+from yunohost_mcp.concord_membership import build_join_rumor_and_seal_template, finish_join_envelope
 from yunohost_mcp.concord_delivery import ConcordDeliveryStore
-from yunohost_mcp.concord_transport import fetch_control_events, fetch_invite_events, publish_signed_event
+from yunohost_mcp.concord_keys import GroupKeyMaterial
+from yunohost_mcp.concord_pending_signature import PendingSignatureError, PendingSignatureStore
+from yunohost_mcp.concord_transport import fetch_control_events, fetch_guestbook_events, fetch_invite_events, publish_signed_event
+from yunohost_mcp.auth.nostr import NostrEvent, NostrEventError, UnsignedNostrEvent
 from yunohost_mcp.notify import notify_owner_best_effort, parse_relay_list
 from yunohost_mcp.push_approval import request_owner_signature_in_background
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, ConfirmationTicket, SQLiteConfirmationStore
@@ -231,6 +244,18 @@ def _armada_delivery_store() -> ConcordDeliveryStore:
     if armada_delivery_store is None or armada_delivery_store.path != settings.armada_delivery_path():
         armada_delivery_store = ConcordDeliveryStore(settings.armada_delivery_path())
     return armada_delivery_store
+
+
+armada_pending_signatures: PendingSignatureStore | None = None
+
+
+def _armada_pending_signatures() -> PendingSignatureStore:
+    global armada_pending_signatures
+    if armada_pending_signatures is None or armada_pending_signatures.path != str(settings.armada_pending_signature_path()):
+        armada_pending_signatures = PendingSignatureStore(
+            settings.armada_pending_signature_path(), ttl_seconds=settings.confirmation_ttl_seconds
+        )
+    return armada_pending_signatures
 
 
 def _run_async_blocking(factory):
@@ -2839,6 +2864,20 @@ def catalog_publish(plan_id: str, confirmation_id: str | None = None) -> dict[st
     return result
 
 
+def _armada_key_path_for(request: AuthenticatedRequest) -> Path:
+    """Which Armada credential file signs this caller's announcements.
+
+    An identity.toml entry may set armada_key_path to announce under its
+    own Concord identity instead of the shared settings.armada_bot_key_path.
+    That identity must independently hold a Guestbook Join (armada_join)
+    for the community - having a key here implies nothing about community
+    membership or channel access, both checked later during publish.
+    """
+    if request.identity is not None and request.identity.armada_key_path is not None:
+        return request.identity.armada_key_path
+    return settings.armada_bot_key_path
+
+
 def _catalog_announce_impl(source: str, catalogue_publication: str) -> dict[str, Any]:
     """Optionally announce a successful catalogue publication in Armada.
 
@@ -2846,11 +2885,13 @@ def _catalog_announce_impl(source: str, catalogue_publication: str) -> dict[str,
     ``catalog_publish``. This is deliberately a separate, best-effort call:
     catalogue publication remains authoritative, and missing Armada
     configuration or a missing channel returns a warning status instead of
-    changing the catalogue result. The bot must already be a community member
-    with access to the matching channel.
+    changing the catalogue result. The signing identity (the caller's own
+    armada_key_path, or the shared bot key as a fallback) must already be a
+    community member with access to the matching channel.
     """
     if not settings.armada_enabled:
         return {"status": "disabled", "warning": "Armada announcements are disabled"}
+    key_path = _armada_key_path_for(require_current_request())
     try:
         publication = json.loads(catalogue_publication)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -2869,7 +2910,7 @@ def _catalog_announce_impl(source: str, catalogue_publication: str) -> dict[str,
         }
 
     try:
-        bot_key = load_bot_private_key(settings.armada_bot_key_path)
+        bot_key = load_bot_private_key(key_path)
         invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
     except CredentialFileError as exc:
         return {"status": "unavailable", "warning": str(exc)}
@@ -2964,16 +3005,20 @@ def catalog_announcement_status(idempotency_key: str) -> dict[str, Any]:
 @require_scope(Scope.ARMADA_WRITE)
 @audited_write("communications.armada.join", lock=write_lock, audit_log=audit_log)
 def armada_join() -> dict[str, Any]:
-    """Explicitly accept the configured Armada invite for the bot.
+    """Explicitly accept the configured Armada invite for the caller's identity.
 
-    This publishes only the bot's self-signed Guestbook Join. It does not
-    grant roles, post an announcement, or imply that the bot holds private
-    channel keys not present in the invite bundle.
+    This publishes only that identity's self-signed Guestbook Join - the
+    caller's own armada_key_path if identity.toml sets one, otherwise the
+    shared bot key. It does not grant roles, post an announcement, or imply
+    that the signer holds private channel keys not present in the invite
+    bundle. An identity with its own armada_key_path must call this itself
+    before catalog_announce will find it already joined.
     """
     if not settings.armada_enabled:
         return {"status": "disabled", "warning": "Armada integration is disabled"}
+    key_path = _armada_key_path_for(require_current_request())
     try:
-        bot_key = load_bot_private_key(settings.armada_bot_key_path)
+        bot_key = load_bot_private_key(key_path)
         invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
     except CredentialFileError as exc:
         return {"status": "unavailable", "warning": str(exc)}
@@ -3010,6 +3055,287 @@ def armada_join() -> dict[str, Any]:
         return _run_async_blocking(run)
     except (ConcordBundleError, ConcordInviteError, ConcordInviteEventError, ValueError) as exc:
         return {"status": "unavailable", "warning": str(exc)}
+
+
+def _parse_signed_event(signed_event: str) -> NostrEvent:
+    try:
+        return NostrEvent.model_validate_json(signed_event)
+    except Exception as exc:  # noqa: BLE001 - normalize pydantic/JSON errors
+        raise ToolInputError("signed_event must be a JSON-encoded Nostr event") from exc
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.publish", lock=write_lock, audit_log=audit_log)
+def catalog_announce_draft(source: str, catalogue_publication: str) -> dict[str, Any]:
+    """Prepare a package announcement for the *caller* to sign and submit.
+
+    Unlike catalog_announce (which signs with a server-held bot key), this
+    authors the announcement as the calling identity's own pubkey. It needs
+    only the shared Armada community invite (already required for
+    catalog_announce/armada_join) - no bot key or armada_key_path for this
+    identity at all. The caller must already hold a Guestbook Join under
+    its own pubkey (see armada_join_draft/armada_join_submit) for the
+    result to be recognized by the community.
+
+    Returns an unsigned kind-20013 seal event for the caller to sign with
+    its own key (e.g. the same key it already signs NIP-98 requests with)
+    and a draft_id to pass to catalog_announce_submit along with the signed
+    result. The draft expires after a short TTL and can only be submitted
+    by the same identity that requested it.
+    """
+    request = require_current_request()
+    if not settings.armada_enabled:
+        return {"status": "disabled", "warning": "Armada announcements are disabled"}
+    try:
+        publication = json.loads(catalogue_publication)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ToolInputError("catalogue_publication must be a JSON object") from exc
+    if not isinstance(publication, dict):
+        raise ToolInputError("catalogue_publication must be a JSON object")
+    if publication.get("published") is not True:
+        raise ToolInputError("catalogue_publication must confirm a successful publication")
+    draft = build_announcement_draft(source, publication)
+    existing = _armada_delivery_store().get(draft.idempotency_key)
+    if existing is not None:
+        return {
+            "status": "already_published",
+            "draft": draft.__dict__,
+            "publication": {"event_id": existing.event_id},
+        }
+
+    try:
+        invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
+    except CredentialFileError as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+    async def run() -> dict[str, Any]:
+        async def invite_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_invite_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        async def control_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_control_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        bundle = await load_invite_bundle(invite_url, fetcher=invite_fetcher)
+        control_rumors = await load_control_rumors(bundle, fetcher=control_fetcher)
+        prepared = prepare_announcement_envelope(
+            source=source,
+            catalogue_publication=publication,
+            bundle=bundle,
+            control_rumors=control_rumors,
+            author_pubkey=request.pubkey,
+            created_at=int(time.time()),
+        )
+        if isinstance(prepared, AnnouncementPublishResult):
+            response: dict[str, Any] = {"status": prepared.status, "draft": prepared.draft.__dict__}
+            if prepared.reason:
+                response["warning"] = prepared.reason
+            return response
+        pending = _armada_pending_signatures().create(
+            pubkey=request.pubkey,
+            purpose="catalog_announce",
+            rumor=prepared.rumor.model_dump(),
+            seal_template=prepared.seal_template.__dict__,
+            stream_key={"secret_hex": prepared.stream_key.secret.hex(), "pubkey_hex": prepared.stream_key.pubkey_hex},
+            context={"draft": prepared.draft.__dict__, "relays": list(prepared.relays)},
+        )
+        return {
+            "status": "draft_ready",
+            "draft_id": pending.draft_id,
+            "unsigned_event": prepared.seal_template.__dict__,
+        }
+
+    try:
+        return _run_async_blocking(run)
+    except (ConcordBundleError, ConcordInviteError, ConcordInviteEventError, ControlPlaneError, ValueError) as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.publish", lock=write_lock, audit_log=audit_log)
+def catalog_announce_submit(draft_id: str, signed_event: str) -> dict[str, Any]:
+    """Finish and publish a package announcement drafted by catalog_announce_draft.
+
+    ``signed_event`` must be the JSON-encoded event returned by signing the
+    exact unsigned_event catalog_announce_draft handed out - any drift in
+    pubkey/kind/tags/content/created_at, an invalid signature, or a draft_id
+    issued to a different identity is rejected.
+    """
+    request = require_current_request()
+    signed_seal = _parse_signed_event(signed_event)
+    try:
+        pending = _armada_pending_signatures().consume(draft_id, pubkey=request.pubkey, purpose="catalog_announce")
+    except PendingSignatureError as exc:
+        raise ToolInputError(str(exc)) from exc
+
+    rumor = UnsignedNostrEvent(**pending.rumor)
+    seal_template = SealTemplate(**pending.seal_template)
+    stream_key = GroupKeyMaterial(
+        secret=bytes.fromhex(pending.stream_key["secret_hex"]), pubkey_hex=pending.stream_key["pubkey_hex"]
+    )
+    draft_dict = pending.context["draft"]
+    existing = _armada_delivery_store().get(draft_dict["idempotency_key"])
+    if existing is not None:
+        return {
+            "status": "already_published",
+            "draft": draft_dict,
+            "publication": {"event_id": existing.event_id},
+        }
+
+    prepared = PreparedAnnouncementEnvelope(
+        rumor=rumor,
+        seal_template=seal_template,
+        stream_key=stream_key,
+        draft=AnnouncementDraft(**draft_dict),
+        relays=tuple(pending.context["relays"]),
+    )
+
+    async def run() -> dict[str, Any]:
+        async def publisher(event, relays):
+            return await publish_signed_event(event, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        return await finish_announcement_envelope(prepared=prepared, signed_seal=signed_seal, publisher=publisher)
+
+    try:
+        result = _run_async_blocking(run)
+    except (ConcordEnvelopeError, NostrEventError) as exc:
+        raise ToolInputError(str(exc)) from exc
+
+    response: dict[str, Any] = {"status": result.status, "draft": result.draft.__dict__}
+    if result.status == "published" and result.publication:
+        _armada_delivery_store().record(result.draft.idempotency_key, result.publication.event_id)
+        response["publication"] = {
+            "event_id": result.publication.event_id,
+            "relays": list(result.publication.relays),
+        }
+    return response
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.join", lock=write_lock, audit_log=audit_log)
+def armada_join_draft() -> dict[str, Any]:
+    """Prepare a Guestbook Join for the *caller* to sign and submit.
+
+    Unlike armada_join (which signs with a server-held bot key), this
+    authors the join as the calling identity's own pubkey - no bot key or
+    armada_key_path needed for this identity at all, since community
+    membership under this scheme is a signature over shared, already
+    server-held invite/channel material, not a separately provisioned key.
+
+    Returns an unsigned kind-20013 seal event to sign locally and a
+    draft_id to pass to armada_join_submit along with the signed result.
+    """
+    request = require_current_request()
+    if not settings.armada_enabled:
+        return {"status": "disabled", "warning": "Armada integration is disabled"}
+    try:
+        invite_url = read_credential_file(settings.armada_community_invite_path, label="Armada invite")
+    except CredentialFileError as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+    async def run() -> dict[str, Any]:
+        async def invite_fetcher(pubkey: str, relays: list[str]):
+            return await fetch_invite_events(pubkey, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        bundle = await load_invite_bundle(invite_url, fetcher=invite_fetcher)
+        rumor, seal_template, guestbook_key = build_join_rumor_and_seal_template(
+            bot_pubkey=request.pubkey,
+            community_root=bundle.community_root,
+            community_id=bytes.fromhex(bundle.community_id),
+            epoch=bundle.root_epoch,
+            created_at=int(time.time()),
+        )
+        pending = _armada_pending_signatures().create(
+            pubkey=request.pubkey,
+            purpose="armada_join",
+            rumor=rumor.model_dump(),
+            seal_template=seal_template.__dict__,
+            stream_key={"secret_hex": guestbook_key.secret.hex(), "pubkey_hex": guestbook_key.pubkey_hex},
+            context={"community_id": bundle.community_id, "relays": list(bundle.relays)},
+        )
+        return {
+            "status": "draft_ready",
+            "draft_id": pending.draft_id,
+            "unsigned_event": seal_template.__dict__,
+        }
+
+    try:
+        return _run_async_blocking(run)
+    except (ConcordBundleError, ConcordInviteError, ConcordInviteEventError, ValueError) as exc:
+        return {"status": "unavailable", "warning": str(exc)}
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+@require_scope(Scope.ARMADA_WRITE)
+@audited_write("communications.armada.join", lock=write_lock, audit_log=audit_log)
+def armada_join_submit(draft_id: str, signed_event: str) -> dict[str, Any]:
+    """Finish and publish a Guestbook Join drafted by armada_join_draft.
+
+    ``signed_event`` must be the JSON-encoded event returned by signing the
+    exact unsigned_event armada_join_draft handed out - any drift, an
+    invalid signature, or a draft_id issued to a different identity is
+    rejected.
+    """
+    request = require_current_request()
+    signed_seal = _parse_signed_event(signed_event)
+    try:
+        pending = _armada_pending_signatures().consume(draft_id, pubkey=request.pubkey, purpose="armada_join")
+    except PendingSignatureError as exc:
+        raise ToolInputError(str(exc)) from exc
+
+    rumor = UnsignedNostrEvent(**pending.rumor)
+    seal_template = SealTemplate(**pending.seal_template)
+    guestbook_key = GroupKeyMaterial(
+        secret=bytes.fromhex(pending.stream_key["secret_hex"]), pubkey_hex=pending.stream_key["pubkey_hex"]
+    )
+    relays = list(pending.context["relays"])
+    community_id = pending.context["community_id"]
+
+    async def run() -> dict[str, Any]:
+        try:
+            _, _, wrap = finish_join_envelope(
+                rumor=rumor,
+                seal_template=seal_template,
+                signed_seal=signed_seal,
+                guestbook_key=guestbook_key,
+                created_at=seal_template.created_at,
+            )
+        except (ConcordEnvelopeError, NostrEventError) as exc:
+            raise ToolInputError(str(exc)) from exc
+        publication = await publish_signed_event(wrap, relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        async def guestbook_fetcher(pubkey: str, fetch_relays: list[str]):
+            return await fetch_guestbook_events(pubkey, fetch_relays, timeout_seconds=settings.armada_timeout_seconds)
+
+        result = await verify_join_publication(
+            guestbook_key=guestbook_key,
+            community_id=community_id,
+            relays=relays,
+            author_pubkey=request.pubkey,
+            publication=publication,
+            fetcher=guestbook_fetcher,
+        )
+        return {
+            "status": result.status,
+            "community_id": result.community_id,
+            "verified": result.verified,
+            "publication": {
+                "event_id": result.publication.event_id,
+                "relays": list(result.publication.relays),
+            },
+        }
+
+    return _run_async_blocking(run)
 
 
 @mcp.tool()

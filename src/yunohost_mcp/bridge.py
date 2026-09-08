@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import contextlib
 import copy
+import json
 import os
 import secrets
 import sys
@@ -46,6 +47,7 @@ from mcp_types import (
     Tool,
 )
 
+from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.auth.signing import ClientIdentity, KeyLoadError
 
 
@@ -281,13 +283,81 @@ def _load_delegation_header(args: argparse.Namespace) -> str | None:
     return base64.b64encode(raw).decode()
 
 
-def _build_local_server(remote: Client | RemoteSession, *, name: str) -> MCPServer:
+#: Only Concord seal events (see concord_envelope.SealTemplate,
+#: concord_membership.build_join_rumor_and_seal_template) may be signed
+#: through this local tool - it exists so an MCP agent can complete a split
+#: catalog_announce_draft/armada_join_draft envelope with the same key it
+#: already signs every NIP-98 request with, never so a remote tool response
+#: can turn this bridge into an arbitrary Nostr event forger.
+SIGN_NOSTR_EVENT_TOOL_NAME = "sign_nostr_event"
+_SIGNABLE_KINDS = frozenset({20013})
+
+
+def _sign_nostr_event_tool(*, with_host_param: bool) -> Tool:
+    properties: dict[str, Any] = {
+        "kind": {"type": "integer", "description": f"Must be one of {sorted(_SIGNABLE_KINDS)} (a Concord seal event)."},
+        "tags": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+        "content": {"type": "string"},
+        "created_at": {"type": "integer"},
+    }
+    required = ["kind", "tags", "content", "created_at"]
+    if with_host_param:
+        properties["host"] = {"type": "string", "description": "Which configured host's own key to sign with."}
+        required.append("host")
+    return Tool(
+        name=SIGN_NOSTR_EVENT_TOOL_NAME,
+        description=(
+            "Sign one small Nostr event locally with this bridge's own key - "
+            "the same key it already uses to sign every NIP-98 request - "
+            "without the key ever leaving this process. Only Concord seal "
+            "events (kind 20013) are accepted: pass the exact unsigned_event "
+            "returned by catalog_announce_draft or armada_join_draft, then "
+            "hand the signed result to the matching *_submit tool."
+        ),
+        input_schema={"type": "object", "properties": properties, "required": required},
+        output_schema=None,
+    )
+
+
+def _sign_nostr_event(identity: ClientIdentity, arguments: dict[str, Any]) -> CallToolResult:
+    kind = arguments.get("kind")
+    tags = arguments.get("tags")
+    content = arguments.get("content")
+    created_at = arguments.get("created_at")
+    if kind not in _SIGNABLE_KINDS:
+        return CallToolResult(
+            content=[TextContent(text=f"sign_nostr_event only signs kind {sorted(_SIGNABLE_KINDS)}, got {kind!r}")],
+            is_error=True,
+        )
+    if not isinstance(tags, list) or not isinstance(content, str) or not isinstance(created_at, int):
+        return CallToolResult(
+            content=[TextContent(text="sign_nostr_event requires kind, tags, content, created_at")],
+            is_error=True,
+        )
+    signed = sign_event(
+        identity.private_key,
+        pubkey=identity.pubkey_hex,
+        kind=kind,
+        tags=tags,
+        content=content,
+        created_at=created_at,
+    )
+    payload = signed.model_dump()
+    return CallToolResult(content=[TextContent(text=json.dumps(payload))], structured_content=payload)
+
+
+def _build_local_server(remote: Client | RemoteSession, *, name: str, identity: ClientIdentity | None = None) -> MCPServer:
     """Build a local MCPServer whose handlers forward to the remote.
 
     A raw handler override (not per-tool registration) is the right shape for
     a proxy that does not know the remote tool list ahead of time. ``remote``
     may be an already connected Client for compatibility, or a
     ``RemoteSession`` that connects lazily and isolates connection failures.
+
+    ``identity``, when given, additionally answers ``sign_nostr_event``
+    locally instead of forwarding it - the one tool this bridge implements
+    itself rather than proxying, because it is the only place the private
+    key exists (see that tool's own docstring).
     """
     local = MCPServer(name)
     lowlevel = local._lowlevel_server  # noqa: SLF001 - add_request_handler is the documented, public override point on Server; MCPServer just doesn't re-expose it itself
@@ -301,15 +371,23 @@ def _build_local_server(remote: Client | RemoteSession, *, name: str) -> MCPServ
 
     async def handle_list_tools(ctx, params: PaginatedRequestParams | None):
         try:
-            return await request(
+            result = await request(
                 lambda connected: connected.list_tools(cursor=params.cursor if params else None)
             )
         except RemoteUnavailable:
             # Discovery must still complete so this connector cannot block
             # other independent MCP servers from starting.
-            return ListToolsResult(tools=[])
+            result = ListToolsResult(tools=[])
+        if identity is not None:
+            result = ListToolsResult(
+                tools=[*result.tools, _sign_nostr_event_tool(with_host_param=False)],
+                next_cursor=result.next_cursor,
+            )
+        return result
 
     async def handle_call_tool(ctx, params: CallToolRequestParams):
+        if identity is not None and params.name == SIGN_NOSTR_EVENT_TOOL_NAME:
+            return _sign_nostr_event(identity, params.arguments or {})
         try:
             return await request(lambda connected: connected.call_tool(params.name, params.arguments or {}))
         except RemoteUnavailable:
@@ -410,7 +488,9 @@ def _host_signature(tools_by_host: dict[str, dict[str, Tool]]) -> dict[str, tupl
     return {name: tuple(sorted(by_host)) for name, by_host in tools_by_host.items()}
 
 
-def _build_multi_host_local_server(sessions: dict[str, RemoteSession], *, name: str) -> MCPServer:
+def _build_multi_host_local_server(
+    sessions: dict[str, RemoteSession], *, name: str, identities: dict[str, ClientIdentity] | None = None
+) -> MCPServer:
     """Bridge several remote yunohost-mcp servers as one local MCP server.
 
     Tools that exist on more than one host are merged into a single tool
@@ -419,6 +499,12 @@ def _build_multi_host_local_server(sessions: dict[str, RemoteSession], *, name: 
     the whole point of multi-host mode. `resources/*` URIs are disambiguated
     by splicing the host name into the URI's netloc instead (resources take
     no arguments to add a `host` field to).
+
+    ``identities``, when given (one key per host, matching ``sessions``),
+    additionally answers ``sign_nostr_event`` locally with the named host's
+    own key instead of forwarding it - see ``_build_local_server``'s
+    docstring for why. A `host` argument is required here (unlike the
+    single-host bridge) since each host signs as a different identity.
 
     The returned `MCPServer` also carries a `_poll_for_host_changes`
     coroutine function (stashed as an attribute, since `MCPServer` has no
@@ -440,11 +526,24 @@ def _build_multi_host_local_server(sessions: dict[str, RemoteSession], *, name: 
         _current_session[0] = ctx.session
         _tools_by_host.clear()
         _tools_by_host.update(await _collect_tools_by_host(sessions))
-        return ListToolsResult(tools=_merge_tools(_tools_by_host))
+        merged = _merge_tools(_tools_by_host)
+        if identities:
+            merged.append(_sign_nostr_event_tool(with_host_param=True))
+        return ListToolsResult(tools=merged)
 
     async def handle_call_tool(ctx, params: CallToolRequestParams):
         _current_session[0] = ctx.session
         arguments = dict(params.arguments or {})
+        if params.name == SIGN_NOSTR_EVENT_TOOL_NAME and identities:
+            host = arguments.pop("host", None)
+            if host not in identities:
+                return CallToolResult(
+                    content=[
+                        TextContent(text=f"sign_nostr_event requires a 'host' argument: one of {sorted(identities)}")
+                    ],
+                    is_error=True,
+                )
+            return _sign_nostr_event(identities[host], arguments)
         hosts_for_tool = sorted(_tools_by_host.get(params.name, {}))
         host = arguments.pop("host", None)
         if host is None:
@@ -539,7 +638,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     async with httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(120.0)) as http_client:
         async with anyio.create_task_group() as task_group:
             remote = RemoteSession(args.remote_url, http_client, task_group)
-            local = _build_local_server(remote, name=args.name)
+            local = _build_local_server(remote, name=args.name, identity=identity)
             try:
                 await local.run_stdio_async()
             finally:
@@ -554,8 +653,10 @@ async def _async_main_multi_host(args: argparse.Namespace) -> None:
     async with contextlib.AsyncExitStack() as stack:
         async with anyio.create_task_group() as task_group:
             sessions: dict[str, RemoteSession] = {}
+            identities: dict[str, ClientIdentity] = {}
             for host in hosts:
                 identity = load_identity_from_key_file(host.key_file)
+                identities[host.name] = identity
                 auth = Nip98BridgeAuth(identity)
                 print(
                     f"yunohost-mcp-connect: signing as {identity.npub} for host {host.name!r}, "
@@ -567,7 +668,7 @@ async def _async_main_multi_host(args: argparse.Namespace) -> None:
                 )
                 sessions[host.name] = RemoteSession(host.remote_url, http_client, task_group)
 
-            local = _build_multi_host_local_server(sessions, name=args.name)
+            local = _build_multi_host_local_server(sessions, name=args.name, identities=identities)
             task_group.start_soon(local._poll_for_host_changes)  # noqa: SLF001 - see _build_multi_host_local_server's docstring
             try:
                 await local.run_stdio_async()

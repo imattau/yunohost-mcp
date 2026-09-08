@@ -39,6 +39,51 @@ expires = "2099-12-31T00:00:00+00:00"
     assert not record.is_expired()
 
 
+def test_loads_optional_armada_key_path(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Agent A"
+roles = ["package-developer"]
+armada_key_path = "/etc/yunohost-mcp/armada-bot-agent-a.key"
+"""
+    )
+    store = IdentityStore.load(toml_path)
+    record = store.lookup(HEX_PUBKEY)
+    assert record is not None
+    assert record.armada_key_path == Path("/etc/yunohost-mcp/armada-bot-agent-a.key")
+
+
+def test_armada_key_path_defaults_to_none_when_unset(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Agent B"
+roles = ["package-developer"]
+"""
+    )
+    store = IdentityStore.load(toml_path)
+    record = store.lookup(HEX_PUBKEY)
+    assert record is not None
+    assert record.armada_key_path is None
+
+
+def test_non_string_armada_key_path_raises_config_error(tmp_path: Path):
+    toml_path = tmp_path / "identity.toml"
+    toml_path.write_text(
+        f"""
+[identity."{HEX_PUBKEY}"]
+name = "Broken"
+roles = ["package-developer"]
+armada_key_path = 5
+"""
+    )
+    with pytest.raises(IdentityConfigError):
+        IdentityStore.load(toml_path)
+
+
 def test_loads_hex_keyed_entry_without_expiry(tmp_path: Path):
     toml_path = tmp_path / "identity.toml"
     toml_path.write_text(

@@ -11,7 +11,7 @@ from coincurve import PrivateKey, PublicKeyXOnly
 from .concord_bundle import ValidatedInviteBundle
 from .concord_guestbook import GuestbookError, decode_guestbook_wrap, fold_guestbook
 from .concord_membership import build_join_envelope
-from .concord_keys import derive_group_key
+from .concord_keys import GroupKeyMaterial, derive_group_key
 from .concord_transport import RelayPublishResult, fetch_guestbook_events, publish_signed_event
 
 
@@ -43,16 +43,46 @@ async def publish_join(
         millisecond=millisecond,
     )
     publication = await publisher(wrap, list(bundle.relays))
+    bot_pubkey = PublicKeyXOnly.from_valid_secret(bot_key.secret).format().hex()
     guestbook_key = derive_group_key(
         bundle.community_root,
         "concord/guestbook",
         bytes.fromhex(bundle.community_id),
         bundle.root_epoch,
     )
+    return await verify_join_publication(
+        guestbook_key=guestbook_key,
+        community_id=bundle.community_id,
+        relays=list(bundle.relays),
+        author_pubkey=bot_pubkey,
+        publication=publication,
+        fetcher=fetcher,
+    )
+
+
+async def verify_join_publication(
+    *,
+    guestbook_key: GroupKeyMaterial,
+    community_id: str,
+    relays: list[str],
+    author_pubkey: str,
+    publication: RelayPublishResult,
+    fetcher: Callable[[str, list[str]], Awaitable[list[Any]]] = fetch_guestbook_events,
+) -> JoinPublishResult:
+    """Best-effort post-publish check that a join is visible in the roster.
+
+    Takes the already-derived guestbook key rather than a full invite
+    bundle, so a caller who built and published the wrap independently
+    (e.g. from a caller-signed split envelope, see
+    ``concord_membership.build_join_rumor_and_seal_template`` - which
+    already derives and needs this same key) gets the same verification
+    without re-deriving anything or needing the private key ``publish_join``
+    uses to derive its own author pubkey.
+    """
     try:
-        events = await fetcher(guestbook_key.pubkey_hex, list(bundle.relays))
+        events = await fetcher(guestbook_key.pubkey_hex, relays)
     except Exception:  # noqa: BLE001 - verification is best-effort after publish
-        return JoinPublishResult("published_unverified", bundle.community_id, publication, False)
+        return JoinPublishResult("published_unverified", community_id, publication, False)
     exact_event_seen = any(_event_id(event) == publication.event_id for event in events)
     rumors = []
     for event in events:
@@ -67,12 +97,11 @@ async def publish_join(
             rumors.append(decode_guestbook_wrap(event, guestbook_key))
         except GuestbookError:
             continue
-    bot_pubkey = PublicKeyXOnly.from_valid_secret(bot_key.secret).format().hex()
-    current = fold_guestbook(rumors).get(bot_pubkey)
+    current = fold_guestbook(rumors).get(author_pubkey)
     verified = exact_event_seen and current is not None and current.status == "join"
     return JoinPublishResult(
         "published" if verified else "published_unverified",
-        bundle.community_id,
+        community_id,
         publication,
         verified,
     )

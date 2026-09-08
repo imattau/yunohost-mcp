@@ -223,9 +223,50 @@ YUNOHOST_MCP_ARMADA_COMMUNITY_INVITE_PATH=/etc/yunohost-mcp/armada-community.inv
 
 Set `YUNOHOST_MCP_ARMADA_AUTO_ANNOUNCE=true` to have `catalog_publish` attempt
 the announcement automatically after catalogue success. A failed or
-unverified Armada operation never changes the catalogue result. The bot must
-already have the required channel key; invite acceptance and role assignment
-are separate operations.
+unverified Armada operation never changes the catalogue result. The signing
+identity must already have the required channel key; invite acceptance and
+role assignment are separate operations.
+
+**Per-agent announcement keys.** By default every announcement signs with
+the shared bot key above. An `identity.toml` entry can instead set
+`armada_key_path` to a dedicated, root-owned, mode-0600 key file so that
+identity's own announcements and `armada_join` calls use its own Concord
+identity instead of the shared bot:
+
+```toml
+[identity."npub1..."]
+name = "release-bot-a"
+roles = ["package-developer"]
+armada_key_path = "/etc/yunohost-mcp/armada-bot-a.key"
+```
+
+That identity must call `armada_join` itself once its key file is in place -
+having a distinct key implies nothing about community membership or channel
+access. This is still a server-held, file-backed credential like the shared
+bot key, never the identity's own NIP-98 signing key.
+
+**Announcing with the agent's own key, no key file at all.** An MCP agent
+connected through `yunohost-mcp-connect` (`bridge.py`) already holds its own
+Nostr key locally to sign every NIP-98 request - it can announce and join
+under that same key, with zero server-side credential provisioning, using
+`catalog_announce_draft`/`catalog_announce_submit` and
+`armada_join_draft`/`armada_join_submit` instead of the one-shot tools:
+
+1. `catalog_announce_draft(source, catalogue_publication)` (or
+   `armada_join_draft()`) does all the routing and channel-key work that
+   needs no secret, and returns an unsigned event plus a short-lived
+   `draft_id`.
+2. The agent signs that exact event locally. The bridge answers this itself
+   via a local-only `sign_nostr_event(kind, tags, content, created_at)` tool
+   (never forwarded to the remote server, and restricted to Concord seal
+   events) - the private key never leaves the bridge process.
+3. `catalog_announce_submit(draft_id, signed_event)` (or
+   `armada_join_submit`) verifies the signature matches exactly what was
+   issued and the identity that requested it, then publishes.
+
+The shared bot key / `armada_key_path` still cover `catalog_publish`'s
+`YUNOHOST_MCP_ARMADA_AUTO_ANNOUNCE` hook and any non-interactive/stdio
+caller, since neither can do this two-step round trip.
 
 ## Development
 

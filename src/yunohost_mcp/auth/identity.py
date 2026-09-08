@@ -38,6 +38,15 @@ class IdentityRecord:
     roles: tuple[str, ...]
     scopes: frozenset[Scope]
     expires: datetime | None = None
+    armada_key_path: Path | None = None
+    """Optional override for which Armada bot credential file signs this
+    identity's announcements, instead of settings.armada_bot_key_path.
+
+    Still a server-held, file-backed credential like the shared bot key -
+    this is *not* the identity's NIP-98 auth key (PLAN.md Phase 9 forbids
+    the server ever holding that). It lets each agent announce under its
+    own Nostr/Concord identity, which must separately hold a Guestbook Join
+    for the community (see armada_join) before it can post anywhere."""
 
     def is_expired(self, *, now: datetime | None = None) -> bool:
         if self.expires is None:
@@ -129,12 +138,17 @@ def _load_records(path: Path) -> dict[str, IdentityRecord]:
         expires_raw = entry.get("expires")
         expires = datetime.fromisoformat(expires_raw) if expires_raw else None
 
+        armada_key_path_raw = entry.get("armada_key_path")
+        if armada_key_path_raw is not None and not isinstance(armada_key_path_raw, str):
+            raise IdentityConfigError(f"{path}: identity {raw_key!r}: armada_key_path must be a string path")
+
         records[pubkey] = IdentityRecord(
             pubkey=pubkey,
             name=entry.get("name", raw_key),
             roles=roles,
             scopes=scopes,
             expires=expires,
+            armada_key_path=Path(armada_key_path_raw) if armada_key_path_raw else None,
         )
     return records
 

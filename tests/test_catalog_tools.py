@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
+from coincurve import PrivateKey, PublicKeyXOnly
 from mcp.client import Client
 
+from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.config import Settings
 from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOCAL_STDIO_REQUEST, set_current_request
 from yunohost_mcp.concord_announcement_publish import AnnouncementPublishResult
 from yunohost_mcp.concord_announcements import build_announcement_draft
+from yunohost_mcp.concord_bundle import validate_invite_bundle
 from yunohost_mcp.concord_credentials import CredentialFileError
 from yunohost_mcp.concord_transport import RelayPublishResult
 from yunohost_mcp.policy.roles import scopes_for_roles
@@ -19,6 +24,36 @@ from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
 CALLER_PUBKEY = "b" * 64
 CALLER_REQUEST = AuthenticatedRequest(pubkey=CALLER_PUBKEY, event_id="e" * 64, event_created_at=0)
+
+
+def _invite_bundle():
+    owner = "a" * 64
+    salt = "b" * 64
+    return validate_invite_bundle(
+        {
+            "community_id": hashlib.sha256(b"concord/community" + bytes.fromhex(owner + salt)).hexdigest(),
+            "owner": owner,
+            "owner_salt": salt,
+            "community_root": "c" * 64,
+            "root_epoch": 2,
+            "control_pk": "d" * 64,
+            "relays": ["wss://relay.example"],
+            "channels": [{"id": "e" * 64, "epoch": 1, "name": "ditto_ynh"}],
+        }
+    )
+
+
+def _channel_rumor():
+    content = '{"name":"ditto_ynh","private":false}'
+    channel = "e" * 64
+    return {
+        "id": "a" * 64,
+        "pubkey": "a" * 64,
+        "created_at": 1,
+        "kind": 3308,
+        "tags": [["vsk", "2"], ["eid", channel], ["ev", "1"]],
+        "content": content,
+    }
 
 
 def test_catalog_plan_fake_mode_requires_a_local_source(tmp_path: Path):
@@ -348,6 +383,134 @@ async def test_catalog_announce_enabled_path_is_composed_without_network(
 
 
 @pytest.mark.anyio
+async def test_catalog_announce_uses_the_caller_identity_armada_key_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """An identity.toml entry with its own armada_key_path must announce
+    under that key, not the shared settings.armada_bot_key_path - otherwise
+    every agent's announcement is indistinguishable from the bot's."""
+    draft = build_announcement_draft("https://github.com/example/ditto_ynh", {"published": True})
+    expected = AnnouncementPublishResult(
+        status="published",
+        draft=draft,
+        publication=RelayPublishResult(event_id="e" * 64, relays=("wss://relay.test",)),
+    )
+    agent_key_path = tmp_path / "agent-a.key"
+    seen_paths: list[Path] = []
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return object()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return []
+
+    async def fake_publish(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module.settings, "armada_bot_key_path", tmp_path / "shared-bot.key")
+
+    def fake_load_bot_private_key(path: Path):
+        seen_paths.append(path)
+        return object()
+
+    monkeypatch.setattr(server_module, "load_bot_private_key", fake_load_bot_private_key)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+    monkeypatch.setattr(server_module, "publish_package_announcement", fake_publish)
+
+    agent_request = AuthenticatedRequest(
+        pubkey="agent-a",
+        event_id="a" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey="agent-a",
+            name="agent a",
+            roles=("package-developer",),
+            scopes=scopes_for_roles(("package-developer",)),
+            armada_key_path=agent_key_path,
+        ),
+    )
+    set_current_request(agent_request)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content["status"] == "published"
+    finally:
+        set_current_request(None)
+
+    assert seen_paths == [agent_key_path]
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_falls_back_to_the_shared_bot_key_without_an_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """An identity with no armada_key_path (or no identity at all, e.g. the
+    stdio transport) must keep announcing under the shared bot key - the
+    per-identity override is opt-in, not a breaking default change."""
+    draft = build_announcement_draft("https://github.com/example/ditto_ynh", {"published": True})
+    expected = AnnouncementPublishResult(
+        status="published",
+        draft=draft,
+        publication=RelayPublishResult(event_id="e" * 64, relays=("wss://relay.test",)),
+    )
+    shared_key_path = tmp_path / "shared-bot.key"
+    seen_paths: list[Path] = []
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return object()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return []
+
+    async def fake_publish(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module.settings, "armada_bot_key_path", shared_key_path)
+
+    def fake_load_bot_private_key(path: Path):
+        seen_paths.append(path)
+        return object()
+
+    monkeypatch.setattr(server_module, "load_bot_private_key", fake_load_bot_private_key)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+    monkeypatch.setattr(server_module, "publish_package_announcement", fake_publish)
+
+    set_current_request(LOCAL_STDIO_REQUEST)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "catalog_announce",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            assert result.is_error is not True, result.content
+            assert result.structured_content["status"] == "published"
+    finally:
+        set_current_request(None)
+
+    assert seen_paths == [shared_key_path]
+
+
+@pytest.mark.anyio
 async def test_catalog_announce_reports_missing_configuration_as_warning(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -489,3 +652,255 @@ def test_catalog_publish_plan_echoes_ci_result_for_the_later_publish_call(tmp_pa
     assert plan["ci_provider"] == "github-actions"
     assert plan["ci_ref"] == "https://example/run/2"
     assert plan["attestation"]["event"]["kind"] == 30080
+
+
+def _agent_request(pubkey: str) -> AuthenticatedRequest:
+    return AuthenticatedRequest(
+        pubkey=pubkey,
+        event_id="d" * 64,
+        event_created_at=0,
+        identity=IdentityRecord(
+            pubkey=pubkey,
+            name="agent",
+            roles=("package-developer",),
+            scopes=scopes_for_roles(("package-developer",)),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_draft_then_submit_publishes_under_the_callers_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """The whole point of the split tools: no bot key or armada_key_path is
+    ever loaded here - the caller signs the seal with a key only it holds,
+    and catalog_announce_submit must still route/publish/record delivery
+    exactly like the bot-key path does."""
+    agent_key = PrivateKey(b"k" * 32)
+    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    published: list[tuple[object, list[str]]] = []
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return _invite_bundle()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return [_channel_rumor()]
+
+    async def fake_publish(event, relays, **_kwargs):
+        published.append((event, relays))
+        return RelayPublishResult(event_id=event.id, relays=tuple(relays))
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module.settings, "config_dir", tmp_path)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+    monkeypatch.setattr(server_module, "publish_signed_event", fake_publish)
+
+    set_current_request(_agent_request(agent_pubkey))
+    try:
+        async with Client(mcp) as client:
+            draft = await client.call_tool(
+                "catalog_announce_draft",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            assert draft.is_error is not True, draft.content
+            assert draft.structured_content["status"] == "draft_ready"
+            draft_id = draft.structured_content["draft_id"]
+            unsigned = draft.structured_content["unsigned_event"]
+            assert unsigned["pubkey"] == agent_pubkey
+
+            signed = sign_event(
+                agent_key,
+                pubkey=unsigned["pubkey"],
+                kind=unsigned["kind"],
+                tags=unsigned["tags"],
+                content=unsigned["content"],
+                created_at=unsigned["created_at"],
+            )
+            submitted = await client.call_tool(
+                "catalog_announce_submit",
+                {"draft_id": draft_id, "signed_event": json.dumps(signed.model_dump())},
+            )
+            assert submitted.is_error is not True, submitted.content
+            assert submitted.structured_content["status"] == "published"
+            assert submitted.structured_content["publication"]["event_id"]
+            assert len(published) == 1
+
+            # Single-use: resubmitting the same draft_id must fail, not double-publish.
+            resubmit = await client.call_tool(
+                "catalog_announce_submit",
+                {"draft_id": draft_id, "signed_event": json.dumps(signed.model_dump())},
+            )
+            assert resubmit.is_error is True
+            assert len(published) == 1
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_submit_rejects_a_draft_issued_to_a_different_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    agent_key = PrivateKey(b"k" * 32)
+    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    other_pubkey = PublicKeyXOnly.from_valid_secret(PrivateKey(b"j" * 32).secret).format().hex()
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return _invite_bundle()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return [_channel_rumor()]
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module.settings, "config_dir", tmp_path)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+
+    set_current_request(_agent_request(agent_pubkey))
+    try:
+        async with Client(mcp) as client:
+            draft = await client.call_tool(
+                "catalog_announce_draft",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            draft_id = draft.structured_content["draft_id"]
+            unsigned = draft.structured_content["unsigned_event"]
+    finally:
+        set_current_request(None)
+
+    signed = sign_event(
+        agent_key,
+        pubkey=unsigned["pubkey"],
+        kind=unsigned["kind"],
+        tags=unsigned["tags"],
+        content=unsigned["content"],
+        created_at=unsigned["created_at"],
+    )
+    set_current_request(_agent_request(other_pubkey))
+    try:
+        async with Client(mcp) as client:
+            submitted = await client.call_tool(
+                "catalog_announce_submit",
+                {"draft_id": draft_id, "signed_event": json.dumps(signed.model_dump())},
+            )
+            assert submitted.is_error is True
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_catalog_announce_submit_rejects_a_tampered_signature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    agent_key = PrivateKey(b"k" * 32)
+    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return _invite_bundle()
+
+    async def fake_load_control(_bundle, **_kwargs):
+        return [_channel_rumor()]
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "armada_delivery_store_file", tmp_path / "deliveries.sqlite3")
+    monkeypatch.setattr(server_module.settings, "config_dir", tmp_path)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "load_control_rumors", fake_load_control)
+
+    set_current_request(_agent_request(agent_pubkey))
+    try:
+        async with Client(mcp) as client:
+            draft = await client.call_tool(
+                "catalog_announce_draft",
+                {
+                    "source": "https://github.com/example/ditto_ynh",
+                    "catalogue_publication": '{"published": true}',
+                },
+            )
+            draft_id = draft.structured_content["draft_id"]
+            unsigned = draft.structured_content["unsigned_event"]
+
+            signed = sign_event(
+                agent_key,
+                pubkey=unsigned["pubkey"],
+                kind=unsigned["kind"],
+                tags=unsigned["tags"],
+                content="something else entirely",
+                created_at=unsigned["created_at"],
+            )
+            submitted = await client.call_tool(
+                "catalog_announce_submit",
+                {"draft_id": draft_id, "signed_event": json.dumps(signed.model_dump())},
+            )
+            assert submitted.is_error is True
+    finally:
+        set_current_request(None)
+
+
+@pytest.mark.anyio
+async def test_armada_join_draft_then_submit_publishes_under_the_callers_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    agent_key = PrivateKey(b"k" * 32)
+    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    published: list[tuple[object, list[str]]] = []
+
+    async def fake_load_bundle(_invite_url, **_kwargs):
+        return _invite_bundle()
+
+    async def fake_publish(event, relays, **_kwargs):
+        published.append((event, relays))
+        return RelayPublishResult(event_id=event.id, relays=tuple(relays))
+
+    async def fake_fetch_guestbook(_pubkey, _relays, **_kwargs):
+        return []
+
+    monkeypatch.setattr(server_module.settings, "armada_enabled", True)
+    monkeypatch.setattr(server_module.settings, "config_dir", tmp_path)
+    monkeypatch.setattr(server_module, "read_credential_file", lambda _path, *, label: "https://invite.test")
+    monkeypatch.setattr(server_module, "load_invite_bundle", fake_load_bundle)
+    monkeypatch.setattr(server_module, "publish_signed_event", fake_publish)
+    monkeypatch.setattr(server_module, "fetch_guestbook_events", fake_fetch_guestbook)
+
+    set_current_request(_agent_request(agent_pubkey))
+    try:
+        async with Client(mcp) as client:
+            draft = await client.call_tool("armada_join_draft", {})
+            assert draft.is_error is not True, draft.content
+            assert draft.structured_content["status"] == "draft_ready"
+            draft_id = draft.structured_content["draft_id"]
+            unsigned = draft.structured_content["unsigned_event"]
+            assert unsigned["pubkey"] == agent_pubkey
+
+            signed = sign_event(
+                agent_key,
+                pubkey=unsigned["pubkey"],
+                kind=unsigned["kind"],
+                tags=unsigned["tags"],
+                content=unsigned["content"],
+                created_at=unsigned["created_at"],
+            )
+            submitted = await client.call_tool(
+                "armada_join_submit",
+                {"draft_id": draft_id, "signed_event": json.dumps(signed.model_dump())},
+            )
+            assert submitted.is_error is not True, submitted.content
+            assert submitted.structured_content["status"] in {"published", "published_unverified"}
+            assert len(published) == 1
+    finally:
+        set_current_request(None)
