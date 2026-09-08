@@ -12,7 +12,7 @@ import json
 from typing import Any, Callable
 
 import anyio
-from nostr_sdk import Client, Event, Filter, Kind, PublicKey, RelayUrl
+from nostr_sdk import Client, Event, Filter, Kind, PublicKey, RelayUrl, ReqTarget
 
 from .auth.nostr import NostrEvent
 
@@ -92,7 +92,7 @@ async def fetch_control_events(
                 await client.add_relay(RelayUrl.parse(relay))
             await client.connect()
             return await client.fetch_events(
-                Filter().author(author).kind(Kind(1059)).limit(max_events),
+                ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)]),
                 timeout=timedelta(seconds=timeout_seconds),
                 max_events=max_events,
             )
@@ -127,7 +127,7 @@ async def fetch_invite_events(
                 await client.add_relay(RelayUrl.parse(relay))
             await client.connect()
             return await client.fetch_events(
-                Filter().author(author).kind(Kind(33301)).identifier("").limit(1),
+                ReqTarget.auto([Filter().author(author).kind(Kind(33301)).identifier("").limit(1)]),
                 timeout=timedelta(seconds=timeout_seconds),
                 max_events=1,
             )
@@ -165,7 +165,7 @@ async def fetch_guestbook_events(
                 await client.add_relay(RelayUrl.parse(relay))
             await client.connect()
             return await client.fetch_events(
-                Filter().author(author).kind(Kind(1059)).limit(max_events),
+                ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)]),
                 timeout=timedelta(seconds=timeout_seconds),
                 max_events=max_events,
             )

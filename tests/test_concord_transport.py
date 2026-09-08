@@ -1,5 +1,6 @@
 import pytest
 from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import ReqTarget
 
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.concord_transport import fetch_control_events, fetch_invite_events, publish_signed_event
@@ -14,6 +15,7 @@ class FakeClient:
         self.sent = []
         self.shutdown_called = False
         self.fetched = False
+        self.fetch_target = None
         self.__class__.instances.append(self)
 
     async def add_relay(self, relay):
@@ -30,6 +32,7 @@ class FakeClient:
 
     async def fetch_events(self, filter_, *, timeout, max_events):
         self.fetched = True
+        self.fetch_target = filter_
         return ["invite-event"] if max_events == 1 else ["control-event"]
 
 
@@ -75,6 +78,7 @@ async def test_fetch_control_events_is_bounded_and_shuts_down():
     client = FakeClient.instances[0]
     assert events == ["control-event"]
     assert client.fetched is True
+    assert isinstance(client.fetch_target, ReqTarget)
     assert client.shutdown_called is True
 
 
@@ -93,4 +97,5 @@ async def test_fetch_invite_events_uses_single_addressable_coordinate_result():
     events = await fetch_invite_events(pubkey, ["wss://relay.example"], client_factory=FakeClient)
 
     assert events == ["invite-event"]
+    assert isinstance(FakeClient.instances[0].fetch_target, ReqTarget)
     assert FakeClient.instances[0].shutdown_called is True
