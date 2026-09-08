@@ -8,7 +8,7 @@ import bech32
 from coincurve import PrivateKey, PublicKeyXOnly
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.concord_invites import (
@@ -26,8 +26,14 @@ def _raw_nip44_encrypt(plaintext: str, key: bytes) -> str:
     nonce = b"n" * 32
     raw = plaintext.encode()
     padded = len(raw).to_bytes(2, "big") + raw
-    padded += b"\x00" * (max(32, 1 << (len(padded) - 1).bit_length()) - len(padded))
-    expanded = HKDF(algorithm=hashes.SHA256(), length=76, salt=nonce, info=b"").derive(key)
+    if len(raw) <= 32:
+        padded_len = 32
+    else:
+        next_power = 1 << (len(raw) - 1).bit_length()
+        chunk = 32 if next_power <= 256 else next_power // 8
+        padded_len = chunk * ((len(raw) - 1) // chunk + 1)
+    padded += b"\x00" * (padded_len - len(raw))
+    expanded = HKDFExpand(algorithm=hashes.SHA256(), length=76, info=nonce).derive(key)
     chacha_key, chacha_nonce, hmac_key = expanded[:32], expanded[32:44], expanded[44:]
     encryptor = Cipher(algorithms.ChaCha20(chacha_key, b"\x00" * 4 + chacha_nonce), mode=None).encryptor()
     body = encryptor.update(padded) + encryptor.finalize()
@@ -67,8 +73,8 @@ def test_decode_invite_fragment_expands_stock_relays_without_repr_token():
     assert decoded.relays == (
         "wss://jskitty.com/nostr",
         "wss://asia.vectorapp.io/nostr",
-        "wss://relay.ditto.pub",
-        "wss://relay.dreamith.to",
+        "wss://nostr.computingcache.com",
+        "wss://relay.damus.io",
     )
     assert decoded.token == b"t" * 16
     assert "tttt" not in repr(decoded)
@@ -80,7 +86,7 @@ def test_decode_invite_fragment_handles_bounded_custom_relays():
 
     decoded = decode_invite_fragment(fragment)
 
-    assert decoded.relays == ("wss://relay.ditto.pub", "ws://localhost:8080")
+    assert decoded.relays == ("wss://nostr.computingcache.com", "ws://localhost:8080")
 
 
 def test_decode_invite_fragment_rejects_version_and_size_errors():

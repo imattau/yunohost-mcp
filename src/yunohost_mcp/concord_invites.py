@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from .concord_bundle import ValidatedInviteBundle, validate_invite_bundle
 from .concord_invite_event import decode_invite_naddr, extract_invite_ciphertext
@@ -43,8 +43,8 @@ class InviteFragment:
 _RELAY_DICTIONARY = {
     1: "wss://jskitty.com/nostr",
     2: "wss://asia.vectorapp.io/nostr",
-    3: "wss://relay.ditto.pub",
-    4: "wss://relay.dreamith.to",
+    3: "wss://nostr.computingcache.com",
+    4: "wss://relay.damus.io",
 }
 
 _ZERO32 = b"\x00" * 32
@@ -157,7 +157,7 @@ def _decrypt_raw_nip44(ciphertext: str, conversation_key: bytes) -> str:
         raise ValueError("invalid NIP-44 payload")
     nonce = raw[1:33]
     body, mac = raw[33:-32], raw[-32:]
-    expanded = HKDF(algorithm=hashes.SHA256(), length=76, salt=nonce, info=b"").derive(conversation_key)
+    expanded = HKDFExpand(algorithm=hashes.SHA256(), length=76, info=nonce).derive(conversation_key)
     chacha_key, chacha_nonce, hmac_key = expanded[:32], expanded[32:44], expanded[44:]
     expected_mac = hmac.new(hmac_key, nonce + body, "sha256").digest()
     if not hmac.compare_digest(mac, expected_mac):
@@ -167,7 +167,15 @@ def _decrypt_raw_nip44(ciphertext: str, conversation_key: bytes) -> str:
     if len(padded) < 2:
         raise ValueError("invalid NIP-44 padding")
     length = int.from_bytes(padded[:2], "big")
-    if length == 0 or length > len(padded) - 2 or any(padded[2 + length:]):
+    if length == 0 or length > len(padded) - 2:
+        raise ValueError("invalid NIP-44 padding")
+    if length <= 32:
+        padded_len = 32
+    else:
+        next_power = 1 << (length - 1).bit_length()
+        chunk = 32 if next_power <= 256 else next_power // 8
+        padded_len = chunk * ((length - 1) // chunk + 1)
+    if len(padded) != 2 + padded_len:
         raise ValueError("invalid NIP-44 padding")
     return padded[2 : 2 + length].decode("utf-8")
 
