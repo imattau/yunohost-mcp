@@ -1,11 +1,14 @@
 import pytest
 import base64
+import hmac
 import hashlib
 import json
 
 import bech32
-from nostr_sdk import Nip44Version, PublicKey, SecretKey, nip44_encrypt
 from coincurve import PrivateKey, PublicKeyXOnly
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.concord_invites import (
@@ -17,6 +20,19 @@ from yunohost_mcp.concord_invites import (
     load_invite_bundle,
     parse_invite_url,
 )
+
+
+def _raw_nip44_encrypt(plaintext: str, key: bytes) -> str:
+    nonce = b"n" * 32
+    raw = plaintext.encode()
+    padded = len(raw).to_bytes(2, "big") + raw
+    padded += b"\x00" * (max(32, 1 << (len(padded) - 1).bit_length()) - len(padded))
+    expanded = HKDF(algorithm=hashes.SHA256(), length=76, salt=nonce, info=b"").derive(key)
+    chacha_key, chacha_nonce, hmac_key = expanded[:32], expanded[32:44], expanded[44:]
+    encryptor = Cipher(algorithms.ChaCha20(chacha_key, b"\x00" * 4 + chacha_nonce), mode=None).encryptor()
+    body = encryptor.update(padded) + encryptor.finalize()
+    mac = hmac.new(hmac_key, nonce + body, "sha256").digest()
+    return base64.b64encode(b"\x02" + nonce + body + mac).decode()
 
 
 def test_parse_invite_url_keeps_locator_and_opaque_fragment():
@@ -89,14 +105,7 @@ def test_decrypt_invite_bundle_derives_token_key_and_validates_bundle():
         "channels": [{"id": "e" * 64, "epoch": 1, "name": "ditto_ynh"}],
     }
     key = derive_invite_bundle_key(token)
-    secret = SecretKey.from_bytes(key)
-    pubkey = PublicKey.parse(PublicKeyXOnly.from_valid_secret(key).format().hex())
-    ciphertext = nip44_encrypt(
-        secret,
-        pubkey,
-        json.dumps(bundle, separators=(",", ":")),
-        Nip44Version.V2,
-    )
+    ciphertext = _raw_nip44_encrypt(json.dumps(bundle, separators=(",", ":")), key)
 
     decoded = decrypt_invite_bundle(ciphertext, token)
 
@@ -125,12 +134,7 @@ async def test_load_invite_bundle_composes_fetch_verify_and_decrypt():
     }
     link_pubkey = PublicKeyXOnly.from_valid_secret(b"i" * 32).format().hex()
     bundle_key = derive_invite_bundle_key(token)
-    ciphertext = nip44_encrypt(
-        SecretKey.from_bytes(bundle_key),
-        PublicKey.parse(PublicKeyXOnly.from_valid_secret(bundle_key).format().hex()),
-        json.dumps(bundle, separators=(",", ":")),
-        Nip44Version.V2,
-    )
+    ciphertext = _raw_nip44_encrypt(json.dumps(bundle, separators=(",", ":")), bundle_key)
     event = sign_event(
         PrivateKey(b"i" * 32),
         pubkey=link_pubkey,

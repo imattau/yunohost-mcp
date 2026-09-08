@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import base64
+import hmac
 import json
 import re
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from coincurve import PublicKeyXOnly
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from nostr_sdk import PublicKey, SecretKey, nip44_decrypt
 
 from .concord_bundle import ValidatedInviteBundle, validate_invite_bundle
 from .concord_invite_event import decode_invite_naddr, extract_invite_ciphertext
@@ -46,6 +46,8 @@ _RELAY_DICTIONARY = {
     3: "wss://relay.ditto.pub",
     4: "wss://relay.dreamith.to",
 }
+
+_ZERO32 = b"\x00" * 32
 
 
 def parse_invite_url(value: str, *, max_fragment_chars: int = 4096) -> InviteReference:
@@ -130,11 +132,44 @@ def decode_invite_fragment(fragment: str, *, max_relays: int = 3) -> InviteFragm
 
 
 def derive_invite_bundle_key(token: bytes) -> bytes:
-    """Derive the CORD-05 bundle key from the 16-byte fragment token."""
+    """Derive the CORD-05 bundle key from the 16-byte fragment token.
+
+    CORD-05 uses the frozen Concord derivation shape: ``label || NUL ||
+    zero-community-id``.  The bundle is then encrypted with this raw key,
+    rather than an ECDH-derived NIP-44 conversation.
+    """
 
     if not isinstance(token, bytes) or len(token) != 16:
         raise ConcordInviteError("invite token must be exactly 16 bytes")
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"concord/invite-key").derive(token)
+    info = b"concord/invite-key\x00" + _ZERO32
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"", info=info).derive(token)
+
+
+def _decrypt_raw_nip44(ciphertext: str, conversation_key: bytes) -> str:
+    """Open a NIP-44 v2 payload using a raw 32-byte conversation key.
+
+    This is the symmetric form used by Armada/Vector for public invite
+    bundles.  ``nostr_sdk.nip44_decrypt`` only accepts the ECDH keypair form.
+    """
+
+    raw = base64.b64decode(ciphertext, validate=True)
+    if len(raw) < 1 + 32 + 2 + 32 or raw[0] != 2:
+        raise ValueError("invalid NIP-44 payload")
+    nonce = raw[1:33]
+    body, mac = raw[33:-32], raw[-32:]
+    expanded = HKDF(algorithm=hashes.SHA256(), length=76, salt=nonce, info=b"").derive(conversation_key)
+    chacha_key, chacha_nonce, hmac_key = expanded[:32], expanded[32:44], expanded[44:]
+    expected_mac = hmac.new(hmac_key, nonce + body, "sha256").digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise ValueError("NIP-44 payload authentication failed")
+    decryptor = Cipher(algorithms.ChaCha20(chacha_key, b"\x00" * 4 + chacha_nonce), mode=None).decryptor()
+    padded = decryptor.update(body) + decryptor.finalize()
+    if len(padded) < 2:
+        raise ValueError("invalid NIP-44 padding")
+    length = int.from_bytes(padded[:2], "big")
+    if length == 0 or length > len(padded) - 2 or any(padded[2 + length:]):
+        raise ValueError("invalid NIP-44 padding")
+    return padded[2 : 2 + length].decode("utf-8")
 
 
 def decrypt_invite_bundle(ciphertext: str, token: bytes) -> ValidatedInviteBundle:
@@ -149,9 +184,7 @@ def decrypt_invite_bundle(ciphertext: str, token: bytes) -> ValidatedInviteBundl
         raise ConcordInviteError("invite bundle ciphertext must be non-empty")
     try:
         bundle_key = derive_invite_bundle_key(token)
-        secret = SecretKey.from_bytes(bundle_key)
-        pubkey_hex = PublicKeyXOnly.from_valid_secret(bundle_key).format().hex()
-        plaintext = nip44_decrypt(secret, PublicKey.parse(pubkey_hex), ciphertext)
+        plaintext = _decrypt_raw_nip44(ciphertext, bundle_key)
         bundle = json.loads(plaintext)
         return validate_invite_bundle(bundle)
     except ConcordInviteError:
