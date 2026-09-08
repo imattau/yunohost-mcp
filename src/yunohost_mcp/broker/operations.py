@@ -101,7 +101,10 @@ def _operations_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
     limit = arguments.get("limit")
     if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000):
         raise ValueError("limit must be between 1 and 1000")
-    return adapter.operations_list(limit=limit)
+    with_suboperations = arguments.get("with_suboperations", False)
+    if not isinstance(with_suboperations, bool):
+        raise ValueError("with_suboperations must be a boolean")
+    return adapter.operations_list(limit=limit, with_suboperations=with_suboperations)
 
 
 def _operation_name(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:

@@ -1423,9 +1423,16 @@ def backup_info(name: str, with_details: bool = False) -> dict[str, Any]:
 @redact_response
 @translate_known_errors
 @require_scope(Scope.LOGS_READ)
-def operations_list(limit: int | None = None) -> dict[str, Any]:
-    """List recent YunoHost operation log entries."""
-    return adapter.operations_list(limit=limit)
+def operations_list(limit: int | None = None, with_suboperations: bool = False) -> dict[str, Any]:
+    """List recent YunoHost operation log entries.
+
+    with_suboperations defaults to False (matching yunohost's own default),
+    which silently excludes any operation with a parent operation set - in
+    practice this hides most app config-panel action/button clicks, since
+    those commonly inherit a parent from whatever operation context the
+    webadmin was already in. Pass with_suboperations=True to see those too.
+    """
+    return adapter.operations_list(limit=limit, with_suboperations=with_suboperations)
 
 
 @mcp.tool()

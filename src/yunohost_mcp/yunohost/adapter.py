@@ -1842,8 +1842,20 @@ class YunohostAdapter:
             return 100 * 1000**3
         return shutil.disk_usage(path).free
 
-    def operations_list(self, limit: int | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("operations.list", {"limit": limit})
+    def operations_list(self, limit: int | None = None, with_suboperations: bool = False) -> dict[str, Any]:
+        """List recent operation log entries.
+
+        ``with_suboperations`` defaults to False, matching upstream
+        yunohost.log.log_list()'s own default - but that default silently
+        excludes any operation that has a parent operation set, which in
+        practice is most action-triggered config-panel operations (an
+        app's own config-panel button click gets a parent from whatever
+        operation context the webadmin was already in). Confirmed live:
+        an app's own config-panel action failures were completely
+        invisible here and to guessed operation_logs() names alike, with
+        no indication why - pass with_suboperations=True to see them.
+        """
+        brokered = self._broker_call("operations.list", {"limit": limit, "with_suboperations": with_suboperations})
         if brokered is not None:
             return brokered
         if self.settings.fake_yunohost:
@@ -1859,7 +1871,7 @@ class YunohostAdapter:
                 ],
             }
         log_list = _import_attr("yunohost.log", "log_list")
-        return {"fake": False, **log_list(limit=limit)}
+        return {"fake": False, **log_list(limit=limit, with_suboperations=with_suboperations)}
 
     def operation_status(self, name: str) -> dict[str, Any]:
         brokered = self._broker_call("operation.status", {"name": name})

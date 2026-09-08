@@ -527,6 +527,18 @@ def test_operations_list_status_logs():
     assert "log" in logs
 
 
+def test_operations_list_accepts_with_suboperations():
+    # Real yunohost.log.log_list() excludes any operation with a parent
+    # operation set unless with_suboperations=True - most app config-panel
+    # action/button operations have a parent, so this is the only way to
+    # ever see them. Just confirms the parameter threads through without
+    # error in fake mode; the real filtering behavior lives in yunohost
+    # core, not here.
+    adapter = make_adapter()
+    ops = adapter.operations_list(with_suboperations=True)
+    assert isinstance(ops["operation"], list)
+
+
 def test_updates_check():
     result = make_adapter().updates_check()
     assert isinstance(result["apps"], list)
