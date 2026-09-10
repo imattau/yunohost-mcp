@@ -239,6 +239,41 @@ identity_store = identity_store_for_settings(settings)
 armada_delivery_store: ConcordDeliveryStore | None = None
 
 
+_native_control_plane_adapter = None
+
+
+def _get_native_control_plane_adapter():
+    """Load the derivative adapter lazily, keeping the reference server's
+    normal YunoHost transport and tool implementation unchanged by default."""
+    global _native_control_plane_adapter
+    if _native_control_plane_adapter is not None:
+        return _native_control_plane_adapter
+    if not settings.native_control_plane_enabled:
+        raise RuntimeError("native control-plane bridge is disabled")
+    key_path = settings.native_control_plane_agent_key_path
+    try:
+        secret = key_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"native control-plane agent key is unavailable: {key_path}") from exc
+    if len(secret) != 64:
+        raise RuntimeError("native control-plane agent key must be a 64-character hex key")
+    try:
+        from coincurve import PublicKeyXOnly
+        from yunohost.nostr_identity import publish_to_relay
+        from yunohost.nostr_mcp_adapter import NostrMCPAdapter
+
+        pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(secret)).format().hex()
+    except (ValueError, ImportError) as exc:
+        raise RuntimeError("native control-plane adapter is unavailable") from exc
+    _native_control_plane_adapter = NostrMCPAdapter(
+        requester_sk=secret,
+        requester_pubkey=pubkey,
+        control_relay=settings.native_control_plane_relay,
+        transport=publish_to_relay,
+    )
+    return _native_control_plane_adapter
+
+
 def _armada_delivery_store() -> ConcordDeliveryStore:
     global armada_delivery_store
     if armada_delivery_store is None or armada_delivery_store.path != settings.armada_delivery_path():
@@ -506,6 +541,22 @@ def _check_apps_remove(rule: PolicyRule) -> None:
 def server_info() -> dict[str, Any]:
     """Return YunoHost server/component version information."""
     return adapter.server_info()
+
+
+@mcp.tool()
+@redact_response
+@translate_known_errors
+def native_control_plane_call(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Submit a registered YunoHost operation to the signed Nostr control
+    plane. The operation daemon performs the final scope and administrator
+    approval checks; this MCP server never executes the operation locally.
+
+    Enable with ``YUNOHOST_MCP_NATIVE_CONTROL_PLANE_ENABLED=true`` and
+    provision the dedicated agent key at the configured key path.
+    """
+    request = get_current_request()
+    actor_pubkey = request.pubkey if request is not None and len(request.pubkey) == 64 else None
+    return _get_native_control_plane_adapter().call_tool(tool, arguments, actor_pubkey=actor_pubkey)
 
 
 @mcp.tool()

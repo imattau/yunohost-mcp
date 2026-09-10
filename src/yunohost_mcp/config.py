@@ -139,6 +139,13 @@ class Settings(BaseSettings):
     nostr_auth_relay_lookup_socket: Path | None = None
     nostr_auth_relay_lookup_timeout_seconds: int = 5
 
+    # Optional bridge to the derivative's signed Nostr operation chain. The
+    # agent key is provisioned separately and is never accepted on argv or
+    # returned through MCP; unset/disabled keeps the reference backend intact.
+    native_control_plane_enabled: bool = False
+    native_control_plane_relay: str = "ws://127.0.0.1:4848"
+    native_control_plane_agent_key_path: Path = Path("/etc/yunohost-mcp/control-plane-agent.key")
+
     # service_logs(): structured systemd journal entries for one
     # YunoHost-managed service (see adapter.py). journalctl_path lets a
     # deployment point at a non-default binary; the other two bound a

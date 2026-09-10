@@ -7,6 +7,7 @@ from pathlib import Path
 EXPECTED_TOOLS = frozenset(
     {
         "server_info",
+        "native_control_plane_call",
         "health_check",
         "apps_list",
         "app_info",

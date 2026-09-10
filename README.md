@@ -185,6 +185,24 @@ DNS publishing, catalogue publication, and package-test lifecycle operations als
 
 For reverse-proxy deployments, set `YUNOHOST_MCP_PUBLIC_BASE_URL` to the exact public origin used in NIP-98 signatures (for example `https://mcp.example.org`). Requests with an unexpected `Host` header are rejected. Keep the local stdio transport restricted to trusted local clients: it intentionally grants the local process full administrator scope.
 
+## Optional NostrHost control-plane bridge
+
+On a NostrHost derivative, the reference FastMCP server can submit registered
+operations to the local signed control plane instead of executing them in the
+MCP process. Enable it with `YUNOHOST_MCP_NATIVE_CONTROL_PLANE_ENABLED=true`,
+set `YUNOHOST_MCP_NATIVE_CONTROL_PLANE_RELAY`, and provision a dedicated
+64-character hex agent key at
+`YUNOHOST_MCP_NATIVE_CONTROL_PLANE_AGENT_KEY_PATH`. The MCP server publishes
+the signed request only; the control-plane daemon performs scope checks,
+administrator approval, execution, and audit publication.
+
+For bridged calls, the dedicated bridge key is the signed `requester` and
+the authenticated MCP caller's Nostr public key is carried as the signed
+`actor` tag on the request, execution, result, and state-snapshot records.
+This makes agents and human users first-class audit identities while keeping
+authorization anchored to the key that cryptographically submitted the
+request.
+
 One-time setup, on whatever device the owner keeps their signer app on:
 
 ```
