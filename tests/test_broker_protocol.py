@@ -29,7 +29,7 @@ from yunohost_mcp.auth.replay import ReplayCache
 from yunohost_mcp.auth.server_identity import ServerIdentity
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.policy.roles import scopes_for_roles
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 import hashlib
 import time
 
@@ -223,8 +223,8 @@ def test_broker_selects_control_plane_policy_for_mcp_app_mutations():
 
 
 def test_helper_revalidates_a_real_nip98_signature(tmp_path):
-    client_key = PrivateKey()
-    client_pubkey = PublicKeyXOnly.from_valid_secret(client_key.secret).format().hex()
+    client_key = Keys.generate()
+    client_pubkey = client_key.public_key().to_hex()
     body = b'{"jsonrpc":"2.0","method":"tools/call"}'
     url = "https://example.test/mcp"
     event = sign_event(
@@ -235,8 +235,8 @@ def test_helper_revalidates_a_real_nip98_signature(tmp_path):
         created_at=int(time.time()),
     )
     authorization = "Nostr " + base64.b64encode(json.dumps(event.model_dump()).encode()).decode()
-    server_key = PrivateKey()
-    server_pubkey = PublicKeyXOnly.from_valid_secret(server_key.secret).format().hex()
+    server_key = Keys.generate()
+    server_pubkey = server_key.public_key().to_hex()
     server_identity = ServerIdentity(server_key, server_pubkey)
     record = IdentityRecord(
         pubkey=client_pubkey,
@@ -279,8 +279,8 @@ def test_handle_publishes_the_caller_identity_for_the_adapter_call_only(monkeypa
     from yunohost_mcp.broker.helper import BrokerRequestHandler
     from yunohost_mcp.broker.operations import BrokerOperation
 
-    client_key = PrivateKey()
-    client_pubkey = PublicKeyXOnly.from_valid_secret(client_key.secret).format().hex()
+    client_key = Keys.generate()
+    client_pubkey = client_key.public_key().to_hex()
     body = b"{}"
     url = "https://example.test/mcp"
     event = sign_event(
@@ -291,8 +291,8 @@ def test_handle_publishes_the_caller_identity_for_the_adapter_call_only(monkeypa
         created_at=int(time.time()),
     )
     authorization = "Nostr " + base64.b64encode(json.dumps(event.model_dump()).encode()).decode()
-    server_key = PrivateKey()
-    server_pubkey = PublicKeyXOnly.from_valid_secret(server_key.secret).format().hex()
+    server_key = Keys.generate()
+    server_pubkey = server_key.public_key().to_hex()
     record = IdentityRecord(
         pubkey=client_pubkey, name="test-agent", roles=("readonly",), scopes=scopes_for_roles(("readonly",))
     )

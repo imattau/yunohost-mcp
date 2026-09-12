@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 
 from .auth.nostr import NostrEvent, UnsignedNostrEvent, sign_event
 from .concord_announcements import AnnouncementDraft, build_announcement_draft, prepare_announcement
@@ -113,7 +113,7 @@ async def finish_announcement_envelope(
     with, or carries an invalid signature.
     """
 
-    ephemeral = PrivateKey()
+    ephemeral = Keys.generate()
     envelope = finish_chat_envelope(
         rumor=prepared.rumor,
         seal_template=prepared.seal_template,
@@ -133,7 +133,7 @@ async def publish_package_announcement(
     catalogue_publication: dict[str, Any],
     bundle: ValidatedInviteBundle,
     control_rumors: list[dict[str, Any]],
-    bot_key: PrivateKey,
+    bot_key: Keys,
     created_at: int,
     millisecond: int = 0,
     publisher: Callable[..., Awaitable[RelayPublishResult]] = publish_signed_event,
@@ -151,7 +151,7 @@ async def publish_package_announcement(
     caller-supplied signature.
     """
 
-    author_pubkey = PublicKeyXOnly.from_valid_secret(bot_key.secret).format().hex()
+    author_pubkey = bot_key.public_key().to_hex()
     prepared = prepare_announcement_envelope(
         source=source,
         catalogue_publication=catalogue_publication,

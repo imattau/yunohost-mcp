@@ -1,7 +1,7 @@
 import hashlib
 
 import pytest
-from coincurve import PrivateKey
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.concord_announcement_publish import publish_package_announcement
 from yunohost_mcp.concord_bundle import validate_invite_bundle
@@ -51,7 +51,7 @@ async def test_publish_package_announcement_routes_and_publishes():
         catalogue_publication={"app_id": "ditto", "version": "1.2~ynh1", "naddr": "naddr1example"},
         bundle=_bundle(),
         control_rumors=[_channel_rumor()],
-        bot_key=PrivateKey(b"b" * 32),
+        bot_key=Keys(SecretKey.from_bytes(b"b" * 32)),
         created_at=1_700_000_000,
         publisher=publisher,
     )
@@ -75,7 +75,7 @@ async def test_publish_package_announcement_does_not_publish_without_a_channel()
         catalogue_publication={"app_id": "ditto", "version": "1.2~ynh1"},
         bundle=_bundle(),
         control_rumors=[],
-        bot_key=PrivateKey(b"b" * 32),
+        bot_key=Keys(SecretKey.from_bytes(b"b" * 32)),
         created_at=1_700_000_000,
         publisher=publisher,
     )

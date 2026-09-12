@@ -1,6 +1,6 @@
 import pytest
 
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.concord_keys import ConcordKeyError, derive_group_key
 
@@ -15,7 +15,7 @@ def test_group_key_is_deterministic_and_x_only():
     assert first == second
     assert len(first.secret) == 32
     assert len(first.pubkey_hex) == 64
-    assert PublicKeyXOnly.from_valid_secret(first.secret).format().hex() == first.pubkey_hex
+    assert Keys(SecretKey.from_bytes(first.secret)).public_key().to_hex() == first.pubkey_hex
 
 
 def test_group_key_changes_with_channel_or_epoch():

@@ -1,6 +1,6 @@
 import json
 
-from coincurve import PrivateKey
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.auth.nostr import verify_event
 from yunohost_mcp.concord_crypto import decrypt_self_conversation
@@ -9,7 +9,7 @@ from yunohost_mcp.concord_membership import build_join_envelope
 
 
 def test_build_join_envelope_requires_explicit_event_construction():
-    bot = PrivateKey(b"b" * 32)
+    bot = Keys(SecretKey.from_bytes(b"b" * 32))
     community_root = b"r" * 32
     community_id = b"c" * 32
     rumor, seal, wrap = build_join_envelope(

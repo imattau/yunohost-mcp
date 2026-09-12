@@ -22,7 +22,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost_mcp.auth.npub import hex_to_npub
 
@@ -33,7 +33,7 @@ class ServerIdentityError(RuntimeError):
 
 @dataclass(frozen=True)
 class ServerIdentity:
-    _private_key: PrivateKey
+    _private_key: Keys
     pubkey_hex: str
 
     @property
@@ -41,7 +41,7 @@ class ServerIdentity:
         return hex_to_npub(self.pubkey_hex)
 
     def sign(self, message: bytes) -> bytes:
-        return self._private_key.sign_schnorr(message)
+        return bytes.fromhex(self._private_key.sign_schnorr(message))
 
     @classmethod
     def load_or_generate(cls, path: Path) -> ServerIdentity:
@@ -53,16 +53,16 @@ class ServerIdentity:
             _assert_private_permissions(path)
             secret_hex = path.read_text().strip()
             try:
-                private_key = PrivateKey(bytes.fromhex(secret_hex))
-            except (ValueError, TypeError) as exc:
+                private_key = Keys.parse(secret_hex)
+            except Exception as exc:  # noqa: BLE001 - normalize rust-nostr parse errors
                 raise ServerIdentityError(f"{path}: not a valid 32-byte hex private key") from exc
         else:
-            private_key = PrivateKey()
+            private_key = Keys.generate()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(private_key.to_hex())
+            path.write_text(private_key.secret_key().to_hex())
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600: owner read/write only
 
-        pubkey_hex = PublicKeyXOnly.from_valid_secret(private_key.secret).format().hex()
+        pubkey_hex = private_key.public_key().to_hex()
         return cls(_private_key=private_key, pubkey_hex=pubkey_hex)
 
 

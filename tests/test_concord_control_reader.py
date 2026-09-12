@@ -2,7 +2,7 @@ import hashlib
 import json
 
 import pytest
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.concord_bundle import validate_invite_bundle
@@ -38,8 +38,8 @@ async def test_load_control_rumors_derives_read_key_and_decodes_wrap():
         ).hexdigest()
     )
     read_key = derive_group_key(root, "concord/control", community_id, 2)
-    signer = PrivateKey(b"k" * 32)
-    signer_pubkey = PublicKeyXOnly.from_valid_secret(signer.secret).format().hex()
+    signer = Keys(SecretKey.from_bytes(b"k" * 32))
+    signer_pubkey = signer.public_key().to_hex()
     rumor = {
         "id": "0" * 64,
         "pubkey": signer_pubkey,

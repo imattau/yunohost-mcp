@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from yunohost_mcp.auth.npub import Bech32Error, hex_to_npub, npub_to_hex
+from yunohost_mcp.auth.npub import Bech32Error, hex_to_npub, hex_to_nsec, npub_to_hex
 
 
 def test_roundtrip():
@@ -19,9 +19,6 @@ def test_invalid_npub_rejected():
 
 def test_wrong_hrp_rejected():
     # A valid bech32 string, but with the wrong human-readable prefix.
-    from bech32 import bech32_encode, convertbits
-
-    data = convertbits(bytes(32), 8, 5, True)
-    fake = bech32_encode("nsec", data)
+    fake = hex_to_nsec("11" * 32)
     with pytest.raises(Bech32Error):
         npub_to_hex(fake)

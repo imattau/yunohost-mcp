@@ -1,7 +1,7 @@
 import hashlib
 
 import pytest
-from coincurve import PrivateKey
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.concord_bundle import validate_invite_bundle
 from yunohost_mcp.concord_join import publish_join
@@ -38,7 +38,7 @@ async def test_publish_join_publishes_only_the_join_wrap():
 
     result = await publish_join(
         bundle=_bundle(),
-        bot_key=PrivateKey(b"e" * 32),
+        bot_key=Keys(SecretKey.from_bytes(b"e" * 32)),
         created_at=1_700_000_000,
         publisher=publisher,
         fetcher=fetcher,

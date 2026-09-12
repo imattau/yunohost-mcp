@@ -14,7 +14,7 @@ import hashlib
 import json
 import time
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost_mcp.auth.nostr import NostrEvent, sign_event
 
@@ -27,15 +27,14 @@ __all__ = [
 ]
 
 
-def new_keypair() -> tuple[PrivateKey, str]:
-    """Return (private_key, x_only_pubkey_hex)."""
-    sk = PrivateKey()
-    pubkey_hex = PublicKeyXOnly.from_valid_secret(sk.secret).format().hex()
-    return sk, pubkey_hex
+def new_keypair() -> tuple[Keys, str]:
+    """Return (Keys, x_only_pubkey_hex)."""
+    sk = Keys.generate()
+    return sk, sk.public_key().to_hex()
 
 
 def make_nip98_authorization_header(
-    sk: PrivateKey,
+    sk: Keys,
     pubkey: str,
     *,
     method: str,
@@ -61,7 +60,7 @@ def make_nip98_authorization_header(
 
 
 def make_delegation_event(
-    delegator_sk: PrivateKey,
+    delegator_sk: Keys,
     delegator_pubkey: str,
     *,
     delegate_pubkey: str,

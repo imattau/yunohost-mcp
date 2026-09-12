@@ -1,14 +1,13 @@
 import pytest
-import bech32
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Coordinate, Keys, Kind, Nip19Coordinate, PublicKey, SecretKey
 
 from yunohost_mcp.auth.nostr import sign_event
 from yunohost_mcp.concord_invite_event import ConcordInviteEventError, decode_invite_naddr, extract_invite_ciphertext
 
 
 def _event(marker: str = "6"):
-    key = PrivateKey(b"i" * 32)
-    author = PublicKeyXOnly.from_valid_secret(key.secret).format().hex()
+    key = Keys(SecretKey.from_bytes(b"i" * 32))
+    author = key.public_key().to_hex()
     return sign_event(
         key,
         pubkey=author,
@@ -41,21 +40,19 @@ def test_extract_invite_ciphertext_rejects_wrong_author():
 
 
 def test_decode_invite_naddr_extracts_the_link_signer_coordinate():
-    key = PrivateKey(b"i" * 32)
-    author = PublicKeyXOnly.from_valid_secret(key.secret).format()
-    raw = bytes([0, 0, 2, 32]) + author + bytes([3, 4]) + (33301).to_bytes(4, "big")
-    naddr = bech32.bech32_encode("naddr", bech32.convertbits(raw, 8, 5, True))
+    key = Keys(SecretKey.from_bytes(b"i" * 32))
+    author = key.public_key().to_hex()
+    naddr = Nip19Coordinate(Coordinate(Kind(33301), PublicKey.parse(author), "")).to_bech32()
 
     coordinate = decode_invite_naddr(naddr)
 
-    assert coordinate.author_hex == author.hex()
+    assert coordinate.author_hex == author
     assert coordinate.kind == 33301
     assert coordinate.identifier == ""
 
 
 def test_decode_invite_naddr_rejects_wrong_coordinate():
-    raw = bytes([0, 1]) + b"d" + bytes([2, 32]) + b"a" * 32 + bytes([3, 4]) + (1).to_bytes(4, "big")
-    naddr = bech32.bech32_encode("naddr", bech32.convertbits(raw, 8, 5, True))
+    naddr = Nip19Coordinate(Coordinate(Kind(1), PublicKey.parse(Keys.generate().public_key().to_hex()), "d")).to_bech32()
 
     with pytest.raises(ConcordInviteEventError, match="wrong coordinate"):
         decode_invite_naddr(naddr)

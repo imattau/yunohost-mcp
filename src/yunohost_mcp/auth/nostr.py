@@ -2,6 +2,9 @@
 
 This module knows nothing about HTTP or NIP-98 — it is the generic
 "is this a validly-signed Nostr event" primitive that nip98.py builds on.
+
+Key handling, event signing, and signature verification all delegate to the
+nostr-sdk (rust-nostr) bindings rather than hand-rolled secp256k1.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ import hashlib
 import json
 import time
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Event, EventBuilder, Keys, Kind, Tag, Timestamp
 from pydantic import BaseModel, field_validator
 
 HEX32_LEN = 64  # 32 bytes as hex
@@ -103,11 +106,8 @@ def verify_event(event: NostrEvent) -> None:
         raise NostrEventError(f"event id mismatch: got {event.id}, computed {expected_id}")
 
     try:
-        pubkey_bytes = bytes.fromhex(event.pubkey)
-        sig_bytes = bytes.fromhex(event.sig)
-        message = bytes.fromhex(event.id)
-        verifying_key = PublicKeyXOnly(pubkey_bytes)
-        ok = verifying_key.verify(sig_bytes, message)
+        parsed = Event.from_json(json.dumps(event.model_dump()))
+        ok = parsed.verify_signature()
     except Exception as exc:  # noqa: BLE001 - any crypto-library failure means "invalid"
         raise NostrEventError(f"signature verification failed: {exc}") from exc
 
@@ -116,7 +116,7 @@ def verify_event(event: NostrEvent) -> None:
 
 
 def sign_event(
-    private_key: PrivateKey,
+    private_key: Keys,
     *,
     pubkey: str,
     kind: int,
@@ -134,9 +134,14 @@ def sign_event(
     work.
     """
     created_at = int(time.time()) if created_at is None else created_at
-    unsigned = NostrEvent(
-        id="0" * 64, pubkey=pubkey, created_at=created_at, kind=kind, tags=tags, content=content, sig="0" * 128
+    builder = EventBuilder(Kind(kind), content).tags([Tag.parse(list(t)) for t in tags])
+    event = builder.custom_created_at(Timestamp.from_secs(created_at)).finalize(private_key)
+    return NostrEvent(
+        id=event.id().to_hex(),
+        pubkey=pubkey,
+        created_at=created_at,
+        kind=kind,
+        tags=tags,
+        content=content,
+        sig=event.signature(),
     )
-    event_id = compute_event_id(unsigned)
-    sig = private_key.sign_schnorr(bytes.fromhex(event_id)).hex()
-    return NostrEvent(id=event_id, pubkey=pubkey, created_at=created_at, kind=kind, tags=tags, content=content, sig=sig)

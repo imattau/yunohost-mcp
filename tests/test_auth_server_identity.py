@@ -48,11 +48,23 @@ def test_rejects_malformed_key_file(tmp_path: Path):
 
 
 def test_sign_produces_a_verifiable_schnorr_signature(tmp_path: Path):
-    from coincurve import PublicKeyXOnly
+    import json
+
+    from nostr_sdk import Event
 
     path = tmp_path / "server_identity.key"
     identity = ServerIdentity.load_or_generate(path)
     message = b"\x00" * 32
     sig = identity.sign(message)
-    pubkey = PublicKeyXOnly(bytes.fromhex(identity.pubkey_hex))
-    assert pubkey.verify(sig, message)
+    # nostr-sdk exposes no raw verify_schnorr on PublicKey; verify the raw
+    # signature by framing it as an event whose id is the signed message.
+    event = {
+        "id": message.hex(),
+        "pubkey": identity.pubkey_hex,
+        "created_at": 0,
+        "kind": 1,
+        "tags": [],
+        "content": "",
+        "sig": sig.hex(),
+    }
+    assert Event.from_json(json.dumps(event)).verify_signature()

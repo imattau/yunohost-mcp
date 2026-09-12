@@ -551,7 +551,7 @@ class Nip46Auth(httpx2.Auth):
     to sign it - never a locally-held key. Mirrors bridge.py's
     Nip98BridgeAuth exactly in the header it produces; only *how* the
     event gets signed differs (a live round trip through `connect`,
-    not coincurve on a local private key)."""
+    not a locally-held key)."""
 
     requires_request_body = True
 

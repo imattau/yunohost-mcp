@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from coincurve import PrivateKey
+from nostr_sdk import Keys
 
 from .auth.signing import ClientIdentity
 
@@ -18,7 +18,7 @@ class CredentialFileError(ValueError):
     """A configured credential file is missing, unsafe, or malformed."""
 
 
-def load_bot_private_key(path: Path) -> PrivateKey:
+def load_bot_private_key(path: Path) -> Keys:
     """Load a protected bot nsec/hex credential without exposing its value."""
 
     try:

@@ -183,7 +183,7 @@ async def test_full_delegation_end_to_end(owner_identity, capsys):
 
     async with _LiveServer() as live:
         args = _args(
-            key=owner_identity.private_key.secret.hex(),
+            key=owner_identity.private_key.secret_key().to_hex(),
             delegate=agent.pubkey_hex,
             remote_url=live.url,
             role=["readonly"],
@@ -219,7 +219,7 @@ async def test_excess_scope_request_warns_but_still_signs(owner_identity, capsys
     agent = ClientIdentity.from_key_string("1" + "2" * 63)
     async with _LiveServer() as live:
         args = _args(
-            key=owner_identity.private_key.secret.hex(),
+            key=owner_identity.private_key.secret_key().to_hex(),
             delegate=agent.pubkey_hex,
             remote_url=live.url,
             role=["administrator"],  # owner only has app-admin, not administrator

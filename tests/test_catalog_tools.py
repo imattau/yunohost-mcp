@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 from mcp.client import Client
 
 from yunohost_mcp.auth.nostr import sign_event
@@ -677,8 +677,8 @@ async def test_catalog_announce_draft_then_submit_publishes_under_the_callers_ow
     ever loaded here - the caller signs the seal with a key only it holds,
     and catalog_announce_submit must still route/publish/record delivery
     exactly like the bot-key path does."""
-    agent_key = PrivateKey(b"k" * 32)
-    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    agent_key = Keys(SecretKey.from_bytes(b"k" * 32))
+    agent_pubkey = agent_key.public_key().to_hex()
     published: list[tuple[object, list[str]]] = []
 
     async def fake_load_bundle(_invite_url, **_kwargs):
@@ -748,9 +748,9 @@ async def test_catalog_announce_submit_rejects_a_draft_issued_to_a_different_ide
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    agent_key = PrivateKey(b"k" * 32)
-    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
-    other_pubkey = PublicKeyXOnly.from_valid_secret(PrivateKey(b"j" * 32).secret).format().hex()
+    agent_key = Keys(SecretKey.from_bytes(b"k" * 32))
+    agent_pubkey = agent_key.public_key().to_hex()
+    other_pubkey = Keys(SecretKey.from_bytes(b"j" * 32)).public_key().to_hex()
 
     async def fake_load_bundle(_invite_url, **_kwargs):
         return _invite_bundle()
@@ -805,8 +805,8 @@ async def test_catalog_announce_submit_rejects_a_tampered_signature(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    agent_key = PrivateKey(b"k" * 32)
-    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    agent_key = Keys(SecretKey.from_bytes(b"k" * 32))
+    agent_pubkey = agent_key.public_key().to_hex()
 
     async def fake_load_bundle(_invite_url, **_kwargs):
         return _invite_bundle()
@@ -856,8 +856,8 @@ async def test_armada_join_draft_then_submit_publishes_under_the_callers_own_key
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    agent_key = PrivateKey(b"k" * 32)
-    agent_pubkey = PublicKeyXOnly.from_valid_secret(agent_key.secret).format().hex()
+    agent_key = Keys(SecretKey.from_bytes(b"k" * 32))
+    agent_pubkey = agent_key.public_key().to_hex()
     published: list[tuple[object, list[str]]] = []
 
     async def fake_load_bundle(_invite_url, **_kwargs):

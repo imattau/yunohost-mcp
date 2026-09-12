@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
@@ -65,6 +65,6 @@ def derive_group_key(secret: bytes, label: str, identifier: bytes, epoch: int | 
         if 0 < scalar < _CURVE_ORDER:
             return GroupKeyMaterial(
                 secret=seed,
-                pubkey_hex=PublicKeyXOnly.from_valid_secret(seed).format().hex(),
+                pubkey_hex=Keys(SecretKey.from_bytes(seed)).public_key().to_hex(),
             )
     raise ConcordKeyError("CORD scalar normalization exhausted its retry counter")

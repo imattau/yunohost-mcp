@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import bech32
+from nostr_sdk import Nip19Coordinate
 
 from .auth.nostr import NostrEvent, verify_event
 
@@ -26,36 +26,16 @@ def decode_invite_naddr(value: str) -> InviteCoordinate:
     """Decode Concord's strict kind-33301, empty-identifier naddr."""
 
     try:
-        hrp, words = bech32.bech32_decode(value)
-        if hrp != "naddr" or words is None:
-            raise ValueError
-        raw = bytes(bech32.convertbits(words, 5, 8, False) or [])
-    except (TypeError, ValueError) as exc:
+        parsed = Nip19Coordinate.from_bech32(value)
+        coordinate = parsed.coordinate()
+    except Exception as exc:  # noqa: BLE001 - normalize rust-nostr parse errors
         raise ConcordInviteEventError("invalid Concord invite naddr") from exc
-    fields: dict[int, bytes] = {}
-    offset = 0
-    while offset < len(raw):
-        if offset + 2 > len(raw):
-            raise ConcordInviteEventError("truncated Concord invite naddr")
-        field_type, length = raw[offset], raw[offset + 1]
-        offset += 2
-        end = offset + length
-        if end > len(raw):
-            raise ConcordInviteEventError("truncated Concord invite naddr field")
-        if field_type in fields:
-            raise ConcordInviteEventError("duplicate Concord invite naddr field")
-        fields[field_type] = raw[offset:end]
-        offset = end
-    if set(fields) - {0, 2, 3} or 0 not in fields or 2 not in fields or 3 not in fields:
-        raise ConcordInviteEventError("incomplete Concord invite naddr")
-    identifier = fields[0].decode("utf-8", errors="strict")
-    author = fields[2]
-    if identifier != "" or len(author) != 32 or len(fields[3]) != 4:
+    identifier = coordinate.identifier()
+    author = coordinate.public_key().to_hex()
+    kind = coordinate.kind().as_u16()
+    if identifier != "" or kind != 33301:
         raise ConcordInviteEventError("Concord invite naddr has the wrong coordinate shape")
-    kind = int.from_bytes(fields[3], "big")
-    if kind != 33301:
-        raise ConcordInviteEventError("Concord invite naddr has the wrong event kind")
-    return InviteCoordinate(author_hex=author.hex(), kind=kind, identifier=identifier)
+    return InviteCoordinate(author_hex=author, kind=kind, identifier=identifier)
 
 
 def _tag(event: NostrEvent, name: str) -> str | None:

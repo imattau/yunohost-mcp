@@ -21,7 +21,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost_mcp.auth.nip98 import NIP98_KIND
 from yunohost_mcp.auth.nostr import sign_event
@@ -36,7 +36,7 @@ class KeyLoadError(ValueError):
 class ClientIdentity:
     """A locally-held Nostr keypair used to sign outgoing requests."""
 
-    private_key: PrivateKey
+    private_key: Keys
     pubkey_hex: str
 
     @property
@@ -56,11 +56,11 @@ class ClientIdentity:
             hex_key = key
 
         try:
-            private_key = PrivateKey(bytes.fromhex(hex_key))
-        except (ValueError, TypeError) as exc:
+            private_key = Keys.parse(hex_key)
+        except Exception as exc:  # noqa: BLE001 - normalize rust-nostr parse errors
             raise KeyLoadError(f"not a valid hex or nsec private key: {exc}") from exc
 
-        pubkey_hex = PublicKeyXOnly.from_valid_secret(private_key.secret).format().hex()
+        pubkey_hex = private_key.public_key().to_hex()
         return cls(private_key=private_key, pubkey_hex=pubkey_hex)
 
     def sign_nip98(self, *, method: str, url: str, body: bytes = b"") -> str:

@@ -256,8 +256,8 @@ def generate_key(path: Path) -> ClientIdentity:
     # A uniformly random 32-byte value is virtually certain to already be
     # a valid secp256k1 private key (invalid only for the ~1-in-2^128
     # values outside [1, n-1]) - retrying on the practically-unreachable
-    # KeyLoadError case is simpler and just as correct as reproducing
-    # coincurve's own validity check here.
+    # KeyLoadError case is simpler and just as correct as reproducing a
+    # validity check here.
     while True:
         hex_key = secrets.token_bytes(32).hex()
         try:

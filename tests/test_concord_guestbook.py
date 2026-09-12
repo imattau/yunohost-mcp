@@ -1,5 +1,5 @@
 import pytest
-from coincurve import PrivateKey
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.concord_guestbook import decode_guestbook_wrap, fold_guestbook
 from yunohost_mcp.concord_keys import derive_group_key
@@ -10,7 +10,7 @@ def test_decode_guestbook_join_wrap():
     root = b"r" * 32
     community = b"c" * 32
     _, _, wrap = build_join_envelope(
-        bot_key=PrivateKey(b"b" * 32),
+        bot_key=Keys(SecretKey.from_bytes(b"b" * 32)),
         community_root=root,
         community_id=community,
         epoch=2,

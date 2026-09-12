@@ -258,11 +258,11 @@ def _get_native_control_plane_adapter():
     if len(secret) != 64:
         raise RuntimeError("native control-plane agent key must be a 64-character hex key")
     try:
-        from coincurve import PublicKeyXOnly
+        from nostr_sdk import Keys
         from yunohost.nostr_identity import publish_to_relay
         from yunohost.nostr_mcp_adapter import NostrMCPAdapter
 
-        pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(secret)).format().hex()
+        pubkey = Keys.parse(secret).public_key().to_hex()
     except (ValueError, ImportError) as exc:
         raise RuntimeError("native control-plane adapter is unavailable") from exc
     _native_control_plane_adapter = NostrMCPAdapter(

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 from typing import Any, Awaitable, Callable, Literal
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys
 
 from .concord_bundle import ValidatedInviteBundle
 from .concord_guestbook import GuestbookError, decode_guestbook_wrap, fold_guestbook
@@ -26,7 +26,7 @@ class JoinPublishResult:
 async def publish_join(
     *,
     bundle: ValidatedInviteBundle,
-    bot_key: PrivateKey,
+    bot_key: Keys,
     created_at: int,
     millisecond: int = 0,
     publisher: Callable[..., Awaitable[RelayPublishResult]] = publish_signed_event,
@@ -43,7 +43,7 @@ async def publish_join(
         millisecond=millisecond,
     )
     publication = await publisher(wrap, list(bundle.relays))
-    bot_pubkey = PublicKeyXOnly.from_valid_secret(bot_key.secret).format().hex()
+    bot_pubkey = bot_key.public_key().to_hex()
     guestbook_key = derive_group_key(
         bundle.community_root,
         "concord/guestbook",

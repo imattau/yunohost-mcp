@@ -1,6 +1,6 @@
 import json
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.auth.nostr import verify_event
 from yunohost_mcp.concord_envelope import build_chat_envelope
@@ -9,8 +9,8 @@ from yunohost_mcp.concord_keys import derive_group_key
 
 
 def test_build_chat_envelope_has_unsigned_rumor_and_two_signed_layers():
-    author = PrivateKey(b"a" * 32)
-    ephemeral = PrivateKey(b"e" * 32)
+    author = Keys(SecretKey.from_bytes(b"a" * 32))
+    ephemeral = Keys(SecretKey.from_bytes(b"e" * 32))
     stream = derive_group_key(b"s" * 32, "concord/channel", b"c" * 32, 0)
     encrypted = []
 
@@ -38,15 +38,15 @@ def test_build_chat_envelope_has_unsigned_rumor_and_two_signed_layers():
     assert envelope.seal.kind == 20013
     assert envelope.wrap.kind == 1059
     assert envelope.wrap.pubkey == stream.pubkey_hex
-    ephemeral_pubkey = PublicKeyXOnly.from_valid_secret(ephemeral.secret).format().hex()
+    ephemeral_pubkey = ephemeral.public_key().to_hex()
     assert envelope.wrap.tags == [["p", ephemeral_pubkey]]
     assert encrypted[0]["kind"] == 9
     assert encrypted[1]["kind"] == 20013
 
 
 def test_nip44_self_conversation_round_trips_envelope_layers():
-    author = PrivateKey(b"a" * 32)
-    ephemeral = PrivateKey(b"e" * 32)
+    author = Keys(SecretKey.from_bytes(b"a" * 32))
+    ephemeral = Keys(SecretKey.from_bytes(b"e" * 32))
     stream = derive_group_key(b"s" * 32, "concord/channel", b"c" * 32, 0)
     encrypt = self_conversation_encryptor(stream)
     envelope = build_chat_envelope(

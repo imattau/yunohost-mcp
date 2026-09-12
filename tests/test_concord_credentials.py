@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from coincurve import PrivateKey
+from nostr_sdk import Keys
 
 from yunohost_mcp.concord_credentials import CredentialFileError, load_bot_private_key, read_credential_file
 
@@ -52,8 +52,8 @@ def test_load_bot_private_key_parses_protected_hex_without_returning_text(tmp_pa
 
     key = load_bot_private_key(path)
 
-    assert isinstance(key, PrivateKey)
-    assert key.secret == bytes.fromhex("a" * 64)
+    assert isinstance(key, Keys)
+    assert key.secret_key().to_hex() == "a" * 64
 
 
 def test_load_bot_private_key_hides_invalid_secret_details(tmp_path: Path):

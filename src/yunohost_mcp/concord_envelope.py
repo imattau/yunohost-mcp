@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import json
 from typing import Callable
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from .auth.nostr import NostrEvent, UnsignedNostrEvent, compute_event_id, sign_event, verify_event
 from .concord_keys import GroupKeyMaterial
@@ -113,7 +113,7 @@ def finish_chat_envelope(
     seal_template: SealTemplate,
     signed_seal: NostrEvent,
     stream_key: GroupKeyMaterial,
-    ephemeral_key: PrivateKey,
+    ephemeral_key: Keys,
     encrypt: Callable[[str], str],
     created_at: int,
 ) -> ConcordEnvelope:
@@ -126,9 +126,9 @@ def finish_chat_envelope(
     if not seal_template.matches(signed_seal):
         raise ConcordEnvelopeError("signed seal does not match the issued template")
     verify_event(signed_seal)
-    ephemeral_pubkey = PublicKeyXOnly.from_valid_secret(ephemeral_key.secret).format().hex()
+    ephemeral_pubkey = ephemeral_key.public_key().to_hex()
     wrap = sign_event(
-        PrivateKey(stream_key.secret),
+        Keys(SecretKey.from_bytes(stream_key.secret)),
         pubkey=stream_key.pubkey_hex,
         kind=1059,
         tags=[["p", ephemeral_pubkey]],
@@ -140,13 +140,13 @@ def finish_chat_envelope(
 
 def build_chat_envelope(
     *,
-    author_key: PrivateKey,
+    author_key: Keys,
     stream_key: GroupKeyMaterial,
     channel_id: str,
     epoch: int,
     text: str,
     encrypt: Callable[[str], str],
-    ephemeral_key: PrivateKey,
+    ephemeral_key: Keys,
     created_at: int,
     millisecond: int = 0,
 ) -> ConcordEnvelope:
@@ -163,7 +163,7 @@ def build_chat_envelope(
     signature.
     """
 
-    author_pubkey = PublicKeyXOnly.from_valid_secret(author_key.secret).format().hex()
+    author_pubkey = author_key.public_key().to_hex()
     rumor, seal_template = build_chat_rumor_and_seal_template(
         author_pubkey=author_pubkey,
         stream_key=stream_key,

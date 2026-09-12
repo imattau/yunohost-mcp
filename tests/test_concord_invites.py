@@ -4,8 +4,7 @@ import hmac
 import hashlib
 import json
 
-import bech32
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Coordinate, Keys, Kind, Nip19Coordinate, PublicKey, SecretKey
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
@@ -138,11 +137,12 @@ async def test_load_invite_bundle_composes_fetch_verify_and_decrypt():
         "relays": ["wss://relay.example"],
         "channels": [{"id": "e" * 64, "epoch": 1, "name": "ditto_ynh"}],
     }
-    link_pubkey = PublicKeyXOnly.from_valid_secret(b"i" * 32).format().hex()
+    link_key = Keys(SecretKey.from_bytes(b"i" * 32))
+    link_pubkey = link_key.public_key().to_hex()
     bundle_key = derive_invite_bundle_key(token)
     ciphertext = _raw_nip44_encrypt(json.dumps(bundle, separators=(",", ":")), bundle_key)
     event = sign_event(
-        PrivateKey(b"i" * 32),
+        link_key,
         pubkey=link_pubkey,
         kind=33301,
         tags=[["d", ""], ["vsk", "6"]],
@@ -151,9 +151,7 @@ async def test_load_invite_bundle_composes_fetch_verify_and_decrypt():
     ).model_dump()
     raw = bytes([4, 1]) + token
     fragment = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    author = bytes.fromhex(link_pubkey)
-    naddr_raw = bytes([0, 0, 2, 32]) + author + bytes([3, 4]) + (33301).to_bytes(4, "big")
-    naddr = bech32.bech32_encode("naddr", bech32.convertbits(naddr_raw, 8, 5, True))
+    naddr = Nip19Coordinate(Coordinate(Kind(33301), PublicKey.parse(link_pubkey), "")).to_bech32()
 
     async def fetcher(author_hex, relays):
         assert author_hex == link_pubkey

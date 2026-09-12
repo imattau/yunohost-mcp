@@ -11,7 +11,7 @@ client-held key instead of a key held here.
 
 from __future__ import annotations
 
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from .auth.nostr import NostrEvent, UnsignedNostrEvent, compute_event_id, sign_event, verify_event
 from .concord_crypto import self_conversation_encryptor
@@ -89,12 +89,12 @@ def finish_join_envelope(
         raise ConcordEnvelopeError("signed seal does not match the issued template")
     verify_event(signed_seal)
     encrypt = self_conversation_encryptor(guestbook_key)
-    ephemeral = PrivateKey()
+    ephemeral = Keys.generate()
     wrap = sign_event(
-        PrivateKey(guestbook_key.secret),
+        Keys(SecretKey.from_bytes(guestbook_key.secret)),
         pubkey=guestbook_key.pubkey_hex,
         kind=1059,
-        tags=[["p", PublicKeyXOnly.from_valid_secret(ephemeral.secret).format().hex()]],
+        tags=[["p", ephemeral.public_key().to_hex()]],
         content=encrypt(signed_seal.model_dump_json()),
         created_at=created_at,
     )
@@ -103,7 +103,7 @@ def finish_join_envelope(
 
 def build_join_envelope(
     *,
-    bot_key: PrivateKey,
+    bot_key: Keys,
     community_root: bytes,
     community_id: bytes,
     epoch: int,
@@ -123,7 +123,7 @@ def build_join_envelope(
     shared bot key path) rather than needing a caller-supplied signature.
     """
 
-    bot_pubkey = PublicKeyXOnly.from_valid_secret(bot_key.secret).format().hex()
+    bot_pubkey = bot_key.public_key().to_hex()
     rumor, seal_template, guestbook_key = build_join_rumor_and_seal_template(
         bot_pubkey=bot_pubkey,
         community_root=community_root,

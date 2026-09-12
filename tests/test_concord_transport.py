@@ -1,5 +1,5 @@
 import pytest
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 from nostr_sdk import ReqTarget
 
 from yunohost_mcp.auth.nostr import sign_event
@@ -39,8 +39,8 @@ class FakeClient:
 @pytest.mark.anyio
 async def test_publish_signed_event_deduplicates_relays_and_shuts_down():
     FakeClient.instances.clear()
-    key = PrivateKey(b"a" * 32)
-    pubkey = PublicKeyXOnly.from_valid_secret(key.secret).format().hex()
+    key = Keys(SecretKey.from_bytes(b"a" * 32))
+    pubkey = key.public_key().to_hex()
     event = sign_event(key, pubkey=pubkey, kind=1059, tags=[], content="ciphertext", created_at=1)
 
     result = await publish_signed_event(
@@ -59,8 +59,8 @@ async def test_publish_signed_event_deduplicates_relays_and_shuts_down():
 
 @pytest.mark.anyio
 async def test_publish_signed_event_rejects_missing_relays():
-    key = PrivateKey(b"a" * 32)
-    pubkey = PublicKeyXOnly.from_valid_secret(key.secret).format().hex()
+    key = Keys(SecretKey.from_bytes(b"a" * 32))
+    pubkey = key.public_key().to_hex()
     event = sign_event(key, pubkey=pubkey, kind=1059, tags=[], content="ciphertext", created_at=1)
 
     with pytest.raises(ValueError, match="at least one"):
@@ -70,8 +70,8 @@ async def test_publish_signed_event_rejects_missing_relays():
 @pytest.mark.anyio
 async def test_fetch_control_events_is_bounded_and_shuts_down():
     FakeClient.instances.clear()
-    key = PrivateKey(b"a" * 32)
-    pubkey = PublicKeyXOnly.from_valid_secret(key.secret).format().hex()
+    key = Keys(SecretKey.from_bytes(b"a" * 32))
+    pubkey = key.public_key().to_hex()
 
     events = await fetch_control_events(pubkey, ["wss://relay.example"], max_events=4, client_factory=FakeClient)
 
@@ -91,8 +91,8 @@ async def test_fetch_control_events_rejects_invalid_control_key():
 @pytest.mark.anyio
 async def test_fetch_invite_events_uses_single_addressable_coordinate_result():
     FakeClient.instances.clear()
-    key = PrivateKey(b"a" * 32)
-    pubkey = PublicKeyXOnly.from_valid_secret(key.secret).format().hex()
+    key = Keys(SecretKey.from_bytes(b"a" * 32))
+    pubkey = key.public_key().to_hex()
 
     events = await fetch_invite_events(pubkey, ["wss://relay.example"], client_factory=FakeClient)
 

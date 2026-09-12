@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from coincurve import PrivateKey, PublicKeyXOnly
+from nostr_sdk import Keys, SecretKey
 
 from yunohost_mcp.auth.nostr import UnsignedNostrEvent, compute_event_id, sign_event
 from yunohost_mcp.concord_control_crypto import ControlPlaneError, decode_control_wrap
@@ -10,7 +10,7 @@ from yunohost_mcp.concord_keys import derive_group_key
 
 
 def _control_wrap(read_key, control_key, rumor):
-    author_pubkey = PublicKeyXOnly.from_valid_secret(control_key.secret).format().hex()
+    author_pubkey = control_key.public_key().to_hex()
     seal = sign_event(
         control_key,
         pubkey=author_pubkey,
@@ -19,7 +19,7 @@ def _control_wrap(read_key, control_key, rumor):
         content=json.dumps(rumor, separators=(",", ":")),
         created_at=1,
     )
-    stream_pubkey = PublicKeyXOnly.from_valid_secret(control_key.secret).format().hex()
+    stream_pubkey = control_key.public_key().to_hex()
     return sign_event(
         control_key,
         pubkey=stream_pubkey,
@@ -32,8 +32,8 @@ def _control_wrap(read_key, control_key, rumor):
 
 def test_decode_control_wrap_verifies_seal_and_rumor_binding():
     read_key = derive_group_key(b"r" * 32, "concord/control", b"c" * 32, 0)
-    control_key = PrivateKey(b"k" * 32)
-    author_pubkey = PublicKeyXOnly.from_valid_secret(control_key.secret).format().hex()
+    control_key = Keys(SecretKey.from_bytes(b"k" * 32))
+    author_pubkey = control_key.public_key().to_hex()
     rumor = {
         "id": "0" * 64,
         "pubkey": author_pubkey,
@@ -58,7 +58,7 @@ def test_decode_control_wrap_verifies_seal_and_rumor_binding():
 
 def test_decode_control_wrap_rejects_wrong_stream():
     read_key = derive_group_key(b"r" * 32, "concord/control", b"c" * 32, 0)
-    key = PrivateKey(b"k" * 32)
+    key = Keys(SecretKey.from_bytes(b"k" * 32))
     rumor = {"id": "0" * 64, "pubkey": "0" * 64, "created_at": 1, "kind": 3308, "tags": [], "content": "{}"}
     wrap = _control_wrap(read_key, key, rumor)
 
