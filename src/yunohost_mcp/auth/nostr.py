@@ -134,6 +134,8 @@ def sign_event(
     work.
     """
     created_at = int(time.time()) if created_at is None else created_at
+    if private_key.public_key().to_hex() != pubkey.lower():
+        raise NostrEventError("private key does not match the supplied public key")
     builder = EventBuilder(Kind(kind), content).tags([Tag.parse(list(t)) for t in tags])
     event = builder.custom_created_at(Timestamp.from_secs(created_at)).finalize(private_key)
     return NostrEvent(
