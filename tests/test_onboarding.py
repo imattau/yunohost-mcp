@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import stat
+import types
 
 import pytest
 
@@ -139,6 +140,118 @@ def test_doctor_reports_healthy_connection(tmp_path, monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "healthy"
     assert result["server"] == "https://example.test/mcp"
+
+
+def test_tool_result_json_prefers_structured_content():
+    result = _FakeCallResult(structured_content={"a": 1})
+    assert onboarding._tool_result_json(result) == {"a": 1}
+
+
+def test_tool_result_json_parses_sole_text_block():
+    result = _FakeCallResult(text=json.dumps({"a": 1}))
+    assert onboarding._tool_result_json(result) == {"a": 1}
+
+
+def test_tool_result_json_defaults_to_empty_dict_on_garbage():
+    result = _FakeCallResult(text="not json")
+    assert onboarding._tool_result_json(result) == {}
+
+
+class _FakeToolsResult:
+    def __init__(self, names):
+        self.tools = [types.SimpleNamespace(name=n) for n in names]
+
+
+class _FakeResourcesResult:
+    def __init__(self, count=1):
+        self.resources = [object()] * count
+
+
+class _FakeCallResult:
+    def __init__(self, *, is_error=False, structured_content=None, text=None):
+        self.is_error = is_error
+        self.structured_content = structured_content
+        self.content = [types.SimpleNamespace(text=text)] if text is not None else []
+
+
+class _FakeRemote:
+    def __init__(self, tool_names, responses):
+        self._tool_names = tool_names
+        self._responses = responses
+        self.called: list[str] = []
+
+    async def list_tools(self):
+        return _FakeToolsResult(self._tool_names)
+
+    async def list_resources(self):
+        return _FakeResourcesResult()
+
+    async def call_tool(self, name, args):
+        self.called.append(name)
+        return self._responses[name]
+
+
+class _FakeAsyncCtx:
+    def __init__(self, value):
+        self._value = value
+
+    async def __aenter__(self):
+        return self._value
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _patch_remote(monkeypatch, remote):
+    monkeypatch.setattr(onboarding.httpx2, "AsyncClient", lambda **kw: _FakeAsyncCtx(object()))
+    monkeypatch.setattr(onboarding, "streamable_http_client", lambda url, http_client=None: object())
+    monkeypatch.setattr(onboarding, "Client", lambda transport: _FakeAsyncCtx(remote))
+
+
+@pytest.mark.asyncio
+async def test_doctor_remote_uses_mcp_status_when_available(tmp_path, monkeypatch):
+    """nostrhost-mcp (the thin native adapter) has no whoami - reaching
+    mcp_status at all already proves transport + NIP-98 auth worked."""
+    key = tmp_path / "key"
+    onboarding.generate_key(key)
+    remote = _FakeRemote(
+        tool_names=["mcp_status", "system.status"],
+        responses={
+            "mcp_status": _FakeCallResult(
+                text=json.dumps({"agent_pubkey": "a" * 64, "actor_source": "nip98", "tools_available": 2})
+            )
+        },
+    )
+    _patch_remote(monkeypatch, remote)
+
+    result = await onboarding._doctor_remote("https://example.test/mcp", key)
+
+    assert result["status"] == "healthy"
+    assert result["server_npub"] == "a" * 64
+    assert result["actor_source"] == "nip98"
+    assert remote.called == ["mcp_status"]  # never falls through to whoami/server_identity
+
+
+@pytest.mark.asyncio
+async def test_doctor_remote_falls_back_to_whoami_without_mcp_status(tmp_path, monkeypatch):
+    """The frozen yunohost-mcp reference server has no mcp_status - doctor
+    must keep working against it exactly as before."""
+    key = tmp_path / "key"
+    onboarding.generate_key(key)
+    remote = _FakeRemote(
+        tool_names=["whoami", "server_identity"],
+        responses={
+            "whoami": _FakeCallResult(structured_content={"authenticated": True}),
+            "server_identity": _FakeCallResult(structured_content={"npub": "npub1server"}),
+        },
+    )
+    _patch_remote(monkeypatch, remote)
+
+    result = await onboarding._doctor_remote("https://example.test/mcp", key)
+
+    assert result["status"] == "healthy"
+    assert result["server_npub"] == "npub1server"
+    assert remote.called == ["whoami", "server_identity"]
 
 
 def test_hermes_config_inserts_inside_existing_section(tmp_path, monkeypatch):

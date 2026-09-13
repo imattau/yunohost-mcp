@@ -612,6 +612,24 @@ def setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tool_result_json(result: Any) -> dict[str, Any]:
+    """Best-effort JSON body of a tool result: structured_content when the
+    server declared an output schema, else the sole text block parsed as
+    JSON (nostrhost-mcp's local helper tools return plain TextContent)."""
+    structured = getattr(result, "structured_content", None)
+    if isinstance(structured, dict):
+        return structured
+    texts = [getattr(item, "text", "") for item in getattr(result, "content", []) or []]
+    if len(texts) == 1:
+        try:
+            value = json.loads(texts[0])
+        except (TypeError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 async def _doctor_remote(remote_url: str, key_file: Path) -> dict[str, Any]:
     try:
         identity = ClientIdentity.from_key_string(key_file.read_text().strip())
@@ -622,13 +640,38 @@ async def _doctor_remote(remote_url: str, key_file: Path) -> dict[str, Any]:
         async with httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(30.0)) as http_client:
             transport = streamable_http_client(remote_url, http_client=http_client)
             async with Client(transport) as remote:
+                tools = await remote.list_tools()
+                tool_names = {t.name for t in tools.tools}
+                resources = await remote.list_resources()
+
+                # nostrhost-mcp (the thin native adapter) exposes no whoami:
+                # its tools are generated from the operation registry only.
+                # Reaching mcp_status at all already proves the transport
+                # and NIP-98 auth worked - it does not check that this
+                # identity has any capability grant (that's a per-op
+                # authorization the executor decides, not the transport),
+                # so this reports reachability/identity, not authorization.
+                if "mcp_status" in tool_names:
+                    status = await remote.call_tool("mcp_status", {})
+                    if status.is_error:
+                        return {"status": "mcp_protocol_failure", "error": "server rejected mcp_status"}
+                    body = _tool_result_json(status)
+                    return {
+                        "status": "healthy",
+                        "npub": identity.npub,
+                        "tool_count": len(tools.tools),
+                        "resource_count": len(resources.resources),
+                        "server_npub": body.get("agent_pubkey"),
+                        "actor_source": body.get("actor_source"),
+                        "note": "reachability and NIP-98 identity only - run a real read tool (e.g. catalog.list) to confirm a capability grant",
+                    }
+
+                # Frozen yunohost-mcp reference server: whoami/server_identity.
                 who = await remote.call_tool("whoami", {})
                 if who.is_error:
                     return {"status": "identity_not_enrolled", "error": "server rejected whoami"}
                 if who.structured_content and who.structured_content.get("authenticated") is False:
                     return {"status": "identity_not_enrolled", "error": "server did not authenticate the client identity"}
-                tools = await remote.list_tools()
-                resources = await remote.list_resources()
                 server_identity = await remote.call_tool("server_identity", {})
                 if server_identity.is_error or not server_identity.structured_content:
                     return {"status": "mcp_protocol_failure", "error": "server_identity did not return server identity"}
