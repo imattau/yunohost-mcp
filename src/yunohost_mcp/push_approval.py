@@ -90,14 +90,17 @@ async def _request_owner_signature_async(
     operation_hash: str,
     confirmation_id: str,
     timeout_seconds: int,
-) -> bool:
+) -> Any | None:  # noqa: ANN401 - the signed nostr_sdk Event, or None on failure
     """Never raises - every failure mode (no session, connection error,
-    timeout, a mismatched or unverifiable response) just returns False,
-    leaving the ticket exactly as pending as it already was."""
+    timeout, a mismatched or unverifiable response) just returns None,
+    leaving the ticket exactly as pending as it already was. On success
+    returns the signed owner-approval event, so the caller can pass it to
+    ``ConfirmationStore.approve()`` as the cryptographically-verified
+    ``signed_approval`` (M11)."""
     session = ApprovalSession.load(session_path)
     if session is None or not session.bunker_uri:
         logger.info("push owner approval skipped for %s - no signer paired yet (%s)", confirmation_id, session_path)
-        return False
+        return None
 
     # The bunker URI's authority component names the *transport/remote-signer*,
     # which NIP-46 never guarantees equals the account pubkey it signs for -
@@ -125,11 +128,13 @@ async def _request_owner_signature_async(
             confirmation_id,
             exc_info=True,
         )
-        return False
+        return None
 
-    return _verify_and_extract(
+    if not _verify_and_extract(
         signed, owner_pubkey_hex=owner_pubkey_hex, confirmation_id=confirmation_id, operation_hash=operation_hash
-    )
+    ):
+        return None
+    return signed
 
 
 def _verify_and_extract(signed: Any, *, owner_pubkey_hex: str, confirmation_id: str, operation_hash: str) -> bool:  # noqa: ANN401 - nostr_sdk's Event type
@@ -167,7 +172,7 @@ def request_owner_signature_in_background(
     operation_hash: str,
     confirmation_id: str,
     timeout_seconds: int,
-    on_approved: Callable[[], None],
+    on_approved: Callable[[Any], None],
 ) -> None:
     """Fire-and-forget: the tool call that triggered this has already
     returned its own confirmation_required response by the time this
@@ -177,13 +182,14 @@ def request_owner_signature_in_background(
     human - happens on its own thread so that response is never delayed
     waiting on it.
 
-    on_approved() is called (expected: ConfirmationStore.approve(...))
-    only once the signature has been independently verified as the
-    configured owner approving exactly this ticket - never speculatively."""
+    on_approved(signed) is called (expected:
+    ConfirmationStore.approve(..., signed_approval=signed)) only once the
+    signature has been independently verified as the configured owner
+    approving exactly this ticket - never speculatively."""
     def _run() -> None:
         import functools
 
-        approved = anyio.run(
+        signed = anyio.run(
             functools.partial(
                 _request_owner_signature_async,
                 session_path=session_path,
@@ -195,10 +201,10 @@ def request_owner_signature_in_background(
                 timeout_seconds=timeout_seconds,
             )
         )
-        if not approved:
+        if signed is None:
             return
         try:
-            on_approved()
+            on_approved(signed)
         except Exception:
             # e.g. the ticket expired in the (short) gap between the
             # signer approving and this callback running - log and move

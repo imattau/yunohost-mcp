@@ -220,6 +220,19 @@ def test_broker_selects_control_plane_policy_for_mcp_app_mutations():
     assert _policy_name_for_operation("app.setting_set", {"app": "yunohost_mcp"}) == "apps.control_plane_setting"
     assert _policy_name_for_operation("app.remove", {"app": "yunohost_mcp"}) == "apps.control_plane_remove"
     assert _policy_name_for_operation("app.change_url", {"app": "yunohost_mcp"}) == "apps.control_plane_change_url"
+    assert _policy_name_for_operation("app.install", {"app": "yunohost_mcp"}) == "apps.control_plane_install"
+    assert _policy_name_for_operation("app.install", {"app": "nextcloud"}) == "apps.install"
+
+
+def test_broker_selects_owner_gated_policy_for_high_risk_operations():
+    """The root boundary must re-check the owner-gated operations that were
+    previously absent from the broker policy map."""
+    assert _policy_name_for_operation("domain.remove", {}) == "domains.remove"
+    assert _policy_name_for_operation("user.permission_update", {}) == "users.permissions"
+    assert _policy_name_for_operation("system.reboot", {}) == "system.power"
+    assert _policy_name_for_operation("system.shutdown", {}) == "system.power"
+    assert _policy_name_for_operation("settings.set", {}) == "settings.write"
+    assert _policy_name_for_operation("regenconf.apply", {}) == "regenconf.write"
 
 
 def test_helper_revalidates_a_real_nip98_signature(tmp_path):

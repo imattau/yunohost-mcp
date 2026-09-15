@@ -24,6 +24,8 @@ __all__ = [
     "make_nip98_authorization_header",
     "make_delegation_event",
     "make_delegation_header",
+    "make_owner_approval_event",
+    "owner_approval_json",
 ]
 
 
@@ -80,3 +82,27 @@ def make_delegation_event(
 def make_delegation_header(*args, **kwargs) -> str:
     event = make_delegation_event(*args, **kwargs)
     return base64.b64encode(json.dumps(event.model_dump()).encode()).decode()
+
+
+def make_owner_approval_event(
+    sk: Keys,
+    pubkey: str,
+    *,
+    confirmation_id: str,
+    operation_hash: str,
+    kind: int | None = None,
+    created_at: int | None = None,
+) -> NostrEvent:
+    """A kind-24243 owner-approval event bound to one pending confirmation
+    (M11): what ConfirmationStore.approve() cryptographically verifies."""
+    from yunohost_mcp.policy.confirmation import OWNER_APPROVAL_KIND
+
+    created_at = int(time.time()) if created_at is None else created_at
+    tags = [["confirmation_id", confirmation_id], ["operation_hash", operation_hash]]
+    return sign_event(
+        sk, pubkey=pubkey, created_at=created_at, kind=kind if kind is not None else OWNER_APPROVAL_KIND, tags=tags
+    )
+
+
+def owner_approval_json(*args, **kwargs) -> str:
+    return json.dumps(make_owner_approval_event(*args, **kwargs).model_dump())

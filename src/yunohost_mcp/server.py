@@ -185,6 +185,7 @@ from yunohost_mcp.policy.enforcement import (
     require_confirmation,
     require_scope,
     set_owner_signature_pending_hook,
+    set_scope_denial_hook,
     translate_known_errors,
 )
 from yunohost_mcp.policy.locks import WriteLock
@@ -197,6 +198,7 @@ from yunohost_mcp.policy.rules import (
     check_recent_backup,
     app_config_policy_key,
     app_change_url_policy_key,
+    app_install_policy_key,
     app_remove_policy_key,
     app_setting_policy_key,
     app_upgrade_policy_key,
@@ -205,7 +207,7 @@ from yunohost_mcp.policy.rules import (
     user_group_update_policy_key,
 )
 from yunohost_mcp.policy.scopes import Scope
-from yunohost_mcp.redaction import redact_response
+from yunohost_mcp.redaction import is_sensitive_key, redact_response
 from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
 
 settings = load_settings()
@@ -363,22 +365,30 @@ def _control_plane_audit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     The generic app primitives accept arbitrary strings, and the MCP config
     panel includes bunker URIs containing channel secrets.  Redacting the
     whole value for this app is safer than trying to predict every future
-    sensitive panel option.
+    sensitive panel option. For other apps the value is redacted when the
+    *key* is sensitive (e.g. a config panel "password" option), so an
+    SMTP/API secret set via app_config_set/app_setting_set never lands in
+    audit.jsonl under an innocuous ``value`` field.
     """
-    if arguments.get("app") != CONTROL_PLANE_APP_ID:
-        return arguments
     sanitized = dict(arguments)
-    if "value" in sanitized:
+    value = sanitized.get("value")
+    if sanitized.get("app") == CONTROL_PLANE_APP_ID:
+        if value is not None:
+            sanitized["value"] = "[REDACTED]"
+    elif isinstance(value, str) and is_sensitive_key(str(sanitized.get("key") or "")):
         sanitized["value"] = "[REDACTED]"
     return sanitized
 
 
 def _app_config_plan(app: str, key: str, value: str, **_: Any) -> dict[str, Any]:
+    # A config-panel value under a sensitive key (or any value on the MCP's
+    # own control plane) must never be persisted in the confirmation store.
+    show_value = not is_sensitive_key(key)
     return {
         "action": "set app config",
         "app": app,
         "key": key,
-        "value": "[REDACTED]" if app == CONTROL_PLANE_APP_ID else value,
+        "value": value if show_value and app != CONTROL_PLANE_APP_ID else "[REDACTED]",
         "warning": (
             "This changes the YunoHost MCP control plane and requires the configured owner's co-signature."
             if app == CONTROL_PLANE_APP_ID
@@ -391,11 +401,12 @@ def _app_config_plan(app: str, key: str, value: str, **_: Any) -> dict[str, Any]
 def _app_setting_plan(
     app: str, key: str, value: str | None = None, delete: bool = False, **_: Any
 ) -> dict[str, Any]:
+    show_value = not is_sensitive_key(key)
     return {
         "action": "delete app setting" if delete else "set app setting",
         "app": app,
         "key": key,
-        "value": "[REDACTED]" if app == CONTROL_PLANE_APP_ID else value,
+        "value": value if show_value and app != CONTROL_PLANE_APP_ID else "[REDACTED]",
         "warning": (
             "This changes the YunoHost MCP control plane, including potentially its pinned owner identity, "
             "and requires the configured owner's co-signature."
@@ -422,14 +433,20 @@ def _push_owner_approval(ticket: ConfirmationTicket) -> None:
     if owner_pubkey is None:
         return
 
-    def _mark_approved() -> None:
+    def _mark_approved(signed_approval: Any) -> None:
         # Bypasses the approve_operation MCP tool entirely (push_approval.py
         # has already independently verified the owner's own signature over
         # exactly this ticket - see its _verify_and_extract), which also
         # means its @audited_write wrapper never runs - record the
         # equivalent audit entry by hand so this doesn't silently vanish
         # from the audit trail just because it went through a different path.
-        confirmation_store.approve(ticket.confirmation_id, approver_pubkey=owner_pubkey, owner_pubkey=owner_pubkey)
+        # The store re-verifies the signature (M11); the raw nostr_sdk Event
+        # serialises to the JSON the store's _parse_owner_approval expects.
+        confirmation_store.approve(
+            ticket.confirmation_id,
+            owner_pubkey=owner_pubkey,
+            signed_approval=signed_approval.as_json() if hasattr(signed_approval, "as_json") else signed_approval,
+        )
         audit_log.record(
             tool="owner.approve",
             arguments={"confirmation_id": ticket.confirmation_id},
@@ -456,6 +473,27 @@ def _on_owner_signature_pending(ticket: ConfirmationTicket) -> None:
 
 
 set_owner_signature_pending_hook(_on_owner_signature_pending)
+
+
+def _on_scope_denial(tool_name: str, scope: Scope) -> None:
+    """Record a scope-denied call in the audit trail (M2): probing/brute-force
+    attempts must be visible even though no write executed. Best-effort — the
+    denial itself must never be masked by audit plumbing."""
+    try:
+        request = require_current_request()
+        audit_log.record(
+            tool=tool_name,
+            arguments={},
+            caller_pubkey=request.pubkey,
+            decision="denied",
+            result="scope_denied",
+            error=f"lacks required scope {scope.value!r}",
+        )
+    except Exception:  # noqa: BLE001 - audit-denial is best-effort
+        pass
+
+
+set_scope_denial_hook(_on_scope_denial)
 
 
 class AsyncToolMCPServer(MCPServer):
@@ -1719,7 +1757,7 @@ def backup_delete(name: str, confirmation_id: str | None = None) -> dict[str, An
 @require_scope(Scope.APPS_INSTALL)
 @audited_write("apps.install", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
-    "apps.install",
+    app_install_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
     defer_to_broker=_defer_to_broker,
@@ -2593,7 +2631,7 @@ def audit_get(audit_id: str, confirmation_id: str | None = None) -> dict[str, An
 @translate_known_errors
 @require_scope(Scope.OWNER_APPROVE)
 @audited_write("owner.approve", lock=write_lock, audit_log=audit_log)
-def approve_operation(confirmation_id: str) -> dict[str, Any]:
+def approve_operation(confirmation_id: str, approval_event: str) -> dict[str, Any]:
     """Owner co-signature (PLAN.md Phase 13; owner-approval-plan.md's
     `solo` profile for v1) for a pending high-risk operation (system.
     upgrade, backups.restore - see policy/rules.py's
@@ -2601,11 +2639,16 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
     original requester can then execute it by calling the same tool again
     with this confirmation_id - approving does not execute anything itself.
 
-    The approver must be the one configured owner (auth/owner.py) - not
-    just any identity with Scope.OWNER_APPROVE (still required as a
-    baseline gate below). The expected flow: the original request comes
-    from an agent's own delegated key, and the owner approves with their
-    own npub through an external NIP-46 signer.
+    `approval_event` is the kind-24243 event the configured owner signed
+    (via their NIP-46 signer) with `confirmation_id` and `operation_hash`
+    tags - the store verifies its signature, that it is authored by the
+    configured owner, and that it binds to this exact ticket (M11). The
+    approver's own NIP-98-authenticated request must still come from the
+    configured owner (auth/owner.py) - not just any identity with
+    Scope.OWNER_APPROVE (still required as a baseline gate below). The
+    expected flow: the original request comes from an agent's own
+    delegated key, and the owner approves with their own npub through an
+    external NIP-46 signer.
     """
     request = require_current_request()
     if request.delegation is not None:
@@ -2616,12 +2659,11 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         # "administrator" misconfigured to coincide with an agent's own
         # key (the exact thing policy/roles.py's _APP_ADMIN comment says
         # should never happen in practice) would let that agent's own
-        # delegated call satisfy approver_pubkey == owner_pubkey below -
-        # i.e. an agent approving its own request. The legitimate v1 flow
-        # this must not break - a human owner calling a protected tool
-        # directly and then self-approving (confirmation.py's own
-        # docstring) - never carries an X-Nostr-Delegation header, so it's
-        # unaffected.
+        # delegated call satisfy the owner check below - i.e. an agent
+        # approving its own request. The legitimate v1 flow this must not
+        # break - a human owner calling a protected tool directly and then
+        # self-approving (confirmation.py's own docstring) - never carries
+        # an X-Nostr-Delegation header, so it's unaffected.
         raise ConfirmationError(
             "owner co-signature must come from the owner's own key directly, not a delegated identity"
         )
@@ -2633,7 +2675,9 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         )
     try:
         ticket = confirmation_store.approve(
-            confirmation_id, approver_pubkey=request.pubkey, owner_pubkey=owner_pubkey
+            confirmation_id,
+            owner_pubkey=owner_pubkey,
+            signed_approval=approval_event,
         )
     except ConfirmationError as exc:
         raise ConfirmationError(f"cannot approve: {exc}") from exc
@@ -2643,7 +2687,7 @@ def approve_operation(confirmation_id: str) -> dict[str, Any]:
         "tool": ticket.tool,
         "operation_plan": ticket.plan,
         "operation_hash": ticket.operation_hash,
-        "approved_by": request.pubkey,
+        "approved_by": ticket.owner_approved_by,
     }
 
 

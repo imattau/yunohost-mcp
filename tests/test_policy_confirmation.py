@@ -10,6 +10,18 @@ from yunohost_mcp.policy.enforcement import require_confirmation
 from yunohost_mcp.policy.rules import PolicyRule
 from yunohost_mcp.policy.confirmation import ConfirmationError, ConfirmationStore, SQLiteConfirmationStore
 
+from tests.auth_helpers import make_owner_approval_event, new_keypair
+
+
+def _approve(store, ticket, *, owner_sk=None, owner_pubkey=None):
+    """Approve `ticket` with a real kind-24243 signature (M11)."""
+    owner_sk = owner_sk if owner_sk is not None else new_keypair()[0]
+    owner_pubkey = owner_pubkey if owner_pubkey is not None else owner_sk.public_key().to_hex()
+    signed = make_owner_approval_event(
+        owner_sk, owner_pubkey, confirmation_id=ticket.confirmation_id, operation_hash=ticket.operation_hash
+    )
+    return store.approve(ticket.confirmation_id, owner_pubkey=owner_pubkey, signed_approval=signed.model_dump())
+
 
 def test_sqlite_confirmation_survives_a_new_store_instance(tmp_path):
     path = tmp_path / "confirmations.sqlite"
@@ -86,6 +98,27 @@ def test_deferred_confirmation_survives_operation_failure(tmp_path, store_type):
     assert len(store) == 0
 
 
+@pytest.mark.parametrize("store_type", [ConfirmationStore, SQLiteConfirmationStore])
+def test_deferred_consume_is_one_shot_and_revert_reenables(tmp_path, store_type):
+    """M8: a deferred consume must atomically claim the ticket so a second
+    concurrent consume cannot double-execute, while a failed invoke can
+    revert the claim to retry the (still valid) ticket."""
+    store = store_type(tmp_path / "confirmations.sqlite") if store_type is SQLiteConfirmationStore else store_type()
+    ticket = store.create(pubkey="abc", tool="apps.remove", arguments={"app": "x"}, plan={})
+    args = {"pubkey": "abc", "tool": "apps.remove", "arguments": {"app": "x"}, "defer": True}
+
+    store.consume(ticket.confirmation_id, **args)
+    # Second concurrent deferred consume must be refused (one-shot).
+    with pytest.raises(ConfirmationError, match="already been consumed"):
+        store.consume(ticket.confirmation_id, **args)
+
+    # Failed invoke: revert releases the in-flight marker, ticket reusable.
+    store.revert(ticket.confirmation_id)
+    store.consume(ticket.confirmation_id, **args)
+    store.finalize(ticket.confirmation_id)
+    assert len(store) == 0
+
+
 def test_ticket_is_one_shot():
     store = ConfirmationStore()
     ticket = store.create(pubkey="abc", tool="apps.remove", arguments={"app": "x"}, plan={})
@@ -156,28 +189,50 @@ def test_ticket_survives_a_failed_owner_approval_check_and_can_be_retried():
     # Unlike every other failure mode, this one must NOT have consumed the
     # ticket - it's still there, waiting to be approved.
     assert len(store) == 1
-    store.approve(ticket.confirmation_id, approver_pubkey="owner", owner_pubkey="owner")
+    owner_sk, owner_pk = new_keypair()
+    _approve(store, ticket, owner_sk=owner_sk, owner_pubkey=owner_pk)
     consumed = store.consume(
         ticket.confirmation_id, pubkey="abc", tool="system.upgrade", arguments={}, require_owner_approval=True
     )
-    assert consumed.owner_approved_by == "owner"
+    assert consumed.owner_approved_by == owner_pk
 
 
 def test_approve_then_consume_succeeds():
     store = ConfirmationStore()
     ticket = store.create(pubkey="agent", tool="backups.restore", arguments={"name": "x"}, plan={})
-    store.approve(ticket.confirmation_id, approver_pubkey="owner", owner_pubkey="owner")
+    owner_sk, owner_pk = new_keypair()
+    _approve(store, ticket, owner_sk=owner_sk, owner_pubkey=owner_pk)
     consumed = store.consume(
         ticket.confirmation_id, pubkey="agent", tool="backups.restore", arguments={"name": "x"}, require_owner_approval=True
     )
-    assert consumed.owner_approved_by == "owner"
+    assert consumed.owner_approved_by == owner_pk
 
 
 def test_approve_rejects_non_owner_approver():
+    """M11: approve() only accepts a signature authored by the configured
+    owner - a valid signature from anyone else is refused even though the
+    store is given that pubkey as the owner."""
     store = ConfirmationStore()
     ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    attacker_sk, attacker_pk = new_keypair()
+    forged = make_owner_approval_event(
+        attacker_sk, attacker_pk, confirmation_id=ticket.confirmation_id, operation_hash=ticket.operation_hash
+    )
     with pytest.raises(ConfirmationError, match="configured owner"):
-        store.approve(ticket.confirmation_id, approver_pubkey="someone-else", owner_pubkey="owner")
+        store.approve(ticket.confirmation_id, owner_pubkey="owner", signed_approval=forged.model_dump())
+
+
+def test_approve_rejects_unbound_signature():
+    """M11: a validly-signed event that does not bind to this exact ticket
+    (different confirmation_id/operation_hash) is refused."""
+    store = ConfirmationStore()
+    ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    owner_sk, owner_pk = new_keypair()
+    wrong = make_owner_approval_event(
+        owner_sk, owner_pk, confirmation_id="confirm-other", operation_hash=ticket.operation_hash
+    )
+    with pytest.raises(ConfirmationError, match="does not match this confirmation"):
+        store.approve(ticket.confirmation_id, owner_pubkey=owner_pk, signed_approval=wrong.model_dump())
 
 
 def test_approve_allows_same_pubkey_as_requester_when_it_is_the_owner():
@@ -186,29 +241,36 @@ def test_approve_allows_same_pubkey_as_requester_when_it_is_the_owner():
     themselves via a separate NIP-46-signed call is a valid flow - the
     security property is a separate signing act, not a distinct pubkey."""
     store = ConfirmationStore()
-    ticket = store.create(pubkey="owner", tool="system.upgrade", arguments={}, plan={})
-    approved = store.approve(ticket.confirmation_id, approver_pubkey="owner", owner_pubkey="owner")
-    assert approved.owner_approved_by == "owner"
+    owner_sk, owner_pk = new_keypair()
+    ticket = store.create(pubkey=owner_pk, tool="system.upgrade", arguments={}, plan={})
+    approved = _approve(store, ticket, owner_sk=owner_sk, owner_pubkey=owner_pk)
+    assert approved.owner_approved_by == owner_pk
 
 
 def test_approve_unknown_id_rejected():
     store = ConfirmationStore()
+    owner_sk, owner_pk = new_keypair()
+    signed = make_owner_approval_event(owner_sk, owner_pk, confirmation_id="confirm-nope", operation_hash="0" * 64)
     with pytest.raises(ConfirmationError):
-        store.approve("confirm-doesnotexist", approver_pubkey="owner", owner_pubkey="owner")
+        store.approve("confirm-doesnotexist", owner_pubkey=owner_pk, signed_approval=signed.model_dump())
 
 
 def test_approve_expired_ticket_rejected():
     store = ConfirmationStore(ttl_seconds=1)
     ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
+    owner_sk, owner_pk = new_keypair()
+    signed = make_owner_approval_event(
+        owner_sk, owner_pk, confirmation_id=ticket.confirmation_id, operation_hash=ticket.operation_hash
+    )
     time.sleep(1.1)
     with pytest.raises(ConfirmationError, match="expired"):
-        store.approve(ticket.confirmation_id, approver_pubkey="owner", owner_pubkey="owner")
+        store.approve(ticket.confirmation_id, owner_pubkey=owner_pk, signed_approval=signed.model_dump())
 
 
 def test_approve_does_not_consume_the_ticket():
     store = ConfirmationStore()
     ticket = store.create(pubkey="agent", tool="system.upgrade", arguments={}, plan={})
-    store.approve(ticket.confirmation_id, approver_pubkey="owner", owner_pubkey="owner")
+    _approve(store, ticket)
     assert len(store) == 1  # still pending, waiting for the agent's own consume()
 
 

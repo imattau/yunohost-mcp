@@ -20,6 +20,8 @@ from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import mcp
 import yunohost_mcp.server as server_module
 import yunohost_mcp.yunohost.adapter as adapter_module
+
+from tests.auth_helpers import make_owner_approval_event, new_keypair
 from yunohost_mcp.yunohost.adapter import YunohostAdapter
 
 CALLER_PUBKEY = "b" * 64
@@ -540,9 +542,10 @@ async def test_catalog_announce_reports_missing_configuration_as_warning(
 
 @pytest.mark.anyio
 async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    owner_sk, owner_pk = new_keypair()
     owner = AuthenticatedRequest(
-        pubkey="catalog-owner", event_id="o" * 64, event_created_at=0,
-        identity=IdentityRecord(pubkey="catalog-owner", name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
+        pubkey=owner_pk, event_id="o" * 64, event_created_at=0,
+        identity=IdentityRecord(pubkey=owner_pk, name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
     )
     monkeypatch.setattr("yunohost_mcp.server.get_owner_pubkey", lambda: owner.pubkey)
     monkeypatch.setattr(server_module.settings, "armada_enabled", True)
@@ -565,7 +568,15 @@ async def test_catalog_publish_requires_confirmation_then_executes(tmp_path: Pat
             assert pending.structured_content["owner_signature_required"] is True
 
             set_current_request(owner)
-            approved = await client.call_tool("approve_operation", {"confirmation_id": pending.structured_content["confirmation_id"]})
+            approval = make_owner_approval_event(
+                owner_sk, owner_pk,
+                confirmation_id=pending.structured_content["confirmation_id"],
+                operation_hash=pending.structured_content["operation_hash"],
+            )
+            approved = await client.call_tool(
+                "approve_operation",
+                {"confirmation_id": pending.structured_content["confirmation_id"], "approval_event": approval.model_dump_json()},
+            )
             assert approved.is_error is not True
             set_current_request(LOCAL_STDIO_REQUEST)
 
@@ -590,9 +601,10 @@ async def test_catalog_publish_with_ci_result_attests_alongside_the_declaration(
     arguments_hash check (create-time and consume-time arguments must be
     byte-for-byte the same JSON, including the nested ci_result object) -
     not just that individual functions accept the parameter."""
+    owner_sk, owner_pk = new_keypair()
     owner = AuthenticatedRequest(
-        pubkey="catalog-owner-2", event_id="p" * 64, event_created_at=0,
-        identity=IdentityRecord(pubkey="catalog-owner-2", name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
+        pubkey=owner_pk, event_id="p" * 64, event_created_at=0,
+        identity=IdentityRecord(pubkey=owner_pk, name="catalog owner", roles=("administrator",), scopes=scopes_for_roles(("administrator",))),
     )
     monkeypatch.setattr("yunohost_mcp.server.get_owner_pubkey", lambda: owner.pubkey)
     ci_result = {
@@ -620,7 +632,15 @@ async def test_catalog_publish_with_ci_result_attests_alongside_the_declaration(
             assert pending.structured_content["confirmation_required"] is True
 
             set_current_request(owner)
-            approved = await client.call_tool("approve_operation", {"confirmation_id": pending.structured_content["confirmation_id"]})
+            approval = make_owner_approval_event(
+                owner_sk, owner_pk,
+                confirmation_id=pending.structured_content["confirmation_id"],
+                operation_hash=pending.structured_content["operation_hash"],
+            )
+            approved = await client.call_tool(
+                "approve_operation",
+                {"confirmation_id": pending.structured_content["confirmation_id"], "approval_event": approval.model_dump_json()},
+            )
             assert approved.is_error is not True
             set_current_request(LOCAL_STDIO_REQUEST)
 

@@ -112,6 +112,29 @@ def test_delegation_exceeding_max_lifetime_rejected():
         )
 
 
+def test_future_dated_created_at_cannot_extend_lifetime_cap():
+    """Regression: the cap must be measured from *now*, not the event's
+    self-declared created_at. Signing with a future created_at and
+    expiry = created_at + 30d used to pass the lifetime check while remaining
+    valid for ~330 days."""
+    sk, delegator = new_keypair()
+    _, delegate = new_keypair()
+    future_created = int(time.time()) + 300 * 24 * 3600
+    event = make_delegation_event(
+        sk,
+        delegator,
+        delegate_pubkey=delegate,
+        server_pubkey=SERVER_PUBKEY,
+        scopes=["apps.read"],
+        expires_at=future_created + 30 * 24 * 3600,
+        created_at=future_created,
+    )
+    with pytest.raises(DelegationError, match="in the future"):
+        verify_delegation_event(
+            event, expected_delegate_pubkey=delegate, server_pubkey_hex=SERVER_PUBKEY, revocation_store=RevocationStore(frozenset())
+        )
+
+
 def test_unknown_scope_rejected():
     sk, delegator = new_keypair()
     _, delegate = new_keypair()

@@ -31,6 +31,7 @@ from yunohost_mcp.policy.package_sessions import PackageTestSessionError, Packag
 from yunohost_mcp.policy.rules import (
     app_config_policy_key,
     app_change_url_policy_key,
+    app_install_policy_key,
     app_remove_policy_key,
     app_setting_policy_key,
     app_upgrade_policy_key,
@@ -71,14 +72,20 @@ _POLICY_NAME_BY_OPERATION: dict[str, str] = {
     "user.group_delete": "users.delete",
     "user.permission_add": "users.permissions",
     "user.permission_remove": "users.permissions",
+    "user.permission_update": "users.permissions",
     "domain.add": "domains.write",
     "domain.cert_install": "domains.cert",
     "domain.dns_push": "domains.dns",
+    "domain.remove": "domains.remove",
     "app.install": "apps.install",
     "backup.create": "backups.create",
     "backup.delete": "backups.delete",
     "service.restart": "services.restart",
     "service.stop": "services.stop",
+    "system.reboot": "system.power",
+    "system.shutdown": "system.power",
+    "settings.set": "settings.write",
+    "regenconf.apply": "regenconf.write",
     "catalog.publish": "catalog.publish",
     "package.run_tests": "packages.test",
     "package.install_test": "packages.test",
@@ -119,14 +126,20 @@ _CONFIRMATION_ARGUMENT_KEYS: dict[str, tuple[str, ...]] = {
     "user.group_delete": ("groupname",),
     "user.permission_add": ("permission", "names"),
     "user.permission_remove": ("permission", "names"),
+    "user.permission_update": ("permission", "label", "show_tile", "protected"),
     "domain.add": ("domain", "install_letsencrypt_cert"),
     "domain.cert_install": ("domain", "letsencrypt", "staging"),
     "domain.dns_push": ("domain", "force", "purge"),
+    "domain.remove": ("domain", "remove_apps", "force"),
     "app.install": ("app", "label", "args", "force"),
     "backup.create": ("name", "description", "apps", "system"),
     "backup.delete": ("name",),
     "service.restart": ("names",),
     "service.stop": ("names",),
+    "system.reboot": (),
+    "system.shutdown": (),
+    "settings.set": ("key", "value"),
+    "regenconf.apply": ("names", "force"),
     "catalog.publish": ("plan_id",),
     "package.run_tests": ("source", "app_id"),
     "package.install_test": ("source", "session_id", "label", "args"),
@@ -153,6 +166,8 @@ def _policy_name_for_operation(operation_name: str, arguments: dict) -> str | No
         return app_remove_policy_key(**arguments)
     if operation_name == "app.change_url":
         return app_change_url_policy_key(**arguments)
+    if operation_name == "app.install":
+        return app_install_policy_key(**arguments)
     if operation_name == "user.create" and arguments.get("admin", False) is True:
         return "users.admin_access"
     if operation_name == "user.group_update" and arguments.get("groupname") == "admins":
@@ -228,6 +243,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
         audit_result = "error"
         audit_error = None
         audit_operation_id = None
+        confirmation_id = None
         try:
             if peer_uid(self.request) != self.server.allowed_uid:
                 self._send(request_id, ok=False, error="forbidden peer")
@@ -261,6 +277,7 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             self._send(request_id, ok=True, result=result)
         except (BrokerProtocolError, ValueError) as exc:
             audit_error = str(exc)
+            self._revert_confirmation(confirmation_id)
             self._send(request_id, ok=False, error=str(exc))
         except YunohostUnavailableError as exc:
             # Preserve expected YunoHost/runtime failures at the broker
@@ -268,11 +285,13 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
             # missing dependency or LDAP/runtime problem impossible to
             # diagnose from an MCP client.
             audit_error = str(exc)
+            self._revert_confirmation(confirmation_id)
             self._send(request_id, ok=False, error=str(exc))
         except Exception as exc:
             logger.exception("unexpected broker failure for request %s", request_id)
             error = _format_internal_broker_error(exc)
             audit_error = error
+            self._revert_confirmation(confirmation_id)
             self._send(request_id, ok=False, error=error)
         finally:
             set_current_request(None)
@@ -293,6 +312,17 @@ class BrokerRequestHandler(socketserver.StreamRequestHandler):
 
     def _send(self, request_id: str, *, ok: bool, result=None, error: str | None = None) -> None:
         self.request.sendall(encode_response(request_id=request_id, ok=ok, result=result, error=error))
+
+    def _revert_confirmation(self, confirmation_id: str | None) -> None:
+        """Release the atomic in-flight marker on a deferred consume after a
+        failed privileged operation, so the (still valid) confirmation can be
+        retried instead of being burned. No-op when nothing was consumed."""
+        if confirmation_id is None:
+            return
+        try:
+            self.server.confirmation_store.revert(confirmation_id)
+        except Exception:  # noqa: BLE001 - reverting is best-effort
+            logger.exception("could not revert confirmation %s after failed invoke", confirmation_id)
 
     def _check_operation_policy(self, request, operation_name: str, identity) -> str | None:
         """Re-apply hard policy and confirmation at the root boundary.

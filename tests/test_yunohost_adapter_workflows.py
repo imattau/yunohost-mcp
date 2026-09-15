@@ -41,10 +41,11 @@ def test_http_endpoint_real_mode_reports_connection_failure(monkeypatch: pytest.
 
     adapter = YunohostAdapter(settings=Settings(fake_yunohost=False, allow_private_http_probes=True))
 
-    def fake_urlopen(*args, **kwargs):
-        raise urllib.error.URLError("Connection refused")
+    class _StubOpener:
+        def open(self, req, timeout=None):
+            raise urllib.error.URLError("Connection refused")
 
-    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._SAFE_PROBE_OPENER.open", fake_urlopen)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._pinned_probe_opener", lambda *a, **k: _StubOpener())
     result = adapter.test_http_endpoint("https://nope.invalid/app")
     assert result["fake"] is False
     assert result["reachable"] is False
@@ -59,7 +60,7 @@ def test_http_endpoint_real_mode_treats_http_error_as_reachable(monkeypatch: pyt
     def fake_urlopen(*args, **kwargs):
         raise urllib.error.HTTPError("https://example.com", 503, "Service Unavailable", {}, None)
 
-    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._SAFE_PROBE_OPENER.open", fake_urlopen)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._pinned_probe_opener", lambda *a, **k: type("O", (), {"open": fake_urlopen})())
     result = adapter.test_http_endpoint("https://example.com/app")
     assert result["reachable"] is True
     assert result["status_code"] == 503
@@ -140,7 +141,7 @@ def test_probe_does_not_follow_redirects(monkeypatch: pytest.MonkeyPatch):
             "https://public.example/", 302, "Found", {"Location": "http://127.0.0.1/"}, None
         )
 
-    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._SAFE_PROBE_OPENER.open", redirect)
+    monkeypatch.setattr("yunohost_mcp.yunohost.adapter._pinned_probe_opener", lambda *a, **k: type("O", (), {"open": redirect})())
     result = adapter.http_probe("https://public.example/")
     assert result["reachable"] is True
     assert result["status_code"] == 302

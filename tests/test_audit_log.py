@@ -108,3 +108,32 @@ def test_get_returns_none_for_unknown_id(tmp_path: Path):
     log = AuditLog(path=tmp_path / "audit.jsonl")
     log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
     assert log.get("mcp-does-not-exist") is None
+
+
+def test_verify_clean_hash_chain(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    for i in range(3):
+        log.record(tool=f"t{i}", arguments={"n": i}, caller_pubkey="x", decision="allowed", result="success")
+    assert log.verify() == []
+
+
+def test_verify_detects_tampered_content(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    log.record(tool="a", arguments={"n": 1}, caller_pubkey="x", decision="allowed", result="success")
+    log.record(tool="b", arguments={"n": 2}, caller_pubkey="x", decision="allowed", result="success")
+    lines = log.path.read_text().splitlines()
+    lines[0] = lines[0].replace('"n": 1', '"n": 999')
+    log.path.write_text("\n".join(lines) + "\n")
+    problems = log.verify()
+    assert any("entry_hash does not match" in p for p in problems)
+
+
+def test_verify_detects_removed_middle_entry(tmp_path: Path):
+    log = AuditLog(path=tmp_path / "audit.jsonl")
+    log.record(tool="a", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    log.record(tool="b", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    log.record(tool="c", arguments={}, caller_pubkey="x", decision="allowed", result="success")
+    lines = log.path.read_text().splitlines()
+    log.path.write_text(lines[0] + "\n" + lines[2] + "\n")
+    problems = log.verify()
+    assert any("prev_hash mismatch" in p for p in problems)

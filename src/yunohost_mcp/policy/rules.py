@@ -102,6 +102,23 @@ def app_change_url_policy_key(**arguments: object) -> str:
     return "apps.control_plane_change_url" if arguments.get("app") == CONTROL_PLANE_APP_ID else "apps.change_url"
 
 
+def app_install_policy_key(**arguments: object) -> str:
+    """Owner-gate installing/re-installing the MCP control plane itself.
+
+    ``app`` may also be a git URL (the install source), so the control-plane
+    check matches both the app id and any URL that points at this package's
+    repository. Ordinary app installs still require a plain confirmation —
+    they run arbitrary YunoHost install scripts with root privileges, so they
+    must never execute silently.
+    """
+    app = arguments.get("app")
+    if app == CONTROL_PLANE_APP_ID:
+        return "apps.control_plane_install"
+    if isinstance(app, str) and "yunohost_mcp" in app:
+        return "apps.control_plane_install"
+    return "apps.install"
+
+
 _SIZE_UNITS = {"": 1, "B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -144,6 +161,12 @@ DEFAULT_POLICY: dict[str, PolicyRule] = {
         require_backup=True,
         minimum_free_space_bytes=_parse_size("2GB"),
     ),
+    # Installing any app runs its install scripts with YunoHost privileges, so
+    # it is never silent: a plain confirmation (same tier as domains.write).
+    # Installing/re-installing the MCP control plane itself additionally
+    # requires the owner's co-signature (see app_install_policy_key).
+    "apps.install": PolicyRule(require_confirmation=True, minimum_free_space_bytes=_parse_size("2GB")),
+    "apps.control_plane_install": PolicyRule(require_confirmation=True, require_owner_signature=True),
     "apps.control_plane_remove": PolicyRule(
         require_confirmation=True,
         require_owner_signature=True,

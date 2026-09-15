@@ -103,12 +103,29 @@ class ScopeError(PermissionError):
     """The current identity does not have the scope a tool requires."""
 
 
+_scope_denial_hook: Callable[[str, Scope], None] | None = None
+
+
+def set_scope_denial_hook(hook: Callable[[str, Scope], None] | None) -> None:
+    """Register a hook invoked (with the tool name and required scope) when
+    @require_scope denies a call, so the audit trail can record the attempt.
+    The hook must never raise: a denial must not be masked by audit plumbing.
+    """
+    global _scope_denial_hook
+    _scope_denial_hook = hook
+
+
 def require_scope(scope: Scope) -> Callable[[F], F]:
     def decorator(fn: F) -> F:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             request = require_current_request()
             if not request.has_scope(scope):
+                if _scope_denial_hook is not None:
+                    try:
+                        _scope_denial_hook(fn.__name__, scope)
+                    except Exception:  # noqa: BLE001 - auditing must not mask the denial
+                        pass
                 who = request.identity.name if request.identity else request.pubkey
                 raise ScopeError(f"{who!r} lacks required scope {scope.value!r}")
             return fn(*args, **kwargs)

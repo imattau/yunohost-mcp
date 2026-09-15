@@ -56,9 +56,68 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from yunohost_mcp.auth.nostr import NostrEvent, NostrEventError, verify_event
+
 
 class ConfirmationError(ValueError):
     """A confirmation_id is unknown, expired, already used, or doesn't match this request."""
+
+
+# Application-specific owner-approval kind, shared with push_approval.py
+# (a BUD-like helper event never published to a relay by us). Chosen clear
+# of NIP-98 (27235) so a signer app never conflates the two.
+OWNER_APPROVAL_KIND = 24243
+
+
+def _parse_owner_approval(signed_approval: str | dict[str, Any] | NostrEvent) -> NostrEvent:
+    """Coerce a signed owner-approval event to a :class:`NostrEvent`.
+
+    Accepts a JSON string, a plain dict, or an already-parsed ``NostrEvent``
+    (the pydantic model) so callers that hold the model directly (e.g. the
+    push-approval callback) do not need to round-trip it through JSON."""
+    if isinstance(signed_approval, NostrEvent):
+        return signed_approval
+    if isinstance(signed_approval, dict):
+        data = signed_approval
+    elif isinstance(signed_approval, str):
+        try:
+            data = json.loads(signed_approval)
+        except json.JSONDecodeError as exc:
+            raise ConfirmationError(f"owner approval must be JSON: {exc}") from exc
+    else:
+        raise ConfirmationError("owner approval must be a signed Nostr event (JSON string or object)")
+    try:
+        return NostrEvent.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 - pydantic ValidationError -> ConfirmationError
+        raise ConfirmationError(f"malformed owner approval event: {exc}") from exc
+
+
+def _verify_owner_approval(event: NostrEvent, *, owner_pubkey: str, confirmation_id: str, operation_hash: str) -> str:
+    """Cryptographically verify an owner-approval event binds the configured
+    owner to this exact ticket (M11).
+
+    ``approve()`` relies on this - never on a caller-supplied pubkey string -
+    so a forged/guessed ``approver_pubkey`` can no longer mark a ticket
+    approved. Checks, in order: a valid NIP-01 signature (id + schnorr), the
+    author is exactly the configured owner, the event is a kind-24243 owner
+    approval, and its ``confirmation_id``/``operation_hash`` tags match this
+    ticket - the signer must have signed *this* operation, not some other
+    event. Returns the owner pubkey (the approved_by identity).
+    """
+    try:
+        verify_event(event)
+    except NostrEventError as exc:
+        raise ConfirmationError(f"owner approval signature invalid: {exc}") from exc
+    if event.pubkey != owner_pubkey:
+        raise ConfirmationError(
+            "owner approval is not signed by the configured owner - owner co-signing requires the "
+            "exact configured owner identity to sign the approval"
+        )
+    if event.kind != OWNER_APPROVAL_KIND:
+        raise ConfirmationError("owner approval must be a kind-24243 approval event")
+    if event.tag("confirmation_id") != confirmation_id or event.tag("operation_hash") != operation_hash:
+        raise ConfirmationError("owner approval does not match this confirmation (confirmation_id/operation_hash mismatch)")
+    return event.pubkey
 
 
 @dataclass(frozen=True)
@@ -112,6 +171,10 @@ class ConfirmationStore:
             owner_approval_ttl_seconds if owner_approval_ttl_seconds is not None else ttl_seconds
         )
         self._pending: dict[str, ConfirmationTicket] = {}
+        # In-flight marker for deferred consumes: a ticket here has been
+        # atomically claimed by one deferred consume and may not be reused
+        # until finalized (success) or reverted (failed invoke).
+        self._in_flight: set[str] = set()
 
     def create(
         self,
@@ -140,26 +203,33 @@ class ConfirmationStore:
         self._pending[ticket.confirmation_id] = ticket
         return ticket
 
-    def approve(self, confirmation_id: str, *, approver_pubkey: str, owner_pubkey: str) -> ConfirmationTicket:
+    def approve(
+        self, confirmation_id: str, *, owner_pubkey: str, signed_approval: str | dict[str, Any]
+    ) -> ConfirmationTicket:
         """Owner co-signing (Phase 13, narrowed to v1's `solo` profile by
         owner-approval-plan.md): marks a pending ticket approved, without
         consuming it - the original requester still has to call consume()
         themselves to actually execute. `owner_pubkey` is the one identity
-        (auth/owner.py) allowed to approve; server.py's approve_operation
-        resolves it fresh on every call and passes it in here rather than
-        this store owning owner configuration itself."""
+        (auth/owner.py) allowed to approve; the approval is only accepted
+        once ``signed_approval`` - a kind-24243 event authored by that owner
+        over this exact ticket - has been cryptographically verified (M11).
+        The bare-identity ``approver_pubkey`` comparison that v1 started with
+        is gone: the store no longer trusts a caller-supplied pubkey string."""
         ticket = self._pending.get(confirmation_id)
         if ticket is None:
             raise ConfirmationError("unknown or already-used confirmation_id")
         if time.time() >= ticket.expires_at:
             del self._pending[confirmation_id]
             raise ConfirmationError("confirmation has expired")
-        if approver_pubkey != owner_pubkey:
-            raise ConfirmationError(
-                "approver is not the configured owner - owner co-signing requires the exact "
-                "configured owner identity to sign the approval"
-            )
-        updated = dataclasses.replace(ticket, owner_approved_by=approver_pubkey)
+        if confirmation_id in self._in_flight:
+            raise ConfirmationError("confirmation has already been consumed")
+        approver = _verify_owner_approval(
+            _parse_owner_approval(signed_approval),
+            owner_pubkey=owner_pubkey,
+            confirmation_id=ticket.confirmation_id,
+            operation_hash=ticket.operation_hash,
+        )
+        updated = dataclasses.replace(ticket, owner_approved_by=approver)
         self._pending[confirmation_id] = updated
         return updated
 
@@ -171,6 +241,8 @@ class ConfirmationStore:
         if time.time() >= ticket.expires_at:
             del self._pending[confirmation_id]
             raise ConfirmationError("confirmation has expired")
+        if confirmation_id in self._in_flight:
+            raise ConfirmationError("confirmation has already been consumed")
         return ticket
 
     def consume(
@@ -214,6 +286,13 @@ class ConfirmationStore:
             )
         if not defer:
             del self._pending[confirmation_id]
+        else:
+            # One-shot even under concurrency: mark in-flight first. A second
+            # deferred consume of the same ticket fails instead of running
+            # the privileged operation twice (M8).
+            if confirmation_id in self._in_flight:
+                raise ConfirmationError("confirmation has already been consumed")
+            self._in_flight.add(confirmation_id)
         return ticket
 
     def finalize(self, confirmation_id: str) -> None:
@@ -221,6 +300,14 @@ class ConfirmationStore:
         if confirmation_id not in self._pending:
             raise ConfirmationError("unknown or already-used confirmation_id")
         del self._pending[confirmation_id]
+        self._in_flight.discard(confirmation_id)
+
+    def revert(self, confirmation_id: str) -> None:
+        """Release the in-flight marker after a failed deferred invoke, so the
+        still-valid ticket can be retried (not burned)."""
+        if confirmation_id not in self._pending:
+            raise ConfirmationError("unknown or already-used confirmation_id")
+        self._in_flight.discard(confirmation_id)
 
     def __len__(self) -> int:
         return len(self._pending)
@@ -245,7 +332,7 @@ class SQLiteConfirmationStore:
                 "CREATE TABLE IF NOT EXISTS confirmations ("
                 "id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, tool TEXT NOT NULL, arguments_hash TEXT NOT NULL, "
                 "plan TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, operation_hash TEXT NOT NULL, "
-                "owner_approved_by TEXT)"
+                "owner_approved_by TEXT, consumed_at REAL)"
             )
         # The file contains confirmation plans and operation hashes shared by
         # the unprivileged frontend and root helper. Keep it accessible only
@@ -268,25 +355,33 @@ class SQLiteConfirmationStore:
             operation_hash=_operation_hash(confirmation_id=confirmation_id, pubkey=pubkey, tool=tool, arguments=arguments),
         )
         with self._connect() as db:
-            db.execute("INSERT INTO confirmations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", self._row(ticket))
+            db.execute("INSERT INTO confirmations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._row(ticket))
         return ticket
 
-    def approve(self, confirmation_id, *, approver_pubkey, owner_pubkey):
+    def approve(self, confirmation_id, *, owner_pubkey, signed_approval):
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             ticket = self._get(db, confirmation_id)
             self._check_live(db, ticket)
-            if approver_pubkey != owner_pubkey:
+            if self._is_consumed(db, confirmation_id):
                 db.rollback()
-                raise ConfirmationError("approver is not the configured owner - owner co-signing requires the exact configured owner identity to sign the approval")
-            db.execute("UPDATE confirmations SET owner_approved_by=? WHERE id=?", (approver_pubkey, confirmation_id))
+                raise ConfirmationError("confirmation has already been consumed")
+            approver = _verify_owner_approval(
+                _parse_owner_approval(signed_approval),
+                owner_pubkey=owner_pubkey,
+                confirmation_id=ticket.confirmation_id,
+                operation_hash=ticket.operation_hash,
+            )
+            db.execute("UPDATE confirmations SET owner_approved_by=? WHERE id=?", (approver, confirmation_id))
             db.commit()
-            return dataclasses.replace(ticket, owner_approved_by=approver_pubkey)
+            return dataclasses.replace(ticket, owner_approved_by=approver)
 
     def peek(self, confirmation_id):
         with self._connect() as db:
             ticket = self._get(db, confirmation_id)
             self._check_live(db, ticket)
+            if self._is_consumed(db, confirmation_id):
+                raise ConfirmationError("confirmation has already been consumed")
             return ticket
 
     def consume(self, confirmation_id, *, pubkey, tool, arguments, require_owner_approval=False, defer=False):
@@ -305,6 +400,19 @@ class SQLiteConfirmationStore:
                 raise ConfirmationError("this operation requires owner co-signature - use approve_operation() first")
             if not defer:
                 db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
+            else:
+                # One-shot even under the threaded broker: the row survives
+                # for finalize(), but the consumed_at marker is set atomically
+                # (WHERE ... IS NULL) so a concurrent second consume of the
+                # same ticket fails instead of double-executing (M8).
+                now = time.time()
+                cursor = db.execute(
+                    "UPDATE confirmations SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
+                    (now, confirmation_id),
+                )
+                if cursor.rowcount != 1:
+                    db.rollback()
+                    raise ConfirmationError("confirmation has already been consumed")
             db.commit()
             return ticket
 
@@ -317,20 +425,40 @@ class SQLiteConfirmationStore:
             db.execute("DELETE FROM confirmations WHERE id=?", (confirmation_id,))
             db.commit()
 
+    def revert(self, confirmation_id):
+        """Release the atomic in-flight marker set by a deferred consume, so a
+        failed privileged operation does not burn an otherwise valid ticket.
+        Only the in-flight marker is cleared; the ticket stays live."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM confirmations WHERE id=?", (confirmation_id,)).fetchone() is None:
+                db.rollback()
+                raise ConfirmationError("unknown or already-used confirmation_id")
+            db.execute("UPDATE confirmations SET consumed_at=NULL WHERE id=?", (confirmation_id,))
+            db.commit()
+
     def __len__(self):
         with self._connect() as db:
             return db.execute("SELECT COUNT(*) FROM confirmations").fetchone()[0]
 
     @staticmethod
     def _row(ticket):
-        return (ticket.confirmation_id, ticket.pubkey, ticket.tool, ticket.arguments_hash, json.dumps(ticket.plan), ticket.created_at, ticket.expires_at, ticket.operation_hash, ticket.owner_approved_by)
+        return (ticket.confirmation_id, ticket.pubkey, ticket.tool, ticket.arguments_hash, json.dumps(ticket.plan), ticket.created_at, ticket.expires_at, ticket.operation_hash, ticket.owner_approved_by, None)
 
     @staticmethod
     def _get(db, confirmation_id):
-        row = db.execute("SELECT * FROM confirmations WHERE id=?", (confirmation_id,)).fetchone()
+        row = db.execute(
+            "SELECT id, pubkey, tool, arguments_hash, plan, created_at, expires_at, operation_hash, owner_approved_by "
+            "FROM confirmations WHERE id=?",
+            (confirmation_id,),
+        ).fetchone()
         if row is None:
             raise ConfirmationError("unknown or already-used confirmation_id")
         return ConfirmationTicket(row[0], row[1], row[2], row[3], json.loads(row[4]), row[5], row[6], row[7], row[8])
+
+    @staticmethod
+    def _is_consumed(db, confirmation_id) -> bool:
+        return db.execute("SELECT 1 FROM confirmations WHERE id=? AND consumed_at IS NOT NULL", (confirmation_id,)).fetchone() is not None
 
     @staticmethod
     def _check_live(db, ticket):

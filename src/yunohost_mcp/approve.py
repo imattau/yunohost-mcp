@@ -101,12 +101,16 @@ from nostr_sdk import EventBuilder, Filter, Keys, Kind, NostrConnect, NostrConne
 from yunohost_mcp.auth.npub import Bech32Error, npub_to_hex
 
 NIP98_KIND = 27235
+# Kind-24243 is the ticket-bound owner-approval event (push_approval.py /
+# policy/confirmation.py's OWNER_APPROVAL_KIND, M11): the signer must be
+# allowed to sign it, not just NIP-98 HTTP-auth events.
+OWNER_APPROVAL_KIND = 24243
 NIP65_RELAY_LIST_KIND = 10002
 APP_NAME = "yunohost-mcp-approve"
 # Narrowest signer permission this helper ever needs (owner-approval-plan.md:
 # "Request the narrowest signer permissions possible... only sign the
 # NIP-98 request needed for owner approval") - not blanket sign_event.
-NIP46_PERMS = f"sign_event:{NIP98_KIND}"
+NIP46_PERMS = f"sign_event:{NIP98_KIND},sign_event:{OWNER_APPROVAL_KIND}"
 # A few broadly reliable, unauthenticated public relays - not tied to any
 # one signer vendor. Used only when nothing more specific is available:
 # an explicit --relay, and (below) the owner's own NIP-65 relay list.
@@ -597,6 +601,18 @@ def _print_pending_operation(record: dict[str, Any]) -> None:
         print(f"  already approved by: {record['approved_by']}", file=sys.stderr)
 
 
+async def _sign_owner_approval(connect: NostrConnect, confirmation_id: str, operation_hash: str) -> Any:
+    """Ask the paired NIP-46 signer to sign the kind-24243 ticket-bound
+    approval event the store's approve() verifies (M11): tags carry the
+    confirmation_id and operation_hash, so the signature is over exactly this
+    pending operation."""
+    tags = [
+        Tag.parse(["confirmation_id", confirmation_id]),
+        Tag.parse(["operation_hash", operation_hash]),
+    ]
+    return await EventBuilder(Kind(OWNER_APPROVAL_KIND), "").tags(tags).finalize_async(connect)
+
+
 def _confirm_interactively() -> bool:
     """An explicit "yes", never a default - owner-approval-plan.md's
     approval helper "requires an explicit local confirmation". A
@@ -629,7 +645,11 @@ async def _async_approve(args: argparse.Namespace) -> None:
         print(f"{APP_NAME}: not approved", file=sys.stderr)
         return
 
-    result = await _call_tool(args.server, auth, "approve_operation", {"confirmation_id": args.confirmation_id})
+    approval_event = await _sign_owner_approval(connect, args.confirmation_id, record["operation_hash"])
+    result = await _call_tool(
+        args.server, auth, "approve_operation",
+        {"confirmation_id": args.confirmation_id, "approval_event": approval_event.as_json()},
+    )
     if result["operation_hash"] != record["operation_hash"]:
         # Should be unreachable (approve_operation doesn't recompute the
         # hash from anything this helper sent) - checked anyway, since a

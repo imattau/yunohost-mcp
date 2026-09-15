@@ -23,6 +23,7 @@ live YunoHost.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import importlib
 import ipaddress
 import json
@@ -102,7 +103,59 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 _SAFE_PROBE_OPENER = urllib.request.build_opener(_NoRedirectHandler())
 
 
-def _validate_probe_url(url: str, *, allow_private: bool) -> None:
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that dials a pre-validated IP while keeping the
+    hostname in the request (Host header)."""
+
+    def __init__(self, host, port=None, *, pinned_ip, timeout=None, **kwargs):
+        super().__init__(host, port, timeout=timeout, **kwargs)
+        self._pinned = (pinned_ip, self.port)
+
+    def _create_connection(self, addr, timeout=None, source_address=None):
+        return socket.create_connection(self._pinned, timeout, source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that dials a pre-validated IP; SNI and certificate
+    verification still use the real hostname."""
+
+    def __init__(self, host, port=None, *, pinned_ip, timeout=None, **kwargs):
+        super().__init__(host, port, timeout=timeout, **kwargs)
+        self._pinned = (pinned_ip, self.port)
+
+    def _create_connection(self, addr, timeout=None, source_address=None):
+        return socket.create_connection(self._pinned, timeout, source_address)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, *, pinned_ip: str, port: int) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+        self._port = port
+
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req, pinned_ip=self._pinned_ip, port=self._port)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, *, pinned_ip: str, port: int) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+        self._port = port
+
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, pinned_ip=self._pinned_ip, port=self._port)
+
+
+def _validate_probe_url(url: str, *, allow_private: bool) -> set[str]:
+    """Validate `url` and resolve its target host, returning the resolved IPs.
+
+    Raises ToolInputError for non-HTTP(S) URLs, embedded credentials, or
+    (unless `allow_private`) targets resolving to private/loopback/link-local/
+    reserved/multicast addresses. Callers must pin the connection to one of
+    the returned IPs (see ``_pinned_probe_opener``) so a hostname cannot
+    rebind to an internal address between this check and the connect.
+    """
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -115,8 +168,6 @@ def _validate_probe_url(url: str, *, allow_private: bool) -> None:
     effective_port = port if port is not None else (443 if parsed.scheme == "https" else 80)
     if not 1 <= effective_port <= 65535:
         raise ToolInputError("URL port is out of range")
-    if allow_private:
-        return
     try:
         addresses = {
             ipaddress.ip_address(result[4][0])
@@ -124,6 +175,8 @@ def _validate_probe_url(url: str, *, allow_private: bool) -> None:
         }
     except socket.gaierror as exc:
         raise ToolInputError(f"could not resolve probe host: {exc}") from exc
+    if allow_private:
+        return {str(addr) for addr in addresses}
     if any(
         address.is_private
         or address.is_loopback
@@ -134,6 +187,24 @@ def _validate_probe_url(url: str, *, allow_private: bool) -> None:
         for address in addresses
     ):
         raise ToolInputError("private, loopback, link-local, reserved, unspecified, and multicast probe targets are disabled")
+    return {str(addr) for addr in addresses}
+
+
+def _pinned_probe_opener(url: str, *, allow_private: bool) -> urllib.request.OpenerDirector:
+    """A no-redirect opener whose HTTP(S) connections are pinned to one
+    validated target IP. This closes the DNS-rebinding window between
+    ``_validate_probe_url`` and the actual connect."""
+    addresses = _validate_probe_url(url, allow_private=allow_private)
+    if not addresses:
+        raise ToolInputError("could not resolve probe host")
+    parsed = urlsplit(url)
+    pinned = sorted(addresses)[0]
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    return urllib.request.build_opener(
+        _PinnedHTTPHandler(pinned_ip=pinned, port=port),
+        _PinnedHTTPSHandler(pinned_ip=pinned, port=port),
+        _NoRedirectHandler(),
+    )
 _NGINX_ERROR_RE = re.compile(r'^(?P<timestamp>[^ ]+\s+[^ ]+)\s+\[(?P<level>[^]]+)\]\s+(?P<message>.*)$')
 
 
@@ -1515,14 +1586,14 @@ class YunohostAdapter:
             return brokered
         if self.settings.fake_yunohost:
             return {"fake": True, "url": url, "reachable": True, "status_code": 200, "elapsed_ms": 1}
-        _validate_probe_url(url, allow_private=self.settings.allow_private_http_probes)
+        opener = _pinned_probe_opener(url, allow_private=self.settings.allow_private_http_probes)
         parsed = urlsplit(url)
         if not 0.1 <= timeout_seconds <= 60:
             raise ToolInputError("timeout_seconds must be between 0.1 and 60")
         started = time.monotonic()
         request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/http-probe"})
         try:
-            with _SAFE_PROBE_OPENER.open(request, timeout=timeout_seconds) as response:
+            with opener.open(request, timeout=timeout_seconds) as response:
                 response.read(4096)
                 return {
                     "fake": False,
@@ -3801,14 +3872,14 @@ class YunohostAdapter:
         if self.settings.fake_yunohost:
             return {"fake": True, "url": url, "reachable": True, "status_code": 200, "error": None}
 
-        _validate_probe_url(url, allow_private=self.settings.allow_private_http_probes)
+        opener = _pinned_probe_opener(url, allow_private=self.settings.allow_private_http_probes)
 
         import urllib.error
         import urllib.request
 
         request = urllib.request.Request(url, method="GET", headers={"User-Agent": "yunohost-mcp/safe_upgrade"})
         try:
-            with _SAFE_PROBE_OPENER.open(request, timeout=timeout_seconds) as response:
+            with opener.open(request, timeout=timeout_seconds) as response:
                 return {"fake": False, "url": url, "reachable": True, "status_code": response.status, "error": None}
         except urllib.error.HTTPError as exc:
             # Any HTTP response at all - even 4xx/5xx - means the app is

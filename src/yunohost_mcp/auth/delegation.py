@@ -41,6 +41,11 @@ from yunohost_mcp.policy.scopes import Scope
 
 DELEGATION_KIND = 27236
 DEFAULT_MAX_LIFETIME_SECONDS = 30 * 24 * 3600  # 30 days: a delegation is a bearer credential once issued
+# A delegation event dated further in the future than this is rejected. This
+# closes the "set created_at = now + N, expiry = created_at + 30d" bypass of
+# the lifetime cap: the cap is enforced from *now*, and a future-dated
+# created_at is itself implausible (beyond clock skew).
+CLOCK_SKEW_SECONDS = 5 * 60
 
 
 class DelegationError(ValueError):
@@ -103,9 +108,14 @@ def verify_delegation_event(
     now = int(time.time()) if now is None else now
     if now >= expires_at:
         raise DelegationError(f"delegation expired at {expires_at} (now {now})")
-    if expires_at - event.created_at > DEFAULT_MAX_LIFETIME_SECONDS:
+    if event.created_at > now + CLOCK_SKEW_SECONDS:
+        raise DelegationError("delegation created_at is in the future")
+    # The lifetime cap is absolute (from *now*, not from the event's
+    # self-declared created_at): a delegation must never be valid more than
+    # DEFAULT_MAX_LIFETIME_SECONDS from the moment it is presented.
+    if expires_at - now > DEFAULT_MAX_LIFETIME_SECONDS:
         raise DelegationError(
-            f"delegation lifetime ({expires_at - event.created_at}s) exceeds the maximum "
+            f"delegation lifetime ({expires_at - now}s remaining) exceeds the maximum "
             f"({DEFAULT_MAX_LIFETIME_SECONDS}s) - issue a shorter-lived one"
         )
 

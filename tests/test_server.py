@@ -21,6 +21,10 @@ from yunohost_mcp.auth.identity import AuthenticatedRequest, IdentityRecord, LOC
 from yunohost_mcp.policy.roles import scopes_for_roles
 from yunohost_mcp.server import audit_log, mcp
 
+from tests.auth_helpers import make_owner_approval_event, new_keypair
+
+OWNER_SK, OWNER_PK = new_keypair()
+
 PHASE5_WRITE_TOOLS = {"service_restart", "service_start", "backup_create", "app_install", "app_upgrade"}
 SERVICE_STOP_TOOLS = {"service_stop"}
 APP_SETTING_TOOLS = {"app_setting_get", "app_setting_set"}
@@ -90,11 +94,11 @@ def local_stdio_identity():
 
 
 SECOND_ADMIN_REQUEST = AuthenticatedRequest(
-    pubkey="second-admin",
+    pubkey=OWNER_PK,
     event_id="a" * 64,
     event_created_at=0,
     identity=IdentityRecord(
-        pubkey="second-admin", name="second admin", roles=("administrator",), scopes=scopes_for_roles(("administrator",))
+        pubkey=OWNER_PK, name="second admin", roles=("administrator",), scopes=scopes_for_roles(("administrator",))
     ),
 )
 
@@ -114,13 +118,27 @@ def configured_owner(monkeypatch: pytest.MonkeyPatch):
 async def _approve_as_second_admin(client: Client, confirmation_id: str) -> None:
     """Owner co-signing (Phase 13) - swap in the configured owner identity
     (configured_owner fixture) for one call, then restore LOCAL_STDIO_
-    REQUEST so the rest of the test proceeds as before."""
+    REQUEST so the rest of the test proceeds as before. The owner approves
+    with a real kind-24243 signature over the ticket (M11)."""
     set_current_request(SECOND_ADMIN_REQUEST)
     try:
-        result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+        ticket = await _peek_confirmation(client, confirmation_id)
+        approval = make_owner_approval_event(
+            OWNER_SK, OWNER_PK, confirmation_id=confirmation_id, operation_hash=ticket["operation_hash"]
+        )
+        result = await client.call_tool(
+            "approve_operation",
+            {"confirmation_id": confirmation_id, "approval_event": approval.model_dump_json()},
+        )
         assert result.is_error is not True, result.content
     finally:
         set_current_request(LOCAL_STDIO_REQUEST)
+
+
+async def _peek_confirmation(client: Client, confirmation_id: str) -> dict:
+    result = await client.call_tool("approval_get", {"confirmation_id": confirmation_id})
+    assert result.is_error is not True, result.content
+    return result.structured_content
 
 
 @pytest.mark.anyio
@@ -250,7 +268,6 @@ async def test_memory_store_audit_does_not_persist_memory_content(monkeypatch: p
         ("service_restart", {"names": ["nginx"]}),
         ("service_start", {"names": ["nginx"]}),
         ("backup_create", {"name": "test-backup"}),
-        ("app_install", {"app": "nextcloud"}),
         ("app_upgrade", {"app": "nextcloud"}),
     ],
 )
@@ -462,6 +479,25 @@ async def test_app_config_set_requires_then_accepts_a_plain_confirmation():
             },
         )
         assert confirmed.is_error is not True, confirmed.content
+
+
+def test_app_config_plan_redacts_sensitive_key_value():
+    """M9: a config value set under a sensitive key (SMTP password, API
+    token) must not be persisted verbatim in the confirmation plan / store."""
+    from yunohost_mcp.server import _app_config_plan, _app_setting_plan
+
+    plan = _app_config_plan(app="nextcloud", key="smtp.password", value="supersecret")
+    assert plan["value"] == "[REDACTED]"
+
+    plan_plain = _app_config_plan(app="nextcloud", key="smtp.port", value="587")
+    assert plan_plain["value"] == "587"
+
+    setting_plan = _app_setting_plan(app="nextcloud", key="db_password", value="hunter2")
+    assert setting_plan["value"] == "[REDACTED]"
+
+    # The control plane redacts regardless of key name.
+    control = _app_setting_plan(app="yunohost_mcp", key="admin_npub", value="npub1...")
+    assert control["value"] == "[REDACTED]"
 
 
 @pytest.mark.anyio
@@ -923,7 +959,12 @@ async def test_owner_push_approval_on_approved_marks_ticket_approved_and_audits(
         confirmation_id = result.structured_content["confirmation_id"]
 
         before = len(server_module.audit_log.list())
-        captured["on_approved"]()  # simulate the signer having approved
+        signed = make_owner_approval_event(
+            OWNER_SK, OWNER_PK,
+            confirmation_id=confirmation_id,
+            operation_hash=result.structured_content["operation_hash"],
+        )
+        captured["on_approved"](signed)  # simulate the signer having approved
         after = server_module.audit_log.list()
         assert len(after) == before + 1
         assert after[0]["tool"] == "owner.approve"
@@ -952,8 +993,16 @@ async def test_phase13_non_owner_cannot_approve_even_its_own_request():
 
         # LOCAL_STDIO_REQUEST is the requester, and (per configured_owner)
         # is not the configured owner - approving must fail regardless of
-        # whether it's also the requester.
-        result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+        # whether it's also the requester. The signature itself is from a
+        # non-owner key, so the store's cryptographic check (M11) refuses it.
+        stranger_sk, stranger_pk = new_keypair()
+        forged = make_owner_approval_event(
+            stranger_sk, stranger_pk, confirmation_id=confirmation_id, operation_hash=first.structured_content["operation_hash"]
+        )
+        result = await client.call_tool(
+            "approve_operation",
+            {"confirmation_id": confirmation_id, "approval_event": forged.model_dump_json()},
+        )
         assert result.is_error is True
 
 
@@ -968,7 +1017,13 @@ async def test_phase13_owner_may_approve_and_consume_its_own_request():
             first = await client.call_tool("system_upgrade", {})
             confirmation_id = first.structured_content["confirmation_id"]
 
-            approve = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            approval = make_owner_approval_event(
+                OWNER_SK, OWNER_PK, confirmation_id=confirmation_id, operation_hash=first.structured_content["operation_hash"]
+            )
+            approve = await client.call_tool(
+                "approve_operation",
+                {"confirmation_id": confirmation_id, "approval_event": approval.model_dump_json()},
+            )
             assert approve.is_error is not True, approve.content
 
             second = await client.call_tool("system_upgrade", {"confirmation_id": confirmation_id})
@@ -1022,7 +1077,13 @@ async def test_phase13_approve_operation_denied_for_non_administrator():
 
         set_current_request(package_developer)
         try:
-            result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            approval = make_owner_approval_event(
+                OWNER_SK, OWNER_PK, confirmation_id=confirmation_id, operation_hash=first.structured_content["operation_hash"]
+            )
+            result = await client.call_tool(
+                "approve_operation",
+                {"confirmation_id": confirmation_id, "approval_event": approval.model_dump_json()},
+            )
             assert result.is_error is True
         finally:
             set_current_request(LOCAL_STDIO_REQUEST)
@@ -1041,7 +1102,7 @@ async def test_phase13_approve_operation_is_audited():
     assert len(new_lines) == 1
     entry = json.loads(new_lines[0])
     assert entry["tool"] == "owner.approve"
-    assert entry["caller"] == "second-admin"
+    assert entry["caller"] == OWNER_PK
     assert entry["result"] == "success"
 
 
@@ -1080,7 +1141,7 @@ async def test_phase13_approved_write_records_approved_by_in_its_own_audit_entry
     entry = json.loads(new_lines[0])
     assert entry["tool"] == "system.upgrade"
     assert entry["caller"] == "local-stdio"
-    assert entry["approved_by"] == "second-admin"
+    assert entry["approved_by"] == OWNER_PK
 
 
 @pytest.mark.anyio
@@ -1198,7 +1259,13 @@ async def test_phase13_approve_operation_fails_clearly_when_no_owner_configured(
 
         set_current_request(SECOND_ADMIN_REQUEST)
         try:
-            result = await client.call_tool("approve_operation", {"confirmation_id": confirmation_id})
+            approval = make_owner_approval_event(
+                OWNER_SK, OWNER_PK, confirmation_id=confirmation_id, operation_hash=first.structured_content["operation_hash"]
+            )
+            result = await client.call_tool(
+                "approve_operation",
+                {"confirmation_id": confirmation_id, "approval_event": approval.model_dump_json()},
+            )
             assert result.is_error is True
             assert "no owner is configured" in str(result.content)
         finally:
@@ -1674,10 +1741,55 @@ async def _audit_call(client: Client, tool: str, args: dict):
 
 
 @pytest.mark.anyio
+async def test_app_install_requires_then_accepts_a_plain_confirmation():
+    """App installs run arbitrary install scripts with YunoHost privileges —
+    they must never execute silently, but only the control-plane install
+    (owner-gated) needs a second signature."""
+    async with Client(mcp) as client:
+        first = await client.call_tool("app_install", {"app": "nextcloud"})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is False
+        confirmation_id = plan_response["confirmation_id"]
+
+        confirmed = await client.call_tool(
+            "app_install", {"app": "nextcloud", "confirmation_id": confirmation_id}
+        )
+        assert confirmed.is_error is not True, confirmed.content
+        assert confirmed.structured_content.get("fake") is True
+        assert "confirmation_required" not in confirmed.structured_content
+
+
+@pytest.mark.anyio
+async def test_control_plane_install_requires_owner_cosign():
+    """Re-installing the MCP's own package must require the owner's
+    co-signature, not just a confirmation."""
+    async with Client(mcp) as client:
+        first = await client.call_tool("app_install", {"app": "yunohost_mcp"})
+        assert first.is_error is not True, first.content
+        plan_response = first.structured_content
+        assert plan_response["confirmation_required"] is True
+        assert plan_response["owner_signature_required"] is True
+        confirmation_id = plan_response["confirmation_id"]
+
+        not_approved = await client.call_tool("app_install", {"app": "yunohost_mcp", "confirmation_id": confirmation_id})
+        assert not_approved.is_error is True
+
+        await _approve_as_second_admin(client, confirmation_id)
+        confirmed = await client.call_tool("app_install", {"app": "yunohost_mcp", "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
+
+
+@pytest.mark.anyio
 async def test_phase10_audit_list_and_get_require_owner_cosign():
     async with Client(mcp) as client:
         install = await client.call_tool("app_install", {"app": "nextcloud"})
-        assert install.is_error is not True
+        assert install.is_error is not True, install.content
+        assert install.structured_content["confirmation_required"] is True
+        confirmation_id = install.structured_content["confirmation_id"]
+        confirmed = await client.call_tool("app_install", {"app": "nextcloud", "confirmation_id": confirmation_id})
+        assert confirmed.is_error is not True, confirmed.content
 
         # limit=5, not 1: approving the audit.read confirmation itself
         # writes an "owner.approve" entry (_audit_call's own
@@ -1687,8 +1799,11 @@ async def test_phase10_audit_list_and_get_require_owner_cosign():
         listed = await _audit_call(client, "audit_list", {"limit": 5})
         assert listed.is_error is not True, listed.content
         entries = listed.structured_content["entries"]
-        install_entries = [e for e in entries if e["tool"] == "apps.install"]
-        assert len(install_entries) == 1
+        # The confirmation-required plan call and the executed install both
+        # surface as apps.install entries; the *executed* one is the success
+        # entry this test wants to pull back via audit_get.
+        install_entries = [e for e in entries if e["tool"] == "apps.install" and e.get("result") == "success"]
+        assert len(install_entries) >= 1
         audit_id = install_entries[0]["audit_id"]
 
         got = await _audit_call(client, "audit_get", {"audit_id": audit_id})
