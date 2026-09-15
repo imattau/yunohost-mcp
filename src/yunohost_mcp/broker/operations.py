@@ -307,9 +307,7 @@ def _catalog_package_inspect(adapter: YunohostAdapter, arguments: dict[str, Any]
 def _catalog_verify(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     if set(arguments) != {"event_or_naddr"}:
         raise ValueError("event_or_naddr is required")
-    value = arguments["event_or_naddr"]
-    if not isinstance(value, str) or not value or len(value) > 1_000_000:
-        raise ValueError("event_or_naddr must be a bounded non-empty string")
+    value = _require_str(arguments, "event_or_naddr", 1_000_000, "event_or_naddr must be a bounded non-empty string")
     return adapter.catalog_verify(value)
 
 
@@ -380,8 +378,7 @@ def _package_run_tests(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     source = arguments.get("source")
     app_id = arguments.get("app_id")
     _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
-    if app_id is not None and (not isinstance(app_id, str) or not app_id or len(app_id) > 128):
-        raise ValueError("app_id must be a bounded string")
+    _require_str(arguments, "app_id", 128, "app_id must be a bounded string", required=False)
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     session_id = arguments.get("session_id")
@@ -403,9 +400,8 @@ def _package_upgrade_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     allowed = {"app", "source", "session_id", "confirmation_id"}
     if set(arguments) != allowed:
         raise ValueError("app and source are required")
-    app, source = arguments["app"], arguments["source"]
-    if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("app and source must be bounded non-empty strings")
+    app = _require_str(arguments, "app", 128, "app and source must be bounded non-empty strings")
+    source = _require_str(arguments, "source", 8192, "app and source must be bounded non-empty strings")
     _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_upgrade_test(app, source, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
@@ -879,9 +875,7 @@ def _permission_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     allowed = {"permission", "label", "show_tile", "protected", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown user permission update argument")
     permission = _bounded_string(arguments, "permission", 256, required=True)
-    label = arguments.get("label")
-    if label is not None and (not isinstance(label, str) or not label or len(label) > 256):
-        raise ValueError("label must be a bounded non-empty string")
+    label = _require_str(arguments, "label", 256, "label must be a bounded non-empty string", required=False)
     show_tile = _require_bool(arguments, "show_tile", None, "show_tile must be a boolean", optional=True)
     protected = _require_bool(arguments, "protected", None, "protected must be a boolean", optional=True)
     confirmation_id = arguments.get("confirmation_id")
