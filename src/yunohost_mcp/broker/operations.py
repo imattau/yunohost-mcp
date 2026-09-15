@@ -392,8 +392,7 @@ def _package_run_tests(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     session_id = arguments.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id, session_id=session_id)
 
 
@@ -415,8 +414,7 @@ def _package_upgrade_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     app, source = arguments["app"], arguments["source"]
     if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(source, str) or not source or len(source) > 8192:
         raise ValueError("app and source must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_upgrade_test(app, source, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -425,8 +423,7 @@ def _package_backup_test(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
         raise ValueError("app is required")
     app = arguments["app"]
     _require_str(arguments, "app", 128, "app must be a bounded non-empty string")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_backup_test(app, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -436,8 +433,7 @@ def _package_restore_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     app, archive = arguments["app"], arguments["archive_name"]
     if not all(isinstance(value, str) and value and len(value) <= 256 for value in (app, archive)):
         raise ValueError("app and archive_name must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_restore_test(app, archive, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -446,8 +442,7 @@ def _package_change_url_test(adapter: YunohostAdapter, arguments: dict[str, Any]
         raise ValueError("app, domain, and path are required")
     if not all(isinstance(arguments[key], str) and arguments[key] and len(arguments[key]) <= 8192 for key in arguments):
         raise ValueError("package change-url arguments must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_change_url_test(arguments["app"], arguments["domain"], arguments["path"], session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -455,8 +450,7 @@ def _package_remove_test(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
     _reject_unknown_keys(arguments, {"app", "purge", "session_id", "confirmation_id"}, "unknown package remove-test argument")
     app = _require_str(arguments, "app", 128, "app and purge are invalid")
     purge = _require_bool(arguments, "purge", True, "app and purge are invalid")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_remove_test(app, purge=purge, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
