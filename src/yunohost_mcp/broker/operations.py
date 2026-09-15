@@ -29,6 +29,49 @@ def _no_args(fn):
     return invoke
 
 
+def _require_str(
+    arguments: dict[str, Any],
+    name: str,
+    max_len: int | None,
+    message: str,
+    *,
+    required: bool = True,
+) -> str | None:
+    """Validate that ``arguments[name]`` is a non-empty (optionally bounded) string.
+
+    When ``required`` is False, a missing/None value is allowed and returns None
+    instead of raising. Raises ``ValueError(message)`` on any other invalid value.
+    """
+    value = arguments.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value or (max_len is not None and len(value) > max_len):
+        raise ValueError(message)
+    return value
+
+
+def _require_bool(
+    arguments: dict[str, Any], name: str, default: bool | None, message: str, *, optional: bool = False
+) -> bool | None:
+    """Validate that ``arguments[name]`` (or ``default`` if absent) is a bool.
+
+    When ``optional`` is True, a missing/None value is allowed and returns None
+    instead of raising.
+    """
+    value = arguments.get(name, default)
+    if value is None and optional:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(message)
+    return value
+
+
+def _reject_unknown_keys(arguments: dict[str, Any], allowed: set[str], message: str = "unknown argument") -> None:
+    """Raise ``ValueError(message)`` if ``arguments`` has keys outside ``allowed``."""
+    if set(arguments) - allowed:
+        raise ValueError(message)
+
+
 def _service_status(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     names = arguments.get("names", [])
     if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
@@ -39,33 +82,27 @@ def _service_status(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 
 def _apps_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    full = arguments.get("full", False)
-    if not isinstance(full, bool):
-        raise ValueError("full must be a boolean")
+    full = _require_bool(arguments, "full", False, "full must be a boolean")
     return adapter.apps_list(full=full)
 
 
 def _app_info(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     app = arguments.get("app")
     full = arguments.get("full", False)
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
-    if not isinstance(full, bool):
-        raise ValueError("full must be a boolean")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
+    _require_bool(arguments, "full", False, "full must be a boolean")
     return adapter.app_info(app, full=full)
 
 
 def _app_resources(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     app = arguments.get("app")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
     return adapter.app_resources(app)
 
 
 def _app_config_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     app = arguments.get("app")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
     values = {key: arguments.get(key, default) for key, default in (("key", ""), ("full", False), ("export", False))}
     if not isinstance(values["key"], str) or not all(isinstance(values[key], bool) for key in ("full", "export")):
         raise ValueError("invalid app config arguments")
@@ -73,14 +110,11 @@ def _app_config_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 
 def _app_setting_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"app", "key"}:
-        raise ValueError("unknown app setting argument")
+    _reject_unknown_keys(arguments, {"app", "key"}, "unknown app setting argument")
     app = arguments.get("app")
     key = arguments.get("key")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
-    if not isinstance(key, str) or not key or len(key) > 512:
-        raise ValueError("key must be a non-empty bounded string")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
+    _require_str(arguments, "key", 512, "key must be a non-empty bounded string")
     return adapter.app_setting_get(app, key)
 
 
@@ -101,24 +135,20 @@ def _operations_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
     limit = arguments.get("limit")
     if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000):
         raise ValueError("limit must be between 1 and 1000")
-    with_suboperations = arguments.get("with_suboperations", False)
-    if not isinstance(with_suboperations, bool):
-        raise ValueError("with_suboperations must be a boolean")
+    with_suboperations = _require_bool(arguments, "with_suboperations", False, "with_suboperations must be a boolean")
     return adapter.operations_list(limit=limit, with_suboperations=with_suboperations)
 
 
 def _operation_name(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     name = arguments.get("name")
-    if not isinstance(name, str) or not name or len(name) > 256:
-        raise ValueError("name must be a non-empty string")
+    _require_str(arguments, "name", 256, "name must be a non-empty string")
     return adapter.operation_status(name)
 
 
 def _operation_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     name = arguments.get("name")
     tail_lines = arguments.get("tail_lines")
-    if not isinstance(name, str) or not name or len(name) > 256:
-        raise ValueError("name must be a non-empty string")
+    _require_str(arguments, "name", 256, "name must be a non-empty string")
     if tail_lines is not None and (not isinstance(tail_lines, int) or isinstance(tail_lines, bool) or not 1 <= tail_lines <= 10000):
         raise ValueError("tail_lines must be between 1 and 10000")
     return adapter.operation_logs(name, tail_lines=tail_lines)
@@ -126,15 +156,13 @@ def _operation_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 def _domain_name(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     domain = arguments.get("domain")
-    if not isinstance(domain, str) or not domain or len(domain) > 253:
-        raise ValueError("domain must be a non-empty string")
+    _require_str(arguments, "domain", 253, "domain must be a non-empty string")
     return adapter.domain_cert_info(domain)
 
 
 def _service_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     service = arguments.get("service")
-    if not isinstance(service, str) or not service or len(service) > 128:
-        raise ValueError("service must be a non-empty string")
+    _require_str(arguments, "service", 128, "service must be a non-empty string")
     lines = arguments.get("lines", 200)
     if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 2000:
         raise ValueError("lines must be between 1 and 2000")
@@ -158,8 +186,7 @@ def _introspection_filters(arguments: dict[str, Any], *, default_lines: int = 20
 
 
 def _journal_query(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"units", "since", "until", "priority", "grep", "lines"}:
-        raise ValueError("unknown journal query argument")
+    _reject_unknown_keys(arguments, {"units", "since", "until", "priority", "grep", "lines"}, "unknown journal query argument")
     units = arguments.get("units")
     if not isinstance(units, list) or not 1 <= len(units) <= 16 or not all(
         isinstance(unit, str) and unit for unit in units
@@ -170,8 +197,7 @@ def _journal_query(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
 
 
 def _web_logs(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"host", "path", "status", "since", "until", "lines"}:
-        raise ValueError("unknown web log argument")
+    _reject_unknown_keys(arguments, {"host", "path", "status", "since", "until", "lines"}, "unknown web log argument")
     host, path = arguments.get("host"), arguments.get("path")
     status = arguments.get("status")
     if host is not None and (not isinstance(host, str) or not host):
@@ -191,8 +217,7 @@ def _system_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
 
 
 def _service_history(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"names", "lines"}:
-        raise ValueError("unknown service history argument")
+    _reject_unknown_keys(arguments, {"names", "lines"}, "unknown service history argument")
     names = arguments.get("names")
     lines = arguments.get("lines", 50)
     if not isinstance(names, list) or not 1 <= len(names) <= 32 or not all(isinstance(name, str) and name for name in names):
@@ -203,8 +228,7 @@ def _service_history(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
 
 
 def _ssh_diagnose(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"since", "lines"}:
-        raise ValueError("unknown SSH diagnosis argument")
+    _reject_unknown_keys(arguments, {"since", "lines"}, "unknown SSH diagnosis argument")
     since = arguments.get("since", "-24h")
     lines = arguments.get("lines", 200)
     if not isinstance(since, str) or len(since) > 256:
@@ -221,20 +245,17 @@ def _network_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> di
 
 
 def _http_probe(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"url", "timeout_seconds"}:
-        raise ValueError("unknown HTTP probe argument")
+    _reject_unknown_keys(arguments, {"url", "timeout_seconds"}, "unknown HTTP probe argument")
     url = arguments.get("url")
     timeout_seconds = arguments.get("timeout_seconds", 10.0)
-    if not isinstance(url, str) or not url or len(url) > 4096:
-        raise ValueError("url must be a bounded non-empty string")
+    _require_str(arguments, "url", 4096, "url must be a bounded non-empty string")
     if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0.1 <= timeout_seconds <= 60:
         raise ValueError("timeout_seconds must be between 0.1 and 60")
     return adapter.http_probe(url, timeout_seconds=float(timeout_seconds))
 
 
 def _incident_snapshot(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"since", "until", "lines"}:
-        raise ValueError("unknown incident snapshot argument")
+    _reject_unknown_keys(arguments, {"since", "until", "lines"}, "unknown incident snapshot argument")
     since = arguments.get("since", "-24h")
     until = arguments.get("until")
     lines = arguments.get("lines", 100)
@@ -254,8 +275,7 @@ def _updates_check(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
 
 
 def _updates_refresh(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"target"}:
-        raise ValueError("unknown updates refresh argument")
+    _reject_unknown_keys(arguments, {"target"}, "unknown updates refresh argument")
     target = arguments.get("target", "apps")
     if not isinstance(target, str) or target not in {"system", "apps", "all"}:
         raise ValueError("target must be one of: system, apps, all")
@@ -263,8 +283,7 @@ def _updates_refresh(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
 
 
 def _diagnosis_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"categories", "force"}:
-        raise ValueError("unknown diagnosis argument")
+    _reject_unknown_keys(arguments, {"categories", "force"}, "unknown diagnosis argument")
     categories = arguments.get("categories")
     if categories is not None and (
         not isinstance(categories, list)
@@ -272,30 +291,23 @@ def _diagnosis_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
         or not all(isinstance(category, str) and 0 < len(category) <= 128 for category in categories)
     ):
         raise ValueError("categories must be a bounded list of non-empty strings")
-    force = arguments.get("force", False)
-    if not isinstance(force, bool):
-        raise ValueError("force must be a boolean")
+    force = _require_bool(arguments, "force", False, "force must be a boolean")
     return adapter.diagnosis_run(categories=categories, force=force)
 
 
 def _catalog_package_inspect(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"source", "ref"}:
-        raise ValueError("unknown catalog inspection argument")
+    _reject_unknown_keys(arguments, {"source", "ref"}, "unknown catalog inspection argument")
     source = arguments.get("source")
     ref = arguments.get("ref")
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     return adapter.catalog_package_inspect(source, ref=ref)
 
 
 def _catalog_verify(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     if set(arguments) != {"event_or_naddr"}:
         raise ValueError("event_or_naddr is required")
-    value = arguments["event_or_naddr"]
-    if not isinstance(value, str) or not value or len(value) > 1_000_000:
-        raise ValueError("event_or_naddr must be a bounded non-empty string")
+    value = _require_str(arguments, "event_or_naddr", 1_000_000, "event_or_naddr must be a bounded non-empty string")
     return adapter.catalog_verify(value)
 
 
@@ -304,20 +316,15 @@ def _validate_ci_result_arguments(arguments: dict[str, Any]) -> None:
     if ci_result is not None and not isinstance(ci_result, dict):
         raise ValueError("ci_result must be an object")
     for key in ("ci_provider", "ci_ref"):
-        value = arguments.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > 512):
-            raise ValueError(f"{key} must be a bounded string")
+        _require_str(arguments, key, 512, f"{key} must be a bounded string", required=False)
 
 
 def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"source", "ref", "ci_result", "ci_provider", "ci_ref"}:
-        raise ValueError("unknown catalog publish-plan argument")
+    _reject_unknown_keys(arguments, {"source", "ref", "ci_result", "ci_provider", "ci_ref"}, "unknown catalog publish-plan argument")
     source = arguments.get("source")
     ref = arguments.get("ref")
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     _validate_ci_result_arguments(arguments)
     return adapter.catalog_publish_plan(
         source,
@@ -330,18 +337,13 @@ def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -
 
 def _catalog_publish(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"source", "ref", "confirmation_id", "plan_id", "ci_result", "ci_provider", "ci_ref"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown catalog publish argument")
+    _reject_unknown_keys(arguments, allowed, "unknown catalog publish argument")
     source = arguments.get("source")
     ref = arguments.get("ref")
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     for key in ("confirmation_id", "plan_id"):
-        value = arguments.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > 128):
-            raise ValueError(f"{key} must be a string")
+        _require_str(arguments, key, 128, f"{key} must be a string", required=False)
     _validate_ci_result_arguments(arguments)
     return adapter.catalog_publish(
         source=source,
@@ -358,8 +360,7 @@ def _package_source(arguments: dict[str, Any], operation: str) -> str:
     if set(arguments) != {"source"}:
         raise ValueError(f"{operation} accepts only source")
     source = arguments["source"]
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
     return source
 
 
@@ -373,33 +374,25 @@ def _package_lint(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
 
 def _package_run_tests(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"source", "app_id", "confirmation_id", "session_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown package test argument")
+    _reject_unknown_keys(arguments, allowed, "unknown package test argument")
     source = arguments.get("source")
     app_id = arguments.get("app_id")
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
-    if app_id is not None and (not isinstance(app_id, str) or not app_id or len(app_id) > 128):
-        raise ValueError("app_id must be a bounded string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
+    _require_str(arguments, "app_id", 128, "app_id must be a bounded string", required=False)
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     session_id = arguments.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_run_tests(source, app_id=app_id, confirmation_id=confirmation_id, session_id=session_id)
 
 
 def _package_install_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"source", "label", "args", "session_id", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown package install-test argument")
+    _reject_unknown_keys(arguments, allowed, "unknown package install-test argument")
     source = arguments.get("source")
-    if not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("source must be a bounded non-empty string")
+    _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
     for key in ("label", "args"):
-        if arguments.get(key) is not None and (not isinstance(arguments[key], str) or len(arguments[key]) > 8192):
-            raise ValueError(f"{key} must be a bounded string")
+        _require_str(arguments, key, 8192, f"{key} must be a bounded string", required=False)
     return adapter.package_install_test(source, label=arguments.get("label"), args=arguments.get("args"), session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -407,11 +400,9 @@ def _package_upgrade_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     allowed = {"app", "source", "session_id", "confirmation_id"}
     if set(arguments) != allowed:
         raise ValueError("app and source are required")
-    app, source = arguments["app"], arguments["source"]
-    if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(source, str) or not source or len(source) > 8192:
-        raise ValueError("app and source must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    app = _require_str(arguments, "app", 128, "app and source must be bounded non-empty strings")
+    source = _require_str(arguments, "source", 8192, "app and source must be bounded non-empty strings")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_upgrade_test(app, source, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -419,10 +410,8 @@ def _package_backup_test(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
     if set(arguments) - {"app", "session_id", "confirmation_id"} or "app" not in arguments:
         raise ValueError("app is required")
     app = arguments["app"]
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a bounded non-empty string")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "app", 128, "app must be a bounded non-empty string")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_backup_test(app, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -432,8 +421,7 @@ def _package_restore_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     app, archive = arguments["app"], arguments["archive_name"]
     if not all(isinstance(value, str) and value and len(value) <= 256 for value in (app, archive)):
         raise ValueError("app and archive_name must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_restore_test(app, archive, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -442,37 +430,29 @@ def _package_change_url_test(adapter: YunohostAdapter, arguments: dict[str, Any]
         raise ValueError("app, domain, and path are required")
     if not all(isinstance(arguments[key], str) and arguments[key] and len(arguments[key]) <= 8192 for key in arguments):
         raise ValueError("package change-url arguments must be bounded non-empty strings")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_change_url_test(arguments["app"], arguments["domain"], arguments["path"], session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _package_remove_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"app", "purge", "session_id", "confirmation_id"}:
-        raise ValueError("unknown package remove-test argument")
-    app, purge = arguments.get("app"), arguments.get("purge", True)
-    if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(purge, bool):
-        raise ValueError("app and purge are invalid")
-    if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
-        raise ValueError("session_id is required")
+    _reject_unknown_keys(arguments, {"app", "purge", "session_id", "confirmation_id"}, "unknown package remove-test argument")
+    app = _require_str(arguments, "app", 128, "app and purge are invalid")
+    purge = _require_bool(arguments, "purge", True, "app and purge are invalid")
+    _require_str(arguments, "session_id", None, "session_id is required")
     return adapter.package_remove_test(app, purge=purge, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
 def _safe_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"app", "confirmation_id"}:
-        raise ValueError("app is required")
+    _reject_unknown_keys(arguments, {"app", "confirmation_id"}, "app is required")
     app = arguments["app"]
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a bounded non-empty string")
+    _require_str(arguments, "app", 128, "app must be a bounded non-empty string")
     return adapter.safe_upgrade(app)
 
 
 def _repair_app(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"app", "strategy"}:
-        raise ValueError("unknown repair argument")
+    _reject_unknown_keys(arguments, {"app", "strategy"}, "unknown repair argument")
     app, strategy = arguments.get("app"), arguments.get("strategy", "conservative")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a bounded non-empty string")
+    _require_str(arguments, "app", 128, "app must be a bounded non-empty string")
     if strategy != "conservative":
         raise ValueError("only the conservative repair strategy is supported")
     return adapter.repair_app(app, strategy=strategy)
@@ -482,15 +462,13 @@ def _diagnose_app(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
     if set(arguments) != {"app"}:
         raise ValueError("app is required")
     app = arguments["app"]
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a bounded non-empty string")
+    _require_str(arguments, "app", 128, "app must be a bounded non-empty string")
     return adapter.diagnose_app(app)
 
 
 def _migrations_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    pending, done = arguments.get("pending", False), arguments.get("done", False)
-    if not isinstance(pending, bool) or not isinstance(done, bool):
-        raise ValueError("pending and done must be booleans")
+    pending = _require_bool(arguments, "pending", False, "pending and done must be booleans")
+    done = _require_bool(arguments, "done", False, "pending and done must be booleans")
     return adapter.migrations_list(pending=pending, done=done)
 
 
@@ -509,45 +487,38 @@ def _firewall_is_open(adapter: YunohostAdapter, arguments: dict[str, Any]) -> di
 
 
 def _service_restart(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"names", "confirmation_id"}:
-        raise ValueError("unknown service restart argument")
+    _reject_unknown_keys(arguments, {"names", "confirmation_id"}, "unknown service restart argument")
     names = arguments.get("names")
     if not isinstance(names, list) or not names or len(names) > 16 or not all(isinstance(name, str) and name for name in names):
         raise ValueError("names must contain 1 to 16 non-empty service names")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.service_restart(names, confirmation_id=confirmation_id)
 
 
 def _service_stop(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"names", "confirmation_id"}:
-        raise ValueError("unknown service stop argument")
+    _reject_unknown_keys(arguments, {"names", "confirmation_id"}, "unknown service stop argument")
     names = arguments.get("names")
     if not isinstance(names, list) or not names or len(names) > 16 or not all(isinstance(name, str) and name for name in names):
         raise ValueError("names must contain 1 to 16 non-empty service names")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.service_stop(names, confirmation_id=confirmation_id)
 
 
 def _service_start(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"names", "confirmation_id"}:
-        raise ValueError("unknown service start argument")
+    _reject_unknown_keys(arguments, {"names", "confirmation_id"}, "unknown service start argument")
     names = arguments.get("names")
     if not isinstance(names, list) or not names or len(names) > 16 or not all(isinstance(name, str) and name for name in names):
         raise ValueError("names must contain 1 to 16 non-empty service names")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.service_start(names, confirmation_id=confirmation_id)
 
 
 def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "description", "apps", "system", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown backup argument")
+    _reject_unknown_keys(arguments, allowed, "unknown backup argument")
     for key in ("name", "description"):
         if arguments.get(key) is not None and not isinstance(arguments[key], str):
             raise ValueError(f"{key} must be a string")
@@ -556,8 +527,7 @@ def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
         if value is not None and (not isinstance(value, list) or len(value) > 128 or not all(isinstance(item, str) for item in value)):
             raise ValueError(f"{key} must be a list of strings")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.backup_create(
         name=arguments.get("name"),
         description=arguments.get("description"),
@@ -569,48 +539,35 @@ def _backup_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
 
 def _backup_info(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "with_details"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown backup info argument")
+    _reject_unknown_keys(arguments, allowed, "unknown backup info argument")
     name = arguments.get("name")
-    if not isinstance(name, str) or not name or len(name) > 256:
-        raise ValueError("name must be a non-empty string")
-    with_details = arguments.get("with_details", False)
-    if not isinstance(with_details, bool):
-        raise ValueError("with_details must be a boolean")
+    _require_str(arguments, "name", 256, "name must be a non-empty string")
+    with_details = _require_bool(arguments, "with_details", False, "with_details must be a boolean")
     return adapter.backup_info(name, with_details=with_details)
 
 
 def _backup_delete(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown backup delete argument")
+    _reject_unknown_keys(arguments, allowed, "unknown backup delete argument")
     name = arguments.get("name")
-    if not isinstance(name, str) or not name or len(name) > 256:
-        raise ValueError("name must be a non-empty string")
+    _require_str(arguments, "name", 256, "name must be a non-empty string")
     if "/" in name or "\\" in name or name in {".", ".."}:
         raise ValueError("name must be an archive name, not a path")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.backup_delete(name, confirmation_id=confirmation_id)
 
 
 def _app_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "label", "args", "force", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app install argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app install argument")
     app = arguments.get("app")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
     for key in ("label", "args"):
-        if arguments.get(key) is not None and (not isinstance(arguments[key], str) or len(arguments[key]) > 8192):
-            raise ValueError(f"{key} must be a string of at most 8192 characters")
-    force = arguments.get("force", False)
-    if not isinstance(force, bool):
-        raise ValueError("force must be a boolean")
+        _require_str(arguments, key, 8192, f"{key} must be a string of at most 8192 characters", required=False)
+    force = _require_bool(arguments, "force", False, "force must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_install(
         app, label=arguments.get("label"), args=arguments.get("args"), force=force, confirmation_id=confirmation_id
     )
@@ -618,8 +575,7 @@ def _app_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[st
 
 def _app_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "force", "url", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app upgrade argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app upgrade argument")
     app = arguments.get("app")
     if app is not None and not (
         isinstance(app, (str, list))
@@ -630,45 +586,33 @@ def _app_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[st
         raise ValueError("app must be a non-empty string")
     if isinstance(app, list) and (not app or len(app) > 128 or any(len(item) > 128 for item in app)):
         raise ValueError("app list must contain 1 to 128 bounded names")
-    force = arguments.get("force", False)
-    if not isinstance(force, bool):
-        raise ValueError("force must be a boolean")
+    force = _require_bool(arguments, "force", False, "force must be a boolean")
     url = arguments.get("url")
     if url is not None and (not isinstance(url, str) or len(url) > 8192):
         raise ValueError("url must be a string of at most 8192 characters")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_upgrade(app=app, force=force, url=url, confirmation_id=confirmation_id)
 
 
 def _app_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "purge", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app removal argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app removal argument")
     app = arguments.get("app")
-    if not isinstance(app, str) or not app or len(app) > 128:
-        raise ValueError("app must be a non-empty string")
-    purge = arguments.get("purge", False)
-    if not isinstance(purge, bool):
-        raise ValueError("purge must be a boolean")
+    _require_str(arguments, "app", 128, "app must be a non-empty string")
+    purge = _require_bool(arguments, "purge", False, "purge must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_remove(app, purge=purge, confirmation_id=confirmation_id)
 
 
 def _app_change_url(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "domain", "path", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app URL argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app URL argument")
     for key, max_length in (("app", 128), ("domain", 253), ("path", 4096)):
-        value = arguments.get(key)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{key} must be a non-empty bounded string")
+        _require_str(arguments, key, max_length, f"{key} must be a non-empty bounded string")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_change_url(
         arguments["app"], arguments["domain"], arguments["path"], confirmation_id=confirmation_id
     )
@@ -676,15 +620,11 @@ def _app_change_url(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 def _app_config_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "key", "value", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app config argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app config argument")
     for name, max_length in (("app", 128), ("key", 512), ("value", 8192)):
-        value = arguments.get(name)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{name} must be a non-empty bounded string")
+        _require_str(arguments, name, max_length, f"{name} must be a non-empty bounded string")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_config_set(
         arguments["app"], arguments["key"], arguments["value"], confirmation_id=confirmation_id
     )
@@ -692,21 +632,15 @@ def _app_config_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 def _app_setting_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"app", "key", "value", "delete", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown app setting argument")
+    _reject_unknown_keys(arguments, allowed, "unknown app setting argument")
     for name, max_length in (("app", 128), ("key", 512)):
-        value = arguments.get(name)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{name} must be a non-empty bounded string")
+        _require_str(arguments, name, max_length, f"{name} must be a non-empty bounded string")
     value = arguments.get("value")
     if value is not None and (not isinstance(value, str) or len(value) > 8192):
         raise ValueError("value must be a bounded string")
-    delete = arguments.get("delete", False)
-    if not isinstance(delete, bool):
-        raise ValueError("delete must be a boolean")
+    delete = _require_bool(arguments, "delete", False, "delete must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_setting_set(
         arguments["app"], arguments["key"], value=value, delete=delete, confirmation_id=confirmation_id
     )
@@ -714,11 +648,9 @@ def _app_setting_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
 
 def _backup_restore(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"name", "apps", "system", "force", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown backup restore argument")
+    _reject_unknown_keys(arguments, allowed, "unknown backup restore argument")
     name = arguments.get("name")
-    if not isinstance(name, str) or not name or len(name) > 256:
-        raise ValueError("name must be a non-empty string")
+    _require_str(arguments, "name", 256, "name must be a non-empty string")
     for key in ("apps", "system"):
         value = arguments.get(key)
         if value is not None and (
@@ -727,12 +659,9 @@ def _backup_restore(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
             or not all(isinstance(item, str) and item for item in value)
         ):
             raise ValueError(f"{key} must be a list of non-empty strings")
-    force = arguments.get("force", False)
-    if not isinstance(force, bool):
-        raise ValueError("force must be a boolean")
+    force = _require_bool(arguments, "force", False, "force must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.backup_restore(
         name, apps=arguments.get("apps"), system=arguments.get("system"), force=force,
         confirmation_id=confirmation_id,
@@ -740,21 +669,17 @@ def _backup_restore(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 
 def _system_upgrade(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"confirmation_id"}:
-        raise ValueError("unknown system upgrade argument")
+    _reject_unknown_keys(arguments, {"confirmation_id"}, "unknown system upgrade argument")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.system_upgrade(confirmation_id=confirmation_id)
 
 
 def _confirmation_only(fn):
     def invoke(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-        if set(arguments) - {"confirmation_id"}:
-            raise ValueError("unknown argument")
+        _reject_unknown_keys(arguments, {"confirmation_id"}, "unknown argument")
         confirmation_id = arguments.get("confirmation_id")
-        if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-            raise ValueError("confirmation_id must be a string")
+        _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
         return fn(adapter, confirmation_id=confirmation_id)
 
     return invoke
@@ -770,8 +695,7 @@ def _migrations_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     allowed = {
         "targets", "skip", "auto", "force_rerun", "accept_disclaimer", "skip_postmigrations", "confirmation_id"
     }
-    if set(arguments) - allowed:
-        raise ValueError("unknown migration argument")
+    _reject_unknown_keys(arguments, allowed, "unknown migration argument")
     targets = arguments.get("targets")
     if targets is not None and (
         not isinstance(targets, list)
@@ -780,11 +704,10 @@ def _migrations_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     ):
         raise ValueError("targets must be a list of bounded non-empty strings")
     flags = ("skip", "auto", "force_rerun", "accept_disclaimer", "skip_postmigrations")
-    if any(not isinstance(arguments.get(flag, False), bool) for flag in flags):
-        raise ValueError("migration flags must be booleans")
+    for flag in flags:
+        _require_bool(arguments, flag, False, "migration flags must be booleans")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.migrations_run(
         targets=targets,
         **{flag: arguments.get(flag, False) for flag in flags},
@@ -810,43 +733,34 @@ def _port_and_protocol(arguments: dict[str, Any]) -> tuple[int | str, str]:
 
 def _firewall_open(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"port", "protocol", "comment", "upnp", "no_reload", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown firewall open argument")
+    _reject_unknown_keys(arguments, allowed, "unknown firewall open argument")
     port, protocol = _port_and_protocol(arguments)
     comment = arguments.get("comment", "")
     if not isinstance(comment, str) or len(comment) > 1024:
         raise ValueError("comment must be a string of at most 1024 characters")
     for flag in ("upnp", "no_reload"):
-        if not isinstance(arguments.get(flag, False), bool):
-            raise ValueError(f"{flag} must be a boolean")
+        _require_bool(arguments, flag, False, f"{flag} must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_open(port, protocol, comment=comment, upnp=arguments.get("upnp", False), no_reload=arguments.get("no_reload", False), confirmation_id=confirmation_id)
 
 
 def _firewall_close(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"port", "protocol", "upnp_only", "no_reload", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown firewall close argument")
+    _reject_unknown_keys(arguments, allowed, "unknown firewall close argument")
     port, protocol = _port_and_protocol(arguments)
     for flag in ("upnp_only", "no_reload"):
-        if not isinstance(arguments.get(flag, False), bool):
-            raise ValueError(f"{flag} must be a boolean")
+        _require_bool(arguments, flag, False, f"{flag} must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_close(port, protocol, upnp_only=arguments.get("upnp_only", False), no_reload=arguments.get("no_reload", False), confirmation_id=confirmation_id)
 
 
 def _firewall_reload(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    if set(arguments) - {"skip_upnp", "confirmation_id"}:
-        raise ValueError("unknown firewall reload argument")
-    if not isinstance(arguments.get("skip_upnp", False), bool):
-        raise ValueError("skip_upnp must be a boolean")
+    _reject_unknown_keys(arguments, {"skip_upnp", "confirmation_id"}, "unknown firewall reload argument")
+    _require_bool(arguments, "skip_upnp", False, "skip_upnp must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_reload(skip_upnp=arguments.get("skip_upnp", False), confirmation_id=confirmation_id)
 
 
@@ -861,8 +775,7 @@ def _bounded_string(arguments: dict[str, Any], key: str, limit: int, *, required
 
 def _user_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"username", "domain", "password", "fullname", "mailbox_quota", "admin", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown user create argument")
+    _reject_unknown_keys(arguments, allowed, "unknown user create argument")
     username = _bounded_string(arguments, "username", 128, required=True)
     domain = _bounded_string(arguments, "domain", 253, required=True)
     password = _bounded_string(arguments, "password", 4096, required=True)
@@ -870,19 +783,15 @@ def _user_create(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[st
     quota = arguments.get("mailbox_quota", "0")
     if quota is not None and (not isinstance(quota, str) or len(quota) > 64):
         raise ValueError("mailbox_quota must be a bounded string or null")
-    admin = arguments.get("admin", False)
-    if not isinstance(admin, bool):
-        raise ValueError("admin must be a boolean")
+    admin = _require_bool(arguments, "admin", False, "admin must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.user_create(username, domain=domain, password=password, fullname=fullname, mailbox_quota=quota, admin=admin, confirmation_id=confirmation_id)
 
 
 def _user_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"username", "mail", "change_password", "add_mailforward", "remove_mailforward", "add_mailalias", "remove_mailalias", "mailbox_quota", "fullname", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown user update argument")
+    _reject_unknown_keys(arguments, allowed, "unknown user update argument")
     username = _bounded_string(arguments, "username", 128, required=True)
     for key, limit in (("mail", 512), ("change_password", 4096), ("mailbox_quota", 64), ("fullname", 512)):
         _bounded_string(arguments, key, limit)
@@ -891,33 +800,26 @@ def _user_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[st
         if value is not None and (not isinstance(value, list) or len(value) > 128 or not all(isinstance(item, str) and item and len(item) <= 512 for item in value)):
             raise ValueError(f"{key} must be a list of bounded non-empty strings")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     values = {key: arguments.get(key) for key in allowed if key not in {"username", "confirmation_id"}}
     return adapter.user_update(username, **values, confirmation_id=confirmation_id)
 
 
 def _user_delete(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"username", "purge", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown user delete argument")
+    _reject_unknown_keys(arguments, allowed, "unknown user delete argument")
     username = _bounded_string(arguments, "username", 128, required=True)
-    purge = arguments.get("purge", False)
-    if not isinstance(purge, bool):
-        raise ValueError("purge must be a boolean")
+    purge = _require_bool(arguments, "purge", False, "purge must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.user_delete(username, purge=purge, confirmation_id=confirmation_id)
 
 
 def _group_args(arguments: dict[str, Any], keys: set[str]) -> tuple[str, str | None]:
-    if set(arguments) - keys:
-        raise ValueError("unknown user group argument")
+    _reject_unknown_keys(arguments, keys, "unknown user group argument")
     groupname = _bounded_string(arguments, "groupname", 128, required=True)
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return groupname, confirmation_id
 
 
@@ -941,8 +843,7 @@ def _group_delete(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
 
 
 def _permission_change(adapter: YunohostAdapter, arguments: dict[str, Any], operation: str) -> dict[str, Any]:
-    if set(arguments) - {"permission", "names", "confirmation_id"}:
-        raise ValueError("unknown user permission argument")
+    _reject_unknown_keys(arguments, {"permission", "names", "confirmation_id"}, "unknown user permission argument")
     permission = _bounded_string(arguments, "permission", 256, required=True)
     names = arguments.get("names")
     if not isinstance(names, list) or not 1 <= len(names) <= 128 or not all(
@@ -950,8 +851,7 @@ def _permission_change(adapter: YunohostAdapter, arguments: dict[str, Any], oper
     ):
         raise ValueError("names must contain 1 to 128 bounded non-empty users or groups")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     fn = adapter.user_permission_add if operation == "add" else adapter.user_permission_remove
     return fn(permission, names, confirmation_id=confirmation_id)
 
@@ -966,29 +866,20 @@ def _permission_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
 
 def _permission_info(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"permission"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown user permission info argument")
+    _reject_unknown_keys(arguments, allowed, "unknown user permission info argument")
     permission = _bounded_string(arguments, "permission", 256, required=True)
     return adapter.user_permission_info(permission)
 
 
 def _permission_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"permission", "label", "show_tile", "protected", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown user permission update argument")
+    _reject_unknown_keys(arguments, allowed, "unknown user permission update argument")
     permission = _bounded_string(arguments, "permission", 256, required=True)
-    label = arguments.get("label")
-    if label is not None and (not isinstance(label, str) or not label or len(label) > 256):
-        raise ValueError("label must be a bounded non-empty string")
-    show_tile = arguments.get("show_tile")
-    if show_tile is not None and not isinstance(show_tile, bool):
-        raise ValueError("show_tile must be a boolean")
-    protected = arguments.get("protected")
-    if protected is not None and not isinstance(protected, bool):
-        raise ValueError("protected must be a boolean")
+    label = _require_str(arguments, "label", 256, "label must be a bounded non-empty string", required=False)
+    show_tile = _require_bool(arguments, "show_tile", None, "show_tile must be a boolean", optional=True)
+    protected = _require_bool(arguments, "protected", None, "protected must be a boolean", optional=True)
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.user_permission_update(
         permission, label=label, show_tile=show_tile, protected=protected, confirmation_id=confirmation_id
     )
@@ -996,45 +887,33 @@ def _permission_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
 
 def _domain_add(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"domain", "install_letsencrypt_cert", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown domain add argument")
+    _reject_unknown_keys(arguments, allowed, "unknown domain add argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    letsencrypt = arguments.get("install_letsencrypt_cert", False)
-    if not isinstance(letsencrypt, bool):
-        raise ValueError("install_letsencrypt_cert must be a boolean")
+    letsencrypt = _require_bool(arguments, "install_letsencrypt_cert", False, "install_letsencrypt_cert must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_add(domain, install_letsencrypt_cert=letsencrypt, confirmation_id=confirmation_id)
 
 
 def _domain_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"domain", "remove_apps", "force", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown domain remove argument")
+    _reject_unknown_keys(arguments, allowed, "unknown domain remove argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    remove_apps = arguments.get("remove_apps", False)
-    force = arguments.get("force", False)
-    if not isinstance(remove_apps, bool) or not isinstance(force, bool):
-        raise ValueError("remove_apps and force must be booleans")
+    remove_apps = _require_bool(arguments, "remove_apps", False, "remove_apps and force must be booleans")
+    force = _require_bool(arguments, "force", False, "remove_apps and force must be booleans")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_remove(domain, remove_apps=remove_apps, force=force, confirmation_id=confirmation_id)
 
 
 def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"domain", "letsencrypt", "staging", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown domain certificate argument")
+    _reject_unknown_keys(arguments, allowed, "unknown domain certificate argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    letsencrypt = arguments.get("letsencrypt", True)
-    staging = arguments.get("staging", False)
-    if not isinstance(letsencrypt, bool) or not isinstance(staging, bool):
-        raise ValueError("letsencrypt and staging must be booleans")
+    letsencrypt = _require_bool(arguments, "letsencrypt", True, "letsencrypt and staging must be booleans")
+    staging = _require_bool(arguments, "staging", False, "letsencrypt and staging must be booleans")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_cert_install(
         domain, letsencrypt=letsencrypt, staging=staging, confirmation_id=confirmation_id
     )
@@ -1042,20 +921,16 @@ def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
 
 def _domain_dns_suggest(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"domain"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown domain dns suggest argument")
+    _reject_unknown_keys(arguments, allowed, "unknown domain dns suggest argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
     return adapter.domain_dns_suggest(domain)
 
 
 def _domain_dns_push_args(arguments: dict[str, Any], allowed: set[str]) -> tuple[str, bool, bool]:
-    if set(arguments) - allowed:
-        raise ValueError("unknown domain dns push argument")
+    _reject_unknown_keys(arguments, allowed, "unknown domain dns push argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    force = arguments.get("force", False)
-    purge = arguments.get("purge", False)
-    if not isinstance(force, bool) or not isinstance(purge, bool):
-        raise ValueError("force and purge must be booleans")
+    force = _require_bool(arguments, "force", False, "force and purge must be booleans")
+    purge = _require_bool(arguments, "purge", False, "force and purge must be booleans")
     return domain, force, purge
 
 
@@ -1067,43 +942,34 @@ def _domain_dns_push_preview(adapter: YunohostAdapter, arguments: dict[str, Any]
 def _domain_dns_push(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     domain, force, purge = _domain_dns_push_args(arguments, {"domain", "force", "purge", "confirmation_id"})
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_dns_push(domain, force=force, purge=purge, confirmation_id=confirmation_id)
 
 
 def _settings_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"full"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown settings list argument")
-    full = arguments.get("full", False)
-    if not isinstance(full, bool):
-        raise ValueError("full must be a boolean")
+    _reject_unknown_keys(arguments, allowed, "unknown settings list argument")
+    full = _require_bool(arguments, "full", False, "full must be a boolean")
     return adapter.settings_list(full=full)
 
 
 def _settings_get(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"key", "full"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown settings get argument")
+    _reject_unknown_keys(arguments, allowed, "unknown settings get argument")
     key = _bounded_string(arguments, "key", 128, required=True)
-    full = arguments.get("full", False)
-    if not isinstance(full, bool):
-        raise ValueError("full must be a boolean")
+    full = _require_bool(arguments, "full", False, "full must be a boolean")
     return adapter.settings_get(key, full=full)
 
 
 def _settings_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"key", "value", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown settings set argument")
+    _reject_unknown_keys(arguments, allowed, "unknown settings set argument")
     key = _bounded_string(arguments, "key", 128, required=True)
     value = arguments.get("value")
     if not isinstance(value, str) or len(value) > 8192:
         raise ValueError("value must be a bounded string")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.settings_set(key, value, confirmation_id=confirmation_id)
 
 
@@ -1118,24 +984,17 @@ def _names_list(arguments: dict[str, Any]) -> list[str] | None:
 
 def _regenconf_pending(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"names", "with_diff"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown regenconf pending argument")
-    with_diff = arguments.get("with_diff", False)
-    if not isinstance(with_diff, bool):
-        raise ValueError("with_diff must be a boolean")
+    _reject_unknown_keys(arguments, allowed, "unknown regenconf pending argument")
+    with_diff = _require_bool(arguments, "with_diff", False, "with_diff must be a boolean")
     return adapter.regenconf_pending(names=_names_list(arguments), with_diff=with_diff)
 
 
 def _regenconf_apply(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {"names", "force", "confirmation_id"}
-    if set(arguments) - allowed:
-        raise ValueError("unknown regenconf apply argument")
-    force = arguments.get("force", False)
-    if not isinstance(force, bool):
-        raise ValueError("force must be a boolean")
+    _reject_unknown_keys(arguments, allowed, "unknown regenconf apply argument")
+    force = _require_bool(arguments, "force", False, "force must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
-    if confirmation_id is not None and (not isinstance(confirmation_id, str) or len(confirmation_id) > 128):
-        raise ValueError("confirmation_id must be a string")
+    _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.regenconf_apply(names=_names_list(arguments), force=force, confirmation_id=confirmation_id)
 
 
