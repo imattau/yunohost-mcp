@@ -300,8 +300,7 @@ def _catalog_package_inspect(adapter: YunohostAdapter, arguments: dict[str, Any]
     source = arguments.get("source")
     ref = arguments.get("ref")
     _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     return adapter.catalog_package_inspect(source, ref=ref)
 
 
@@ -319,9 +318,7 @@ def _validate_ci_result_arguments(arguments: dict[str, Any]) -> None:
     if ci_result is not None and not isinstance(ci_result, dict):
         raise ValueError("ci_result must be an object")
     for key in ("ci_provider", "ci_ref"):
-        value = arguments.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > 512):
-            raise ValueError(f"{key} must be a bounded string")
+        _require_str(arguments, key, 512, f"{key} must be a bounded string", required=False)
 
 
 def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -329,8 +326,7 @@ def _catalog_publish_plan(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     source = arguments.get("source")
     ref = arguments.get("ref")
     _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     _validate_ci_result_arguments(arguments)
     return adapter.catalog_publish_plan(
         source,
@@ -347,12 +343,9 @@ def _catalog_publish(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
     source = arguments.get("source")
     ref = arguments.get("ref")
     _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
-    if ref is not None and (not isinstance(ref, str) or len(ref) > 256):
-        raise ValueError("ref must be a bounded string")
+    _require_str(arguments, "ref", 256, "ref must be a bounded string", required=False)
     for key in ("confirmation_id", "plan_id"):
-        value = arguments.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > 128):
-            raise ValueError(f"{key} must be a string")
+        _require_str(arguments, key, 128, f"{key} must be a string", required=False)
     _validate_ci_result_arguments(arguments)
     return adapter.catalog_publish(
         source=source,
@@ -402,8 +395,7 @@ def _package_install_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -
     source = arguments.get("source")
     _require_str(arguments, "source", 8192, "source must be a bounded non-empty string")
     for key in ("label", "args"):
-        if arguments.get(key) is not None and (not isinstance(arguments[key], str) or len(arguments[key]) > 8192):
-            raise ValueError(f"{key} must be a bounded string")
+        _require_str(arguments, key, 8192, f"{key} must be a bounded string", required=False)
     return adapter.package_install_test(source, label=arguments.get("label"), args=arguments.get("args"), session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
 
 
@@ -576,8 +568,7 @@ def _app_install(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[st
     app = arguments.get("app")
     _require_str(arguments, "app", 128, "app must be a non-empty string")
     for key in ("label", "args"):
-        if arguments.get(key) is not None and (not isinstance(arguments[key], str) or len(arguments[key]) > 8192):
-            raise ValueError(f"{key} must be a string of at most 8192 characters")
+        _require_str(arguments, key, 8192, f"{key} must be a string of at most 8192 characters", required=False)
     force = _require_bool(arguments, "force", False, "force must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
