@@ -209,6 +209,19 @@ from yunohost_mcp.redaction import redact_response
 from yunohost_mcp.yunohost.adapter import ToolInputError, YunohostAdapter
 
 settings = load_settings()
+
+
+def _defer_to_broker() -> bool:
+    """Whether a write tool's confirmation flow should defer to the broker.
+
+    Shared by every write tool's @require_confirmation(defer_to_broker=...)
+    below so the check can't drift between call sites - it reads the same
+    `settings.broker_socket_path is not None` test each one used to repeat
+    inline.
+    """
+    return settings.broker_socket_path is not None
+
+
 adapter = YunohostAdapter(settings=settings)
 write_lock = WriteLock()
 audit_log = AuditLog(path=settings.audit_log_path())
@@ -918,7 +931,7 @@ def domains_list() -> dict[str, Any]:
     "domains.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda domain, install_letsencrypt_cert=False, **_: {
         "action": "add domain",
         "domain": domain,
@@ -968,7 +981,7 @@ def domain_cert_info(domain: str) -> dict[str, Any]:
     "domains.cert",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda domain, letsencrypt=True, staging=False, **_: {
         "action": "install certificate",
         "domain": domain,
@@ -1059,7 +1072,7 @@ def domain_dns_push_preview(domain: str, force: bool = False, purge: bool = Fals
     "domains.dns",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda domain, force=False, purge=False, **_: {
         "action": "push DNS records to registrar",
         "domain": domain,
@@ -1111,7 +1124,7 @@ def domain_dns_push(
     "domains.remove",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda domain, remove_apps=False, force=False, **_: {
         "action": "remove domain",
         "domain": domain,
@@ -1162,7 +1175,7 @@ def users_list() -> dict[str, Any]:
     user_create_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda username, domain, password=None, fullname=None, mailbox_quota="0", admin=False, **_: {
         "action": "create user",
         "username": username,
@@ -1199,7 +1212,7 @@ def user_create(
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda username, change_password=None, **kwargs: {
         "action": "update user",
         "username": username,
@@ -1244,7 +1257,7 @@ def user_update(
     "users.delete",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda username, purge=False, **_: {
         "action": "delete user",
         "username": username,
@@ -1277,7 +1290,7 @@ def user_group_list() -> dict[str, Any]:
     "users.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda groupname, **_: {"action": "create group", "groupname": groupname},
 )
 def user_group_create(groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
@@ -1296,7 +1309,7 @@ def user_group_create(groupname: str, confirmation_id: str | None = None) -> dic
     user_group_update_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda groupname, add=None, remove=None, **_: {
         "action": "update group",
         "groupname": groupname,
@@ -1321,7 +1334,7 @@ def user_group_update(
     "users.delete",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda groupname, **_: {
         "action": "delete group",
         "groupname": groupname,
@@ -1353,7 +1366,7 @@ def user_permission_list() -> dict[str, Any]:
     "users.permissions",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda permission, names, **_: {
         "action": "grant permission",
         "permission": permission,
@@ -1377,7 +1390,7 @@ def user_permission_add(permission: str, names: list[str], confirmation_id: str 
     "users.permissions",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda permission, names, **_: {
         "action": "revoke permission",
         "permission": permission,
@@ -1411,7 +1424,7 @@ def user_permission_info(permission: str) -> dict[str, Any]:
     "users.permissions",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda permission, label=None, show_tile=None, protected=None, **_: {
         "action": "update permission",
         "permission": permission,
@@ -1585,7 +1598,7 @@ def operations_resource() -> dict[str, Any]:
     "services.restart",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda names, **_: {
         "action": "restart services",
         "services": names,
@@ -1606,7 +1619,7 @@ def service_restart(names: list[str], confirmation_id: str | None = None) -> dic
     "services.stop",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda names, **_: {
         "action": "stop services",
         "services": names,
@@ -1628,7 +1641,7 @@ def service_stop(names: list[str], confirmation_id: str | None = None) -> dict[s
     "services.start",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
 )
 def service_start(names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
     """Start one or more stopped YunoHost services."""
@@ -1644,7 +1657,7 @@ def service_start(names: list[str], confirmation_id: str | None = None) -> dict[
     "backups.create",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda name=None, description=None, apps=None, system=None, **_: {
         "action": "create backup",
         "name": name,
@@ -1691,7 +1704,7 @@ def _backup_delete_plan(name: str) -> dict[str, Any]:
     "backups.delete",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda name, **_: _backup_delete_plan(name),
 )
 def backup_delete(name: str, confirmation_id: str | None = None) -> dict[str, Any]:
@@ -1709,7 +1722,7 @@ def backup_delete(name: str, confirmation_id: str | None = None) -> dict[str, An
     "apps.install",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, label=None, args=None, force=False, **_: {
         "action": "install app",
         "app": app,
@@ -1737,7 +1750,7 @@ def app_install(
     policy=policy_rules,
     confirmation_store=confirmation_store,
     checks=_check_apps_upgrade,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
 )
 def app_upgrade(
     app: str | None = None, force: bool = False, url: str | None = None, confirmation_id: str | None = None
@@ -1821,7 +1834,7 @@ def execute_plan(plan_id: str) -> dict[str, Any]:
     policy=policy_rules,
     confirmation_store=confirmation_store,
     checks=_check_apps_remove,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, purge=False, **_: {
         "action": "remove app",
         "app": app,
@@ -1848,7 +1861,7 @@ def app_remove(app: str, purge: bool = False, confirmation_id: str | None = None
     app_change_url_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, domain, path, **_: {
         "action": "change app url",
         "app": app,
@@ -1883,7 +1896,7 @@ def app_change_url(app: str, domain: str, path: str, confirmation_id: str | None
     app_config_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=_app_config_plan,
 )
 def app_config_set(app: str, key: str, value: str, confirmation_id: str | None = None) -> dict[str, Any]:
@@ -1908,7 +1921,7 @@ def app_config_set(app: str, key: str, value: str, confirmation_id: str | None =
     app_setting_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=_app_setting_plan,
 )
 def app_setting_set(
@@ -1930,7 +1943,7 @@ def app_setting_set(
     "backups.restore",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda name, apps=None, system=None, force=False, **_: {
         "action": "restore backup",
         "name": name,
@@ -1959,7 +1972,7 @@ def backup_restore(
     "system.upgrade",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda **_: {
         "action": "upgrade system packages",
         "warning": "This upgrades OS-level packages and may restart services.",
@@ -1979,7 +1992,7 @@ def system_upgrade(confirmation_id: str | None = None) -> dict[str, Any]:
     "system.power",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda **_: {
         "action": "reboot server",
         "warning": "Drops every in-flight connection and operation immediately. The server "
@@ -2004,7 +2017,7 @@ def system_reboot(confirmation_id: str | None = None) -> dict[str, Any]:
     "system.power",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda **_: {
         "action": "shut down server",
         "warning": "Powers the host off (systemctl poweroff) and does NOT come back up on its "
@@ -2051,7 +2064,7 @@ def migrations_state() -> dict[str, Any]:
     "system.migrate",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda targets=None, skip=False, auto=False, force_rerun=False, **_: {
         "action": "run migrations",
         "targets": targets or [],
@@ -2115,7 +2128,7 @@ def firewall_is_open(port: int | str, protocol: str) -> dict[str, Any]:
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda port, protocol, comment="", upnp=False, **_: {
         "action": "open firewall port",
         "port": port,
@@ -2149,7 +2162,7 @@ def firewall_open(
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda port, protocol, upnp_only=False, **_: {
         "action": "close firewall port",
         "port": port,
@@ -2182,7 +2195,7 @@ def firewall_close(
     "firewall.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda skip_upnp=False, **_: {
         "action": "reload firewall rules",
         "skip_upnp": skip_upnp,
@@ -2228,7 +2241,7 @@ def settings_get(key: str, full: bool = False) -> dict[str, Any]:
     "settings.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda key, value, **_: {
         "action": "set global setting",
         "key": key,
@@ -2267,7 +2280,7 @@ def regenconf_pending(names: list[str] | None = None, with_diff: bool = False) -
     "regenconf.write",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda names=None, force=False, **_: {
         "action": "apply pending config regeneration",
         "names": names or [],
@@ -2362,7 +2375,7 @@ def _package_session(session_id: str, *, source: str | None = None, app: str | N
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda source, session_id, label=None, args=None, **_: {
         "action": "install candidate package for testing", "source": source,
         "package_test_id": session_id, "label": label, "has_custom_args": args is not None,
@@ -2385,7 +2398,7 @@ def package_install_test(
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, source, session_id, **_: {
         "action": "upgrade test app from candidate package", "app": app, "source": source, "package_test_id": session_id,
         "warning": "Candidate upgrade scripts run with YunoHost privileges and require owner approval.",
@@ -2404,7 +2417,7 @@ def package_upgrade_test(app: str, source: str, session_id: str, confirmation_id
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, session_id, **_: {"action": "backup test app", "app": app, "package_test_id": session_id},
 )
 def package_backup_test(app: str, session_id: str, confirmation_id: str | None = None) -> dict[str, Any]:
@@ -2420,7 +2433,7 @@ def package_backup_test(app: str, session_id: str, confirmation_id: str | None =
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, archive_name, session_id, **_: {
         "action": "restore test app", "app": app, "archive_name": archive_name, "package_test_id": session_id,
         "warning": "Restoring an archive changes application state and requires owner approval.",
@@ -2439,7 +2452,7 @@ def package_restore_test(app: str, archive_name: str, session_id: str, confirmat
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, domain, path, session_id, **_: {
         "action": "change test app URL", "app": app, "domain": domain, "path": path, "package_test_id": session_id,
         "warning": "URL changes alter reverse-proxy and app configuration and require owner approval.",
@@ -2458,7 +2471,7 @@ def package_change_url_test(app: str, domain: str, path: str, session_id: str, c
 @audited_write("packages.test", lock=write_lock, audit_log=audit_log)
 @require_confirmation(
     "packages.test", policy=policy_rules, confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, purge=True, session_id=None, **_: {
         "action": "remove test app", "app": app, "purge": purge, "package_test_id": session_id,
         "warning": "This removes application state and requires owner approval.",
@@ -2508,7 +2521,7 @@ def _execute_package_test_cycle(source: str, app_id: str | None, confirmation_id
     "packages.test",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda source, app_id=None, **_: {
         "action": "run package install/backup/remove/restore test cycle",
         "source": source,
@@ -2728,7 +2741,7 @@ def validate_server() -> dict[str, Any]:
     app_upgrade_policy_key,
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda app, **_: {
         "action": "safely upgrade app",
         "app": app,
@@ -2775,7 +2788,7 @@ def repair_app(app: str, strategy: str = "conservative") -> dict[str, Any]:
     "packages.test",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda source, app_id=None, **_: {
         "action": "run package install/backup/remove/restore test cycle",
         "source": source,
@@ -2867,7 +2880,7 @@ def catalog_list() -> dict[str, Any]:
     "catalog.publish",
     policy=policy_rules,
     confirmation_store=confirmation_store,
-    defer_to_broker=lambda: settings.broker_socket_path is not None,
+    defer_to_broker=_defer_to_broker,
     plan_builder=lambda plan_id, **_: {
         "action": "publish YunoHost package declaration to configured Nostr relays",
         "plan_id": plan_id,
