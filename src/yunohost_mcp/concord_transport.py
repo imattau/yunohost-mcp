@@ -33,6 +33,24 @@ def _event_id(event: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _normalize_relays(relays: list[str]) -> tuple[str, ...]:
+    """Dedup/strip a relay list and require at least one non-empty entry."""
+
+    relay_values = tuple(dict.fromkeys(relay.strip() for relay in relays if relay.strip()))
+    if not relay_values:
+        raise ValueError("at least one non-empty Concord relay is required")
+    return relay_values
+
+
+def _parse_author(pubkey_hex: str, *, label: str) -> PublicKey:
+    """Parse an already-length-validated pubkey, normalizing SDK parse errors."""
+
+    try:
+        return PublicKey.parse(pubkey_hex)
+    except Exception as exc:  # noqa: BLE001 - normalize SDK-specific errors
+        raise ValueError(f"{label} public key must be valid lowercase hex") from exc
+
+
 async def publish_signed_event(
     event: NostrEvent,
     relays: list[str],
@@ -51,9 +69,7 @@ async def publish_signed_event(
         raise ValueError("at least one Concord relay is required")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    relay_values = tuple(dict.fromkeys(relay.strip() for relay in relays if relay.strip()))
-    if not relay_values:
-        raise ValueError("at least one non-empty Concord relay is required")
+    relay_values = _normalize_relays(relays)
     sdk_event = Event.from_json(json.dumps(event.model_dump(), separators=(",", ":")))
     client = client_factory()
     try:
@@ -65,6 +81,92 @@ async def publish_signed_event(
     finally:
         await client.shutdown()
     return RelayPublishResult(event_id=event.id, relays=relay_values)
+
+
+async def _fetch_events(
+    pubkey_hex: str,
+    relays: list[str],
+    *,
+    kind: int,
+    limit: int,
+    identifier: str | None = None,
+    timeout_seconds: float,
+    client_factory: Callable[[], Any],
+    pubkey_label: str,
+    fetch_label: str,
+) -> list[Any]:
+    """Shared bounded, per-relay-failure-tolerant Concord event fetch.
+
+    Fetches at most `limit` deduplicated events matching `kind` (and, for
+    addressable kinds, `identifier`) authored by `pubkey_hex`, from each of
+    `relays` independently - one relay's failure (a bad URL, a dropped
+    connection, an SDK-side error) does not abort the others, matching what
+    fetch_control_events originally did on its own. A caller only sees an
+    error when every relay failed and none of them returned anything at all;
+    otherwise it gets whatever was collected before the deadline.
+
+    nostr-sdk applies `max_events` to the aggregate result set, but a single
+    multi-relay fetch can still receive up to `max_events` from each relay -
+    that would make the SDK raise "too many fetched events" before callers
+    can deduplicate. Fetching each relay independently and capping the
+    merged result locally avoids that.
+    """
+
+    if len(pubkey_hex) != 64:
+        raise ValueError(f"{pubkey_label} public key must be 32-byte lowercase hex")
+    if limit <= 0:
+        raise ValueError("max_events must be positive")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    relay_values = _normalize_relays(relays)
+    author = _parse_author(pubkey_hex, label=pubkey_label)
+
+    filter_ = Filter().author(author).kind(Kind(kind)).limit(limit)
+    if identifier is not None:
+        filter_ = filter_.identifier(identifier)
+    request = ReqTarget.auto([filter_])
+
+    events: list[Any] = []
+    seen_ids: set[str] = set()
+    failures = 0
+
+    try:
+        with anyio.fail_after(timeout_seconds):
+            for relay in relay_values:
+                client = client_factory()
+                try:
+                    await client.add_relay(RelayUrl.parse(relay))
+                    await client.connect()
+                    try:
+                        fetched = await client.fetch_events(
+                            request,
+                            timeout=timedelta(seconds=timeout_seconds),
+                            max_events=limit,
+                        )
+                    except Exception:  # noqa: BLE001 - normalize SDK relay errors below
+                        failures += 1
+                        continue
+                    for event in fetched:
+                        event_id = _event_id(event)
+                        if event_id is not None:
+                            if event_id in seen_ids:
+                                continue
+                            seen_ids.add(event_id)
+                        events.append(event)
+                        if len(events) >= limit:
+                            return events[:limit]
+                except Exception:  # noqa: BLE001 - one bad relay must not block others
+                    failures += 1
+                finally:
+                    await client.shutdown()
+    except TimeoutError as exc:
+        raise ValueError(f"timed out fetching {fetch_label}") from exc
+
+    if events:
+        return events
+    if failures:
+        raise ValueError(f"unable to fetch {fetch_label} from configured relays")
+    return events
 
 
 async def fetch_control_events(
@@ -82,66 +184,16 @@ async def fetch_control_events(
     belong to the Control Plane adapter.
     """
 
-    if len(control_pubkey_hex) != 64:
-        raise ValueError("control public key must be 32-byte lowercase hex")
-    if max_events <= 0:
-        raise ValueError("max_events must be positive")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-    relay_values = tuple(dict.fromkeys(relay.strip() for relay in relays if relay.strip()))
-    if not relay_values:
-        raise ValueError("at least one non-empty Concord relay is required")
-    try:
-        author = PublicKey.parse(control_pubkey_hex)
-    except Exception as exc:  # noqa: BLE001 - normalize SDK-specific errors
-        raise ValueError("control public key must be valid lowercase hex") from exc
-    # nostr-sdk applies max_events to the aggregate result set, but a single
-    # multi-relay fetch can still receive up to max_events from each relay.
-    # That makes the SDK raise "too many fetched events" before callers can
-    # deduplicate the control stream. Fetch each relay independently and cap
-    # the merged result locally instead.
-    events: list[Any] = []
-    seen_ids: set[str] = set()
-    failures = 0
-    request = ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)])
-
-    try:
-        with anyio.fail_after(timeout_seconds):
-            for relay in relay_values:
-                client = client_factory()
-                try:
-                    await client.add_relay(RelayUrl.parse(relay))
-                    await client.connect()
-                    try:
-                        fetched = await client.fetch_events(
-                            request,
-                            timeout=timedelta(seconds=timeout_seconds),
-                            max_events=max_events,
-                        )
-                    except Exception:  # noqa: BLE001 - normalize SDK relay errors below
-                        failures += 1
-                        continue
-                    for event in fetched:
-                        event_id = _event_id(event)
-                        if event_id is not None:
-                            if event_id in seen_ids:
-                                continue
-                            seen_ids.add(event_id)
-                        events.append(event)
-                        if len(events) >= max_events:
-                            return events[:max_events]
-                except Exception:  # noqa: BLE001 - one bad relay must not block others
-                    failures += 1
-                finally:
-                    await client.shutdown()
-    except TimeoutError as exc:
-        raise ValueError("timed out fetching Concord control events") from exc
-
-    if events:
-        return events
-    if failures:
-        raise ValueError("unable to fetch Concord control events from configured relays")
-    return events
+    return await _fetch_events(
+        control_pubkey_hex,
+        relays,
+        kind=1059,
+        limit=max_events,
+        timeout_seconds=timeout_seconds,
+        client_factory=client_factory,
+        pubkey_label="control",
+        fetch_label="Concord control events",
+    )
 
 
 async def fetch_invite_events(
@@ -151,32 +203,25 @@ async def fetch_invite_events(
     timeout_seconds: float = 30,
     client_factory: Callable[[], Any] = Client,
 ) -> list[Any]:
-    """Fetch the bounded public CORD-05 bundle coordinate for one signer."""
+    """Fetch the bounded public CORD-05 bundle coordinate for one signer.
 
-    if len(link_signer_pubkey_hex) != 64:
-        raise ValueError("link signer public key must be 32-byte lowercase hex")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-    relay_values = tuple(dict.fromkeys(relay.strip() for relay in relays if relay.strip()))
-    if not relay_values:
-        raise ValueError("at least one non-empty Concord relay is required")
-    try:
-        author = PublicKey.parse(link_signer_pubkey_hex)
-    except Exception as exc:  # noqa: BLE001 - normalize SDK-specific errors
-        raise ValueError("link signer public key must be valid lowercase hex") from exc
-    client = client_factory()
-    try:
-        with anyio.fail_after(timeout_seconds):
-            for relay in relay_values:
-                await client.add_relay(RelayUrl.parse(relay))
-            await client.connect()
-            return await client.fetch_events(
-                ReqTarget.auto([Filter().author(author).kind(Kind(33301)).identifier("").limit(1)]),
-                timeout=timedelta(seconds=timeout_seconds),
-                max_events=1,
-            )
-    finally:
-        await client.shutdown()
+    Uses the same per-relay failure-tolerant fetch as fetch_control_events -
+    previously this looped relays into one shared client and let any single
+    relay's failure abort the whole fetch, unlike fetch_control_events's own
+    per-relay tolerance; that drift is fixed by sharing the implementation.
+    """
+
+    return await _fetch_events(
+        link_signer_pubkey_hex,
+        relays,
+        kind=33301,
+        limit=1,
+        identifier="",
+        timeout_seconds=timeout_seconds,
+        client_factory=client_factory,
+        pubkey_label="link signer",
+        fetch_label="Concord invite events",
+    )
 
 
 async def fetch_guestbook_events(
@@ -187,31 +232,21 @@ async def fetch_guestbook_events(
     timeout_seconds: float = 30.0,
     client_factory: Callable[[], Any] = Client,
 ) -> list[Any]:
-    """Fetch a bounded batch of Guestbook stream wraps for join verification."""
+    """Fetch a bounded batch of Guestbook stream wraps for join verification.
 
-    if len(guestbook_pubkey_hex) != 64:
-        raise ValueError("guestbook public key must be 32-byte lowercase hex")
-    if max_events <= 0:
-        raise ValueError("max_events must be positive")
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-    relay_values = tuple(dict.fromkeys(relay.strip() for relay in relays if relay.strip()))
-    if not relay_values:
-        raise ValueError("at least one non-empty Concord relay is required")
-    try:
-        author = PublicKey.parse(guestbook_pubkey_hex)
-    except Exception as exc:  # noqa: BLE001 - normalize SDK-specific errors
-        raise ValueError("guestbook public key must be valid lowercase hex") from exc
-    client = client_factory()
-    try:
-        with anyio.fail_after(timeout_seconds):
-            for relay in relay_values:
-                await client.add_relay(RelayUrl.parse(relay))
-            await client.connect()
-            return await client.fetch_events(
-                ReqTarget.auto([Filter().author(author).kind(Kind(1059)).limit(max_events)]),
-                timeout=timedelta(seconds=timeout_seconds),
-                max_events=max_events,
-            )
-    finally:
-        await client.shutdown()
+    Uses the same per-relay failure-tolerant fetch as fetch_control_events -
+    previously this looped relays into one shared client and let any single
+    relay's failure abort the whole fetch, unlike fetch_control_events's own
+    per-relay tolerance; that drift is fixed by sharing the implementation.
+    """
+
+    return await _fetch_events(
+        guestbook_pubkey_hex,
+        relays,
+        kind=1059,
+        limit=max_events,
+        timeout_seconds=timeout_seconds,
+        client_factory=client_factory,
+        pubkey_label="guestbook",
+        fetch_label="Concord guestbook events",
+    )

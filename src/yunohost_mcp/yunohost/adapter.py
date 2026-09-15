@@ -35,6 +35,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -731,25 +732,83 @@ class YunohostAdapter:
             timeout=self.settings.request_timeout_seconds,
         )
 
-    def server_info(self) -> dict[str, Any]:
-        brokered = self._broker_call("server.info", {})
+    def _dispatch(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        fake_result: Callable[[], dict[str, Any]],
+        real_call: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Shared broker/fake-mode/real dispatch for one adapter operation.
+
+        Every adapter method with the "try the broker, then fake mode, then
+        the real yunohost.* call" shape (the large majority of this class)
+        delegates here instead of repeating that three-way branch inline.
+        `operation`/`arguments` are exactly what would otherwise be passed
+        to `_broker_call` directly; `fake_result`/`real_call` are no-arg
+        closures (typically a nested `def`, so they can reference the
+        calling method's own parameters) each returning that method's exact
+        fake-mode or real-mode response - this helper changes none of that,
+        it only collapses the three-way branch itself into one call.
+        """
+        brokered = self._broker_call(operation, arguments)
         if brokered is not None:
             return brokered
         if self.settings.fake_yunohost:
+            return fake_result()
+        return real_call()
+
+    def _dispatch_write(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        fake_result: Callable[[], dict[str, Any]],
+        real_call: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """`_dispatch` for write operations (arguments typically carry a
+        `confirmation_id`; results typically carry an `operation_id`).
+
+        Thin alias over `_dispatch` kept separate from `_dispatch_read` so
+        call sites document their own shape, even though the two currently
+        behave identically - a future divergence (e.g. write-specific
+        broker auditing) has one place to land without touching read call
+        sites.
+        """
+        return self._dispatch(operation, arguments, fake_result=fake_result, real_call=real_call)
+
+    def _dispatch_read(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        fake_result: Callable[[], dict[str, Any]],
+        real_call: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """`_dispatch` for read-only operations (no confirmation_id/operation_id)."""
+        return self._dispatch(operation, arguments, fake_result=fake_result, real_call=real_call)
+
+    def server_info(self) -> dict[str, Any]:
+        def _fake():
             return {
                 "fake": True,
                 "yunohost": {"version": "12.0.0", "repo": "stable"},
                 "moulinette": {"version": "12.0.0", "repo": "stable"},
                 "ssowat": {"version": "12.0.0", "repo": "stable"},
             }
-        tools_versions = _import_attr("yunohost.tools", "tools_versions")
-        return {"fake": False, **tools_versions()}
+        def _real():
+            tools_versions = _import_attr("yunohost.tools", "tools_versions")
+            return {"fake": False, **tools_versions()}
+        return self._dispatch_read(
+            "server.info",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def health_check(self) -> dict[str, Any]:
-        brokered = self._broker_call("health.check", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "categories": [
@@ -758,26 +817,34 @@ class YunohostAdapter:
                     {"id": "services", "status": "SUCCESS", "summary": "All services running"},
                 ],
             }
-        diagnosis_show = _import_attr("yunohost.diagnosis", "diagnosis_show")
-        return {"fake": False, **diagnosis_show()}
+        def _real():
+            diagnosis_show = _import_attr("yunohost.diagnosis", "diagnosis_show")
+            return {"fake": False, **diagnosis_show()}
+        return self._dispatch_read(
+            "health.check",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def apps_list(self, full: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("apps.list", {"full": full})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             app = {"id": "nextcloud", "name": "Nextcloud", "version": "28.0.1~ynh1"}
             if full:
                 app["description"] = "Self-hosted productivity platform"
             return {"fake": True, "apps": [app]}
-        app_list = _import_attr("yunohost.app", "app_list")
-        return {"fake": False, **app_list(full=full)}
+        def _real():
+            app_list = _import_attr("yunohost.app", "app_list")
+            return {"fake": False, **app_list(full=full)}
+        return self._dispatch_read(
+            "apps.list",
+            {"full": full},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def app_info(self, app: str, full: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("app.info", {"app": app, "full": full})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             info: dict[str, Any] = {"id": app, "name": app, "version": "1.0~ynh1", "upgradable": False}
             if full:
                 # Shape matches the real app_info(full=True): permissions
@@ -790,8 +857,15 @@ class YunohostAdapter:
                 }
                 info["manifest"] = {"id": app, "version": "1.0~ynh1"}
             return {"fake": True, **info}
-        app_info = _import_attr("yunohost.app", "app_info")
-        return {"fake": False, **app_info(app, full=full)}
+        def _real():
+            app_info = _import_attr("yunohost.app", "app_info")
+            return {"fake": False, **app_info(app, full=full)}
+        return self._dispatch_read(
+            "app.info",
+            {"app": app, "full": full},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def app_resources(self, app: str) -> dict[str, Any]:
         """Return the resource declarations exposed by an app manifest."""
@@ -816,19 +890,23 @@ class YunohostAdapter:
         returns an empty config, not an error (matches the real API's own
         "be permissive when no config panel found" behavior).
         """
-        brokered = self._broker_call("app.config_get", {"app": app, "key": key, "full": full, "export": export})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "app": app, "key": key, "config": {}}
-        # app_config_get transitively imports utils/configpanel.py, which
-        # (like utils/form.py - see _call_via_system_python's docstring)
-        # defines pydantic v1-style @validator models - same conflict as
-        # app_install/domain_add/app_change_url.
-        result = _call_via_system_python(
-            "yunohost.app", "app_config_get", {"app": app, "key": key, "full": full, "export": export}, self.settings
+        def _real():
+            # app_config_get transitively imports utils/configpanel.py, which
+            # (like utils/form.py - see _call_via_system_python's docstring)
+            # defines pydantic v1-style @validator models - same conflict as
+            # app_install/domain_add/app_change_url.
+            result = _call_via_system_python(
+                "yunohost.app", "app_config_get", {"app": app, "key": key, "full": full, "export": export}, self.settings
+            )
+            return {"fake": False, "app": app, "key": key, "config": result}
+        return self._dispatch_read(
+            "app.config_get",
+            {"app": app, "key": key, "full": full, "export": export},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "app": app, "key": key, "config": result}
 
     def app_config_set(
         self, app: str, key: str, value: str, confirmation_id: str | None = None
@@ -842,18 +920,20 @@ class YunohostAdapter:
         than the CLI's bulk `args="k1=v1&k2=v2"` form) keeps each write
         traceable to exactly one confirmation/audit entry.
         """
-        brokered = self._broker_call(
-            "app.config_set", {"app": app, "key": key, "value": value, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-app_config_set", "app": app, "key": key, "value": value}
-        # Same pydantic v1/v2 conflict as app_config_get - see there.
-        _call_via_system_python(
-            "yunohost.app", "app_config_set", {"app": app, "key": key, "value": value}, self.settings
+        def _real():
+            # Same pydantic v1/v2 conflict as app_config_get - see there.
+            _call_via_system_python(
+                "yunohost.app", "app_config_set", {"app": app, "key": key, "value": value}, self.settings
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "key": key, "value": value}
+        return self._dispatch_write(
+            "app.config_set",
+            {"app": app, "key": key, "value": value, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "key": key, "value": value}
 
     def app_setting_get(self, app: str, key: str) -> dict[str, Any]:
         """Read one key from an installed app's settings.yml (yunohost.app.app_setting).
@@ -864,13 +944,17 @@ class YunohostAdapter:
         limited to keys a config_panel.toml declares, since most apps don't
         declare one for their internal settings at all.
         """
-        brokered = self._broker_call("app.setting_get", {"app": app, "key": key})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "app": app, "key": key, "value": None}
-        app_setting = _import_attr("yunohost.app", "app_setting")
-        return {"fake": False, "app": app, "key": key, "value": app_setting(app, key)}
+        def _real():
+            app_setting = _import_attr("yunohost.app", "app_setting")
+            return {"fake": False, "app": app, "key": key, "value": app_setting(app, key)}
+        return self._dispatch_read(
+            "app.setting_get",
+            {"app": app, "key": key},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def app_setting_set(
         self,
@@ -890,56 +974,61 @@ class YunohostAdapter:
         """
         if (value is None) == (not delete):
             raise ValueError("exactly one of value or delete=True must be given")
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "app": app, "key": key, "value": value, "deleted": delete}
+        def _real():
+            app_setting = _import_attr("yunohost.app", "app_setting")
+            # app_setting() isn't @is_unit_operation-wrapped like app_config_set
+            # is, so there's no operation log entry to recover an id for here -
+            # unlike app_config_set/user_create/etc above, this response
+            # carries no operation_id.
+            if delete:
+                app_setting(app, key, delete=True)
+            else:
+                app_setting(app, key, value)
+            return {"fake": False, "app": app, "key": key, "value": value, "deleted": delete}
+        return self._dispatch_write(
             "app.setting_set",
             {"app": app, "key": key, "value": value, "delete": delete, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "app": app, "key": key, "value": value, "deleted": delete}
-        app_setting = _import_attr("yunohost.app", "app_setting")
-        # app_setting() isn't @is_unit_operation-wrapped like app_config_set
-        # is, so there's no operation log entry to recover an id for here -
-        # unlike app_config_set/user_create/etc above, this response
-        # carries no operation_id.
-        if delete:
-            app_setting(app, key, delete=True)
-        else:
-            app_setting(app, key, value)
-        return {"fake": False, "app": app, "key": key, "value": value, "deleted": delete}
 
     def diagnosis_run(self, categories: list[str] | None = None, force: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("diagnosis.run", {"categories": categories, "force": force})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "categories_run": categories or ["ip", "dnsrecords", "services"]}
-        # diagnosis_run's *raw* function takes operation_logger as its first
-        # argument, but the exported name is wrapped by @is_unit_operation
-        # (src/log.py), which constructs and injects its own OperationLogger
-        # internally and does NOT expect the caller to pass one - see the
-        # "Errata" section of PHASE0_INVESTIGATION.md for how this was
-        # originally gotten wrong, and _latest_operation_id()'s docstring for
-        # how the id is recovered without one.
-        #
-        # That OperationLogger's SSE registration reads a Bottle request
-        # header - same "Request context not initialized" failure mode as
-        # service_start below when called in-process from the broker (a
-        # local worker, not a real HTTP request). Confirmed live: a plain
-        # _import_attr call here raises RuntimeError("Request context not
-        # initialized.") every time. Same fix: system-python subprocess with
-        # a CLI-style headless context, which _latest_operation_id() can
-        # still recover an id from afterward since it reads the operation
-        # log directory, not any in-process state.
-        result = _call_via_system_python(
-            "yunohost.diagnosis",
-            "diagnosis_run",
-            {"categories": categories or [], "force": force},
-            self.settings,
-            interface_type="cli",
+        def _real():
+            # diagnosis_run's *raw* function takes operation_logger as its first
+            # argument, but the exported name is wrapped by @is_unit_operation
+            # (src/log.py), which constructs and injects its own OperationLogger
+            # internally and does NOT expect the caller to pass one - see the
+            # "Errata" section of PHASE0_INVESTIGATION.md for how this was
+            # originally gotten wrong, and _latest_operation_id()'s docstring for
+            # how the id is recovered without one.
+            #
+            # That OperationLogger's SSE registration reads a Bottle request
+            # header - same "Request context not initialized" failure mode as
+            # service_start below when called in-process from the broker (a
+            # local worker, not a real HTTP request). Confirmed live: a plain
+            # _import_attr call here raises RuntimeError("Request context not
+            # initialized.") every time. Same fix: system-python subprocess with
+            # a CLI-style headless context, which _latest_operation_id() can
+            # still recover an id from afterward since it reads the operation
+            # log directory, not any in-process state.
+            result = _call_via_system_python(
+                "yunohost.diagnosis",
+                "diagnosis_run",
+                {"categories": categories or [], "force": force},
+                self.settings,
+                interface_type="cli",
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), **(result or {})}
+        return self._dispatch_read(
+            "diagnosis.run",
+            {"categories": categories, "force": force},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "operation_id": _latest_operation_id(), **(result or {})}
 
     def diagnosis_get(self) -> dict[str, Any]:
         # Same aggregated report as health_check(); kept as a separate
@@ -994,13 +1083,7 @@ class YunohostAdapter:
         exposing) just because the caller happens to guess its unit
         name.
         """
-        brokered = self._broker_call(
-            "service.logs",
-            {"service": service, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "service": service,
@@ -1013,53 +1096,60 @@ class YunohostAdapter:
                     }
                 ],
             }
-        known_services = set(self.services_list().get("services", {}))
-        if service not in known_services:
-            raise ToolInputError(f"{service!r} is not a known YunoHost-managed service")
+        def _real():
+            known_services = set(self.services_list().get("services", {}))
+            if service not in known_services:
+                raise ToolInputError(f"{service!r} is not a known YunoHost-managed service")
 
-        capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
-        args = [
-            self.settings.journalctl_path,
-            "-u",
-            service,
-            "--no-pager",
-            "-o",
-            "json",
-            "-n",
-            str(capped_lines),
-        ]
-        if since:
-            args += ["--since", since]
-        if until:
-            args += ["--until", until]
-        if priority:
-            args += ["-p", priority]
-        if grep:
-            args += ["--grep", grep]
+            capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
+            args = [
+                self.settings.journalctl_path,
+                "-u",
+                service,
+                "--no-pager",
+                "-o",
+                "json",
+                "-n",
+                str(capped_lines),
+            ]
+            if since:
+                args += ["--since", since]
+            if until:
+                args += ["--until", until]
+            if priority:
+                args += ["-p", priority]
+            if grep:
+                args += ["--grep", grep]
 
-        try:
-            proc = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=self.settings.service_logs_timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise YunohostUnavailableError("journalctl timed out") from exc
-        if proc.returncode != 0:
-            raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
-
-        entries = []
-        for line in proc.stdout.splitlines():
-            if not line.strip():
-                continue
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            entries.append(_normalize_journal_entry(raw, default_service=service))
-        return {"fake": False, "service": service, "entries": entries}
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.settings.service_logs_timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise YunohostUnavailableError("journalctl timed out") from exc
+            if proc.returncode != 0:
+                raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
+
+            entries = []
+            for line in proc.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                entries.append(_normalize_journal_entry(raw, default_service=service))
+            return {"fake": False, "service": service, "entries": entries}
+        return self._dispatch_read(
+            "service.logs",
+            {"service": service, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def journal_query(
         self,
@@ -1078,13 +1168,7 @@ class YunohostAdapter:
         SSH, fail2ban, and systemd messages, without exposing a generic
         command or arbitrary unit reader.
         """
-        brokered = self._broker_call(
-            "journal.query",
-            {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "units": units,
@@ -1097,50 +1181,57 @@ class YunohostAdapter:
                     }
                 ],
             }
-        if not units:
-            raise ToolInputError("at least one journal unit is required")
-        unknown = sorted(set(units) - _INTROSPECTION_JOURNAL_UNITS)
-        if unknown:
-            raise ToolInputError(f"journal units are not allowlisted: {', '.join(unknown)}")
-        capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
-        entries: list[dict[str, Any]] = []
-        for unit in units:
-            args = [self.settings.journalctl_path, "--no-pager", "-o", "json", "-n", str(capped_lines)]
-            args += ["-k"] if unit == "kernel" else ["-u", unit]
-            if since:
-                args += ["--since", since]
-            if until:
-                args += ["--until", until]
-            if priority:
-                args += ["-p", priority]
-            if grep:
-                args += ["--grep", grep]
-            try:
-                proc = subprocess.run(
-                    args,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.settings.service_logs_timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise YunohostUnavailableError("journalctl timed out") from exc
-            if proc.returncode != 0:
-                raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
-            for line in proc.stdout.splitlines():
-                if not line.strip():
-                    continue
+        def _real():
+            if not units:
+                raise ToolInputError("at least one journal unit is required")
+            unknown = sorted(set(units) - _INTROSPECTION_JOURNAL_UNITS)
+            if unknown:
+                raise ToolInputError(f"journal units are not allowlisted: {', '.join(unknown)}")
+            capped_lines = max(1, min(lines, self.settings.service_logs_max_lines))
+            entries: list[dict[str, Any]] = []
+            for unit in units:
+                args = [self.settings.journalctl_path, "--no-pager", "-o", "json", "-n", str(capped_lines)]
+                args += ["-k"] if unit == "kernel" else ["-u", unit]
+                if since:
+                    args += ["--since", since]
+                if until:
+                    args += ["--until", until]
+                if priority:
+                    args += ["-p", priority]
+                if grep:
+                    args += ["--grep", grep]
                 try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                entries.append(_normalize_journal_entry(raw, default_service=unit))
+                    proc = subprocess.run(
+                        args,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.settings.service_logs_timeout_seconds,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise YunohostUnavailableError("journalctl timed out") from exc
+                if proc.returncode != 0:
+                    raise YunohostUnavailableError(f"journalctl failed (exit {proc.returncode}): {proc.stderr[-2000:]}")
+                for line in proc.stdout.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    entries.append(_normalize_journal_entry(raw, default_service=unit))
+                    if len(entries) >= capped_lines:
+                        break
                 if len(entries) >= capped_lines:
                     break
-            if len(entries) >= capped_lines:
-                break
-        entries.sort(key=lambda entry: entry.get("timestamp") or "")
-        return {"fake": False, "units": units, "entries": entries[-capped_lines:]}
+            entries.sort(key=lambda entry: entry.get("timestamp") or "")
+            return {"fake": False, "units": units, "entries": entries[-capped_lines:]}
+        return self._dispatch_read(
+            "journal.query",
+            {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def web_logs(
         self,
@@ -1153,13 +1244,7 @@ class YunohostAdapter:
         lines: int = 200,
     ) -> dict[str, Any]:
         """Read bounded, structured Nginx access and error log records."""
-        brokered = self._broker_call(
-            "web.logs",
-            {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "log_dir": str(self.settings.nginx_log_dir),
@@ -1173,61 +1258,65 @@ class YunohostAdapter:
                     }
                 ],
             }
-        if host is not None and (not host or len(host) > 253):
-            raise ToolInputError("host must be a bounded non-empty hostname")
-        if path is not None and (not path.startswith("/") or len(path) > 4096):
-            raise ToolInputError("path must be an absolute bounded URL path")
-        if status is not None and not 100 <= status <= 599:
-            raise ToolInputError("status must be an HTTP status code")
-        lower_bound = _parse_introspection_time(since)
-        upper_bound = _parse_introspection_time(until)
-        if lower_bound and upper_bound and lower_bound > upper_bound:
-            raise ToolInputError("since must not be later than until")
-        capped_lines = max(1, min(lines, self.settings.nginx_logs_max_lines))
-        log_dir = self.settings.nginx_log_dir
-        if not log_dir.is_dir():
-            return {"fake": False, "log_dir": str(log_dir), "entries": [], "warning": "Nginx log directory is unavailable"}
-        files = [
-            item for item in sorted(log_dir.iterdir())
-            if item.is_file() and not item.is_symlink() and (item.name.endswith(".log") or ".log." in item.name)
-            and not item.name.endswith(".gz")
-        ]
-        entries: list[dict[str, Any]] = []
-        for file in files:
-            try:
-                raw_lines = _tail_file_lines(file, capped_lines)
-            except (OSError, UnicodeError):
-                continue
-            for raw_line in raw_lines:
-                entry = _parse_nginx_log_line(raw_line, file.name)
-                if entry is None:
+        def _real():
+            if host is not None and (not host or len(host) > 253):
+                raise ToolInputError("host must be a bounded non-empty hostname")
+            if path is not None and (not path.startswith("/") or len(path) > 4096):
+                raise ToolInputError("path must be an absolute bounded URL path")
+            if status is not None and not 100 <= status <= 599:
+                raise ToolInputError("status must be an HTTP status code")
+            lower_bound = _parse_introspection_time(since)
+            upper_bound = _parse_introspection_time(until)
+            if lower_bound and upper_bound and lower_bound > upper_bound:
+                raise ToolInputError("since must not be later than until")
+            capped_lines = max(1, min(lines, self.settings.nginx_logs_max_lines))
+            log_dir = self.settings.nginx_log_dir
+            if not log_dir.is_dir():
+                return {"fake": False, "log_dir": str(log_dir), "entries": [], "warning": "Nginx log directory is unavailable"}
+            files = [
+                item for item in sorted(log_dir.iterdir())
+                if item.is_file() and not item.is_symlink() and (item.name.endswith(".log") or ".log." in item.name)
+                and not item.name.endswith(".gz")
+            ]
+            entries: list[dict[str, Any]] = []
+            for file in files:
+                try:
+                    raw_lines = _tail_file_lines(file, capped_lines)
+                except (OSError, UnicodeError):
                     continue
-                parsed_time = _parse_nginx_timestamp(entry.get("source_timestamp", ""))
-                if parsed_time is not None:
-                    entry["timestamp"] = parsed_time.isoformat()
-                    if lower_bound and parsed_time < lower_bound:
+                for raw_line in raw_lines:
+                    entry = _parse_nginx_log_line(raw_line, file.name)
+                    if entry is None:
                         continue
-                    if upper_bound and parsed_time > upper_bound:
+                    parsed_time = _parse_nginx_timestamp(entry.get("source_timestamp", ""))
+                    if parsed_time is not None:
+                        entry["timestamp"] = parsed_time.isoformat()
+                        if lower_bound and parsed_time < lower_bound:
+                            continue
+                        if upper_bound and parsed_time > upper_bound:
+                            continue
+                    elif lower_bound or upper_bound:
                         continue
-                elif lower_bound or upper_bound:
-                    continue
-                if status is not None and entry.get("status") != status:
-                    continue
-                if host is not None and host.lower() not in str(entry.get("host") or entry.get("file", "")).lower():
-                    continue
-                if path is not None and entry.get("path") != path:
-                    continue
-                entry.pop("source_timestamp", None)
-                entries.append(entry)
-        entries.sort(key=lambda entry: entry.get("timestamp") or "")
-        return {"fake": False, "log_dir": str(log_dir), "entries": entries[-capped_lines:]}
+                    if status is not None and entry.get("status") != status:
+                        continue
+                    if host is not None and host.lower() not in str(entry.get("host") or entry.get("file", "")).lower():
+                        continue
+                    if path is not None and entry.get("path") != path:
+                        continue
+                    entry.pop("source_timestamp", None)
+                    entries.append(entry)
+            entries.sort(key=lambda entry: entry.get("timestamp") or "")
+            return {"fake": False, "log_dir": str(log_dir), "entries": entries[-capped_lines:]}
+        return self._dispatch_read(
+            "web.logs",
+            {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def system_snapshot(self) -> dict[str, Any]:
         """Return bounded host resource, boot, OOM, and process evidence."""
-        brokered = self._broker_call("system.snapshot", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "uptime_seconds": 86400.0,
@@ -1238,167 +1327,186 @@ class YunohostAdapter:
                 "processes": [],
                 "oom_events": [],
             }
-        try:
-            uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
-        except (OSError, ValueError, IndexError) as exc:
-            raise YunohostUnavailableError(f"could not read /proc/uptime: {exc}") from exc
-        meminfo: dict[str, int] = {}
-        try:
-            for line in Path("/proc/meminfo").read_text().splitlines():
-                key, value = line.split(":", 1)
-                parts = value.strip().split()
-                if parts:
-                    meminfo[key] = int(parts[0]) * (1024 if len(parts) > 1 and parts[1] == "kB" else 1)
-        except (OSError, ValueError) as exc:
-            raise YunohostUnavailableError(f"could not read /proc/meminfo: {exc}") from exc
-        disk = shutil.disk_usage("/")
-        process_result = _run_introspection_command(
-            self.settings,
-            ["ps", "-eo", "pid=,comm=,stat=,%cpu=,%mem=", "--sort=-%cpu"],
+        def _real():
+            try:
+                uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
+            except (OSError, ValueError, IndexError) as exc:
+                raise YunohostUnavailableError(f"could not read /proc/uptime: {exc}") from exc
+            meminfo: dict[str, int] = {}
+            try:
+                for line in Path("/proc/meminfo").read_text().splitlines():
+                    key, value = line.split(":", 1)
+                    parts = value.strip().split()
+                    if parts:
+                        meminfo[key] = int(parts[0]) * (1024 if len(parts) > 1 and parts[1] == "kB" else 1)
+            except (OSError, ValueError) as exc:
+                raise YunohostUnavailableError(f"could not read /proc/meminfo: {exc}") from exc
+            disk = shutil.disk_usage("/")
+            process_result = _run_introspection_command(
+                self.settings,
+                ["ps", "-eo", "pid=,comm=,stat=,%cpu=,%mem=", "--sort=-%cpu"],
+            )
+            processes = [
+                dict(zip(("pid", "command", "state", "cpu_percent", "memory_percent"), line.split(), strict=False))
+                for line in process_result.stdout.splitlines()[:20]
+                if line.split()
+            ]
+            try:
+                oom_events = self.journal_query(
+                    ["kernel", "systemd-oomd"], priority="err..emerg", lines=50
+                )["entries"]
+            except Exception as exc:  # noqa: BLE001 - preserve the rest of the snapshot
+                oom_events = [{"error": str(exc)}]
+            boot_id = None
+            try:
+                boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            except OSError:
+                pass
+            return {
+                "fake": False,
+                "uptime_seconds": uptime_seconds,
+                "boot_id": boot_id,
+                "load_average": list(os.getloadavg()),
+                "memory": {
+                    "total_bytes": meminfo.get("MemTotal"),
+                    "available_bytes": meminfo.get("MemAvailable"),
+                    "free_bytes": meminfo.get("MemFree"),
+                    "cached_bytes": meminfo.get("Cached"),
+                },
+                "swap": {
+                    "total_bytes": meminfo.get("SwapTotal"),
+                    "free_bytes": meminfo.get("SwapFree"),
+                },
+                "disk": {"/": {"total_bytes": disk.total, "free_bytes": disk.free, "used_bytes": disk.used}},
+                "processes": processes,
+                "oom_events": oom_events,
+            }
+        return self._dispatch_read(
+            "system.snapshot",
+            {},
+            fake_result=_fake,
+            real_call=_real,
         )
-        processes = [
-            dict(zip(("pid", "command", "state", "cpu_percent", "memory_percent"), line.split(), strict=False))
-            for line in process_result.stdout.splitlines()[:20]
-            if line.split()
-        ]
-        try:
-            oom_events = self.journal_query(
-                ["kernel", "systemd-oomd"], priority="err..emerg", lines=50
-            )["entries"]
-        except Exception as exc:  # noqa: BLE001 - preserve the rest of the snapshot
-            oom_events = [{"error": str(exc)}]
-        boot_id = None
-        try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        except OSError:
-            pass
-        return {
-            "fake": False,
-            "uptime_seconds": uptime_seconds,
-            "boot_id": boot_id,
-            "load_average": list(os.getloadavg()),
-            "memory": {
-                "total_bytes": meminfo.get("MemTotal"),
-                "available_bytes": meminfo.get("MemAvailable"),
-                "free_bytes": meminfo.get("MemFree"),
-                "cached_bytes": meminfo.get("Cached"),
-            },
-            "swap": {
-                "total_bytes": meminfo.get("SwapTotal"),
-                "free_bytes": meminfo.get("SwapFree"),
-            },
-            "disk": {"/": {"total_bytes": disk.total, "free_bytes": disk.free, "used_bytes": disk.used}},
-            "processes": processes,
-            "oom_events": oom_events,
-        }
 
     def service_history(self, names: list[str], *, lines: int = 50) -> dict[str, Any]:
         """Return current systemd state and restart history for services."""
-        brokered = self._broker_call("service.history", {"names": names, "lines": lines})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "services": {name: {"status": "running", "restart_count": 0} for name in names}}
-        if not names:
-            raise ToolInputError("at least one service name is required")
-        known = set(self.services_list().get("services", {}))
-        unknown = sorted(set(names) - known)
-        if unknown:
-            raise ToolInputError(f"services are not known to YunoHost: {', '.join(unknown)}")
-        result: dict[str, Any] = {}
-        properties = (
-            "Id", "LoadState", "ActiveState", "SubState", "Result", "MainPID",
-            "ExecMainCode", "ExecMainStatus", "NRestarts", "ActiveEnterTimestamp",
-            "InactiveExitTimestamp", "FragmentPath",
-        )
-        for name in names:
-            proc = _run_introspection_command(
-                self.settings, ["systemctl", "show", name, "--no-pager", *sum((["--property", item] for item in properties), [])]
+        def _real():
+            if not names:
+                raise ToolInputError("at least one service name is required")
+            known = set(self.services_list().get("services", {}))
+            unknown = sorted(set(names) - known)
+            if unknown:
+                raise ToolInputError(f"services are not known to YunoHost: {', '.join(unknown)}")
+            result: dict[str, Any] = {}
+            properties = (
+                "Id", "LoadState", "ActiveState", "SubState", "Result", "MainPID",
+                "ExecMainCode", "ExecMainStatus", "NRestarts", "ActiveEnterTimestamp",
+                "InactiveExitTimestamp", "FragmentPath",
             )
-            values: dict[str, str] = {}
-            for line in proc.stdout.splitlines():
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    values[key] = value
-            result[name] = {
-                "status": values.get("ActiveState"),
-                "substate": values.get("SubState"),
-                "result": values.get("Result"),
-                "main_pid": values.get("MainPID"),
-                "exit_code": values.get("ExecMainCode"),
-                "exit_status": values.get("ExecMainStatus"),
-                "restart_count": values.get("NRestarts"),
-                "active_since": values.get("ActiveEnterTimestamp"),
-                "inactive_since": values.get("InactiveExitTimestamp"),
-                "unit_file": values.get("FragmentPath"),
-            }
-            try:
-                result[name]["recent_errors"] = self.service_logs(
-                    name, priority="err..emerg", lines=lines
-                )["entries"]
-            except Exception as exc:  # noqa: BLE001 - retain state if journal access is partial
-                result[name]["recent_errors_error"] = str(exc)
-            if proc.returncode != 0:
-                result[name]["error"] = _bounded_output(proc.stderr, self.settings.introspection_max_output_bytes)
-        return {"fake": False, "services": result}
+            for name in names:
+                proc = _run_introspection_command(
+                    self.settings, ["systemctl", "show", name, "--no-pager", *sum((["--property", item] for item in properties), [])]
+                )
+                values: dict[str, str] = {}
+                for line in proc.stdout.splitlines():
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        values[key] = value
+                result[name] = {
+                    "status": values.get("ActiveState"),
+                    "substate": values.get("SubState"),
+                    "result": values.get("Result"),
+                    "main_pid": values.get("MainPID"),
+                    "exit_code": values.get("ExecMainCode"),
+                    "exit_status": values.get("ExecMainStatus"),
+                    "restart_count": values.get("NRestarts"),
+                    "active_since": values.get("ActiveEnterTimestamp"),
+                    "inactive_since": values.get("InactiveExitTimestamp"),
+                    "unit_file": values.get("FragmentPath"),
+                }
+                try:
+                    result[name]["recent_errors"] = self.service_logs(
+                        name, priority="err..emerg", lines=lines
+                    )["entries"]
+                except Exception as exc:  # noqa: BLE001 - retain state if journal access is partial
+                    result[name]["recent_errors_error"] = str(exc)
+                if proc.returncode != 0:
+                    result[name]["error"] = _bounded_output(proc.stderr, self.settings.introspection_max_output_bytes)
+            return {"fake": False, "services": result}
+        return self._dispatch_read(
+            "service.history",
+            {"names": names, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def ssh_diagnose(self, *, since: str = "-24h", lines: int = 200) -> dict[str, Any]:
         """Collect read-only SSH, firewall, and fail2ban evidence."""
-        brokered = self._broker_call("ssh.diagnose", {"since": since, "lines": lines})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "services": {}, "listeners": [], "jails": [], "logs": []}
-        services = self.service_status(["ssh", "fail2ban", "nftables"])
-        listeners = _run_introspection_command(self.settings, ["ss", "-H", "-lnt"])
-        jail_data: dict[str, Any] = {}
-        status = _run_introspection_command(self.settings, ["fail2ban-client", "status"])
-        jails = re.findall(r"Jail list:\s*([^\n]+)", status.stdout)
-        jail_names = [name.strip() for name in (jails[0].split(",") if jails else []) if name.strip()][:32]
-        for jail in jail_names:
-            jail_status = _run_introspection_command(self.settings, ["fail2ban-client", "status", jail])
-            jail_data[jail] = _bounded_output(jail_status.stdout or jail_status.stderr, self.settings.introspection_max_output_bytes)
-        try:
-            logs = self.journal_query(
-                ["ssh", "sshd", "fail2ban", "nftables"],
-                since=since,
-                priority="err..emerg",
-                lines=lines,
-            )["entries"]
-        except Exception as exc:  # noqa: BLE001 - retain service evidence on partial failure
-            logs = [{"error": str(exc)}]
-        return {
-            "fake": False,
-            "services": services.get("services", services),
-            "listeners": _bounded_output(listeners.stdout, self.settings.introspection_max_output_bytes).splitlines(),
-            "fail2ban": {
-                "status_command_ok": status.returncode == 0,
-                "jails": jail_data,
-                "error": _bounded_output(status.stderr, self.settings.introspection_max_output_bytes) if status.returncode else None,
-            },
-            "logs": logs,
-        }
+        def _real():
+            services = self.service_status(["ssh", "fail2ban", "nftables"])
+            listeners = _run_introspection_command(self.settings, ["ss", "-H", "-lnt"])
+            jail_data: dict[str, Any] = {}
+            status = _run_introspection_command(self.settings, ["fail2ban-client", "status"])
+            jails = re.findall(r"Jail list:\s*([^\n]+)", status.stdout)
+            jail_names = [name.strip() for name in (jails[0].split(",") if jails else []) if name.strip()][:32]
+            for jail in jail_names:
+                jail_status = _run_introspection_command(self.settings, ["fail2ban-client", "status", jail])
+                jail_data[jail] = _bounded_output(jail_status.stdout or jail_status.stderr, self.settings.introspection_max_output_bytes)
+            try:
+                logs = self.journal_query(
+                    ["ssh", "sshd", "fail2ban", "nftables"],
+                    since=since,
+                    priority="err..emerg",
+                    lines=lines,
+                )["entries"]
+            except Exception as exc:  # noqa: BLE001 - retain service evidence on partial failure
+                logs = [{"error": str(exc)}]
+            return {
+                "fake": False,
+                "services": services.get("services", services),
+                "listeners": _bounded_output(listeners.stdout, self.settings.introspection_max_output_bytes).splitlines(),
+                "fail2ban": {
+                    "status_command_ok": status.returncode == 0,
+                    "jails": jail_data,
+                    "error": _bounded_output(status.stderr, self.settings.introspection_max_output_bytes) if status.returncode else None,
+                },
+                "logs": logs,
+            }
+        return self._dispatch_read(
+            "ssh.diagnose",
+            {"since": since, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def network_snapshot(self) -> dict[str, Any]:
         """Return bounded local addresses, routes, and listening sockets."""
-        brokered = self._broker_call("network.snapshot", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "addresses": [], "routes": [], "listeners": []}
-        commands = {
-            "addresses": ["ip", "-brief", "address"],
-            "routes": ["ip", "route"],
-            "listeners": ["ss", "-H", "-lntup"],
-        }
-        result: dict[str, Any] = {"fake": False}
-        for key, args in commands.items():
-            proc = _run_introspection_command(self.settings, args)
-            output = proc.stdout or proc.stderr
-            result[key] = _bounded_output(redact_text(output), self.settings.introspection_max_output_bytes).splitlines()
-            if proc.returncode != 0:
-                result.setdefault("errors", {})[key] = proc.returncode
-        return result
+        def _real():
+            commands = {
+                "addresses": ["ip", "-brief", "address"],
+                "routes": ["ip", "route"],
+                "listeners": ["ss", "-H", "-lntup"],
+            }
+            result: dict[str, Any] = {"fake": False}
+            for key, args in commands.items():
+                proc = _run_introspection_command(self.settings, args)
+                output = proc.stdout or proc.stderr
+                result[key] = _bounded_output(redact_text(output), self.settings.introspection_max_output_bytes).splitlines()
+                if proc.returncode != 0:
+                    result.setdefault("errors", {})[key] = proc.returncode
+            return result
+        return self._dispatch_read(
+            "network.snapshot",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def http_probe(self, url: str, *, timeout_seconds: float = 10.0) -> dict[str, Any]:
         """Probe an HTTP(S) endpoint and return status/timing metadata."""
@@ -1454,62 +1562,76 @@ class YunohostAdapter:
         lines: int = 100,
     ) -> dict[str, Any]:
         """Collect the main read-only evidence for one incident window."""
-        brokered = self._broker_call(
-            "incident.snapshot", {"since": since, "until": until, "lines": lines}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "system": self.system_snapshot(), "web": self.web_logs(lines=lines)}
-        services = ["nginx", "ssh", "fail2ban", "nftables", "yunohost-api", "yunohost_mcp"]
-        return {
-            "fake": False,
-            "window": {"since": since, "until": until},
-            "system": self.system_snapshot(),
-            "service_history": self.service_history(services, lines=lines),
-            "web": self.web_logs(status=500, since=since, until=until, lines=lines),
-            "journal": self.journal_query(
-                ["nginx", "ssh", "fail2ban", "nftables", "kernel", "systemd-oomd"],
-                since=since,
-                until=until,
-                priority="err..emerg",
-                lines=lines,
-            ),
-            "ssh": self.ssh_diagnose(since=since, lines=lines),
-            "network": self.network_snapshot(),
-        }
+        def _real():
+            services = ["nginx", "ssh", "fail2ban", "nftables", "yunohost-api", "yunohost_mcp"]
+            return {
+                "fake": False,
+                "window": {"since": since, "until": until},
+                "system": self.system_snapshot(),
+                "service_history": self.service_history(services, lines=lines),
+                "web": self.web_logs(status=500, since=since, until=until, lines=lines),
+                "journal": self.journal_query(
+                    ["nginx", "ssh", "fail2ban", "nftables", "kernel", "systemd-oomd"],
+                    since=since,
+                    until=until,
+                    priority="err..emerg",
+                    lines=lines,
+                ),
+                "ssh": self.ssh_diagnose(since=since, lines=lines),
+                "network": self.network_snapshot(),
+            }
+        return self._dispatch_read(
+            "incident.snapshot",
+            {"since": since, "until": until, "lines": lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def service_status(self, names: list[str]) -> dict[str, Any]:
-        brokered = self._broker_call("services.status", {"names": names})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "services": {name: {"status": "running"} for name in names}}
-        service_status = _import_attr("yunohost.service", "service_status")
-        return {"fake": False, "services": service_status(names)}
+        def _real():
+            service_status = _import_attr("yunohost.service", "service_status")
+            return {"fake": False, "services": service_status(names)}
+        return self._dispatch_read(
+            "services.status",
+            {"names": names},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def domains_list(self) -> dict[str, Any]:
-        brokered = self._broker_call("domains.list", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "domains": ["example.com"], "main": "example.com"}
-        # domain_list() also queries LDAP for the domain inventory; keep it
-        # in the system interpreter for the same reason as users_list().
-        return {"fake": False, **_call_via_system_python("yunohost.domain", "domain_list", {}, self.settings)}
+        def _real():
+            # domain_list() also queries LDAP for the domain inventory; keep it
+            # in the system interpreter for the same reason as users_list().
+            return {"fake": False, **_call_via_system_python("yunohost.domain", "domain_list", {}, self.settings)}
+        return self._dispatch_read(
+            "domains.list",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def users_list(self) -> dict[str, Any]:
-        brokered = self._broker_call("users.list", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "users": {"alice": {"fullname": "Alice Example", "mail": "alice@example.com"}}}
-        # Keep this in the system interpreter like the other LDAP-backed
-        # YunoHost calls. The MCP venv does not reliably carry YunoHost's
-        # full runtime/LDAP dependency set, and an import/runtime failure in
-        # the root helper otherwise becomes the unhelpful "internal broker
-        # error" at the MCP boundary.
-        return {"fake": False, **_call_via_system_python("yunohost.user", "user_list", {}, self.settings)}
+        def _real():
+            # Keep this in the system interpreter like the other LDAP-backed
+            # YunoHost calls. The MCP venv does not reliably carry YunoHost's
+            # full runtime/LDAP dependency set, and an import/runtime failure in
+            # the root helper otherwise becomes the unhelpful "internal broker
+            # error" at the MCP boundary.
+            return {"fake": False, **_call_via_system_python("yunohost.user", "user_list", {}, self.settings)}
+        return self._dispatch_read(
+            "users.list",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     # User writes are normally @is_unit_operation-decorated and must receive
     # real args only; the decorator supplies its own OperationLogger. The
@@ -1526,24 +1648,25 @@ class YunohostAdapter:
         admin: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "operation_id": "20260903-000000-user_create", "username": username}
+        def _real():
+            user_create = _import_attr("yunohost.user", "user_create")
+            result = user_create(
+                username=username,
+                domain=domain,
+                password=password,
+                fullname=fullname,
+                mailbox_quota=mailbox_quota,
+                admin=admin,
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
+        return self._dispatch_write(
             "user.create",
             {"username": username, "domain": domain, "password": password, "fullname": fullname, "mailbox_quota": mailbox_quota, "admin": admin, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "operation_id": "20260903-000000-user_create", "username": username}
-        user_create = _import_attr("yunohost.user", "user_create")
-        result = user_create(
-            username=username,
-            domain=domain,
-            password=password,
-            fullname=fullname,
-            mailbox_quota=mailbox_quota,
-            admin=admin,
-        )
-        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
 
     def user_update(
         self,
@@ -1558,97 +1681,118 @@ class YunohostAdapter:
         fullname: str | None = None,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "operation_id": "20260903-000000-user_update", "username": username}
+        def _real():
+            user_update = _import_attr("yunohost.user", "user_update")
+            result = user_update(
+                username=username,
+                mail=mail,
+                change_password=change_password,
+                add_mailforward=add_mailforward,
+                remove_mailforward=remove_mailforward,
+                add_mailalias=add_mailalias,
+                remove_mailalias=remove_mailalias,
+                mailbox_quota=mailbox_quota,
+                fullname=fullname,
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
+        return self._dispatch_write(
             "user.update",
             {"username": username, "mail": mail, "change_password": change_password, "add_mailforward": add_mailforward, "remove_mailforward": remove_mailforward, "add_mailalias": add_mailalias, "remove_mailalias": remove_mailalias, "mailbox_quota": mailbox_quota, "fullname": fullname, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "operation_id": "20260903-000000-user_update", "username": username}
-        user_update = _import_attr("yunohost.user", "user_update")
-        result = user_update(
-            username=username,
-            mail=mail,
-            change_password=change_password,
-            add_mailforward=add_mailforward,
-            remove_mailforward=remove_mailforward,
-            add_mailalias=add_mailalias,
-            remove_mailalias=remove_mailalias,
-            mailbox_quota=mailbox_quota,
-            fullname=fullname,
-        )
-        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
 
     def user_delete(self, username: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "user.delete", {"username": username, "purge": purge, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-user_delete", "username": username}
-        result = _call_via_system_python(
-            "yunohost.user", "user_delete", {"username": username, "purge": purge}, self.settings
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.user", "user_delete", {"username": username, "purge": purge}, self.settings
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
+        return self._dispatch_write(
+            "user.delete",
+            {"username": username, "purge": purge, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "operation_id": _latest_operation_id(), "username": username, "result": result}
 
     def user_group_list(self) -> dict[str, Any]:
-        brokered = self._broker_call("user.groups", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "groups": {"all_users": {"members": ["alice"]}}}
-        return {
-            "fake": False,
-            **_call_via_system_python("yunohost.user", "user_group_list", {}, self.settings),
-        }
+        def _real():
+            return {
+                "fake": False,
+                **_call_via_system_python("yunohost.user", "user_group_list", {}, self.settings),
+            }
+        return self._dispatch_read(
+            "user.groups",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def user_group_create(self, groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("user.group_create", {"groupname": groupname, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-user_group_create", "groupname": groupname}
-        user_group_create = _import_attr("yunohost.user", "user_group_create")
-        result = user_group_create(groupname=groupname)
-        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+        def _real():
+            user_group_create = _import_attr("yunohost.user", "user_group_create")
+            result = user_group_create(groupname=groupname)
+            return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+        return self._dispatch_write(
+            "user.group_create",
+            {"groupname": groupname, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def user_group_update(
         self, groupname: str, add: list[str] | None = None, remove: list[str] | None = None,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "user.group_update", {"groupname": groupname, "add": add, "remove": remove, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-user_group_update", "groupname": groupname}
-        user_group_update = _import_attr("yunohost.user", "user_group_update")
-        result = user_group_update(groupname=groupname, add=add, remove=remove)
-        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+        def _real():
+            user_group_update = _import_attr("yunohost.user", "user_group_update")
+            result = user_group_update(groupname=groupname, add=add, remove=remove)
+            return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname, "result": result}
+        return self._dispatch_write(
+            "user.group_update",
+            {"groupname": groupname, "add": add, "remove": remove, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def user_group_delete(self, groupname: str, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("user.group_delete", {"groupname": groupname, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-user_group_delete", "groupname": groupname}
-        user_group_delete = _import_attr("yunohost.user", "user_group_delete")
-        user_group_delete(groupname=groupname)
-        return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname}
+        def _real():
+            user_group_delete = _import_attr("yunohost.user", "user_group_delete")
+            user_group_delete(groupname=groupname)
+            return {"fake": False, "operation_id": _latest_operation_id(), "groupname": groupname}
+        return self._dispatch_write(
+            "user.group_delete",
+            {"groupname": groupname, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def user_permission_list(self) -> dict[str, Any]:
-        brokered = self._broker_call("user.permissions", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "permissions": {"myapp.main": {"allowed": ["all_users"]}}}
-        return {
-            "fake": False,
-            **_call_via_system_python("yunohost.user", "user_permission_list", {"full": True}, self.settings),
-        }
+        def _real():
+            return {
+                "fake": False,
+                **_call_via_system_python("yunohost.user", "user_permission_list", {"full": True}, self.settings),
+            }
+        return self._dispatch_read(
+            "user.permissions",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     # user_permission_add/user_permission_remove are @is_flash_unit_operation
     # (flash=True) - log.py's is_unit_operation() only prepends an
@@ -1668,44 +1812,52 @@ class YunohostAdapter:
     # available in Pydantic V2" (this venv's v2 shadows the system's v1
     # once anything here has imported pydantic once).
     def user_permission_add(self, permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "user.permission_add", {"permission": permission, "names": names, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "permission": permission, "names": names}
-        result = _call_via_system_python(
-            "yunohost.user", "user_permission_add", {"permission": permission, "names": names}, self.settings
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.user", "user_permission_add", {"permission": permission, "names": names}, self.settings
+            )
+            return {"fake": False, "permission": permission, "result": result}
+        return self._dispatch_write(
+            "user.permission_add",
+            {"permission": permission, "names": names, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "permission": permission, "result": result}
 
     def user_permission_remove(self, permission: str, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "user.permission_remove", {"permission": permission, "names": names, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "permission": permission, "names": names}
-        result = _call_via_system_python(
-            "yunohost.user", "user_permission_remove", {"permission": permission, "names": names}, self.settings
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.user", "user_permission_remove", {"permission": permission, "names": names}, self.settings
+            )
+            return {"fake": False, "permission": permission, "result": result}
+        return self._dispatch_write(
+            "user.permission_remove",
+            {"permission": permission, "names": names, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "permission": permission, "result": result}
 
     def user_permission_info(self, permission: str) -> dict[str, Any]:
-        brokered = self._broker_call("user.permission_info", {"permission": permission})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "permission": permission, "info": {"allowed": ["all_users"]}}
-        return {
-            "fake": False,
-            "permission": permission,
-            "info": _call_via_system_python(
-                "yunohost.user", "user_permission_info", {"permission": permission}, self.settings
-            ),
-        }
+        def _real():
+            return {
+                "fake": False,
+                "permission": permission,
+                "info": _call_via_system_python(
+                    "yunohost.user", "user_permission_info", {"permission": permission}, self.settings
+                ),
+            }
+        return self._dispatch_read(
+            "user.permission_info",
+            {"permission": permission},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def user_permission_update(
         self,
@@ -1715,7 +1867,35 @@ class YunohostAdapter:
         protected: bool | None = None,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "permission": permission, "label": label, "show_tile": show_tile, "protected": protected}
+        def _real():
+            if protected is not None:
+                # yunohost.user.user_permission_update's real signature (confirmed
+                # against the exact installed version, debian/12.1.41.2) only takes
+                # label/show_tile/logo/description/hide_from_public/order - never
+                # protected. Only user_permission_add/user_permission_remove accept
+                # it, and only alongside a names change, so there is no equivalent
+                # call this method can make on protected's behalf; raise rather
+                # than silently drop a security-relevant flag or crash on an
+                # unexpected keyword argument.
+                raise ValueError(
+                    "protected cannot be changed via user_permission_update on this YunoHost version - "
+                    "it is only settable via user_permission_add/user_permission_remove, alongside a names change"
+                )
+            # add/remove are deliberately not exposed here - user_permission_add/
+            # user_permission_remove above already cover that, with their own
+            # narrower @is_flash_unit_operation write path; this method is for
+            # the label/show_tile fields those two don't touch. Same pydantic v1
+            # conflict as user_permission_add/remove above - see their comment.
+            result = _call_via_system_python(
+                "yunohost.user",
+                "user_permission_update",
+                {"permission": permission, "label": label, "show_tile": show_tile},
+                self.settings,
+            )
+            return {"fake": False, "permission": permission, "result": result}
+        return self._dispatch_write(
             "user.permission_update",
             {
                 "permission": permission,
@@ -1724,45 +1904,22 @@ class YunohostAdapter:
                 "protected": protected,
                 "confirmation_id": confirmation_id,
             },
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "permission": permission, "label": label, "show_tile": show_tile, "protected": protected}
-        if protected is not None:
-            # yunohost.user.user_permission_update's real signature (confirmed
-            # against the exact installed version, debian/12.1.41.2) only takes
-            # label/show_tile/logo/description/hide_from_public/order - never
-            # protected. Only user_permission_add/user_permission_remove accept
-            # it, and only alongside a names change, so there is no equivalent
-            # call this method can make on protected's behalf; raise rather
-            # than silently drop a security-relevant flag or crash on an
-            # unexpected keyword argument.
-            raise ValueError(
-                "protected cannot be changed via user_permission_update on this YunoHost version - "
-                "it is only settable via user_permission_add/user_permission_remove, alongside a names change"
-            )
-        # add/remove are deliberately not exposed here - user_permission_add/
-        # user_permission_remove above already cover that, with their own
-        # narrower @is_flash_unit_operation write path; this method is for
-        # the label/show_tile fields those two don't touch. Same pydantic v1
-        # conflict as user_permission_add/remove above - see their comment.
-        result = _call_via_system_python(
-            "yunohost.user",
-            "user_permission_update",
-            {"permission": permission, "label": label, "show_tile": show_tile},
-            self.settings,
-        )
-        return {"fake": False, "permission": permission, "result": result}
 
     def backups_list(self) -> dict[str, Any]:
-        brokered = self._broker_call("backups.list", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "archives": ["20260901-000000"]}
-        backup_list = _import_attr("yunohost.backup", "backup_list")
-        return {"fake": False, **backup_list()}
+        def _real():
+            backup_list = _import_attr("yunohost.backup", "backup_list")
+            return {"fake": False, **backup_list()}
+        return self._dispatch_read(
+            "backups.list",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def backup_info(self, name: str, with_details: bool = False) -> dict[str, Any]:
         # Closes the "download a backup" gap without a fake "download"
@@ -1774,18 +1931,22 @@ class YunohostAdapter:
         # wouldn't be practical even if it could. backup_info()'s own
         # `path` field is the actual answer to "where is this archive" -
         # an admin fetches the bytes over SSH/SCP/SFTP from there.
-        brokered = self._broker_call("backup.info", {"name": name, "with_details": with_details})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "name": name,
                 "path": f"/home/yunohost.backup/archives/{name}.tar.gz",
                 "size": 0,
             }
-        backup_info = _import_attr("yunohost.backup", "backup_info")
-        return {"fake": False, "name": name, **backup_info(name, with_details=with_details)}
+        def _real():
+            backup_info = _import_attr("yunohost.backup", "backup_info")
+            return {"fake": False, "name": name, **backup_info(name, with_details=with_details)}
+        return self._dispatch_read(
+            "backup.info",
+            {"name": name, "with_details": with_details},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def backup_created_at_times(self) -> dict[str, float]:
         """Real per-archive creation time (unix timestamp), keyed by
@@ -1855,10 +2016,7 @@ class YunohostAdapter:
         invisible here and to guessed operation_logs() names alike, with
         no indication why - pass with_suboperations=True to see them.
         """
-        brokered = self._broker_call("operations.list", {"limit": limit, "with_suboperations": with_suboperations})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "operation": [
@@ -1870,8 +2028,15 @@ class YunohostAdapter:
                     }
                 ],
             }
-        log_list = _import_attr("yunohost.log", "log_list")
-        return {"fake": False, **log_list(limit=limit, with_suboperations=with_suboperations)}
+        def _real():
+            log_list = _import_attr("yunohost.log", "log_list")
+            return {"fake": False, **log_list(limit=limit, with_suboperations=with_suboperations)}
+        return self._dispatch_read(
+            "operations.list",
+            {"limit": limit, "with_suboperations": with_suboperations},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def operation_status(self, name: str) -> dict[str, Any]:
         brokered = self._broker_call("operation.status", {"name": name})
@@ -1884,9 +2049,6 @@ class YunohostAdapter:
         return self.operation_logs(name)
 
     def operation_logs(self, name: str, tail_lines: int | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("operation.logs", {"name": name, "tail_lines": tail_lines})
-        if brokered is not None:
-            return brokered
         """`tail_lines` caps how many of the most recent log lines are
         returned - defaults to Settings.operation_logs_default_tail_lines
         (a real install/upgrade log can run to thousands of lines of raw
@@ -1908,7 +2070,7 @@ class YunohostAdapter:
         never reach, since the *line*'s own "key" is just "logs", not
         anything sensitive-sounding.
         """
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "name": name,
@@ -1916,29 +2078,40 @@ class YunohostAdapter:
                 "started_at": "2026-09-01T12:00:00",
                 "log": "fake log content for " + name,
             }
-        log_show = _import_attr("yunohost.log", "log_show")
-        effective_tail = tail_lines if tail_lines is not None else self.settings.operation_logs_default_tail_lines
-        result = log_show(name, number=effective_tail)
-        logs = result.get("logs")
-        if isinstance(logs, list):
-            result = {**result, "logs": [redact_text(line) if isinstance(line, str) else line for line in logs]}
-        return {"fake": False, **result}
+        def _real():
+            log_show = _import_attr("yunohost.log", "log_show")
+            effective_tail = tail_lines if tail_lines is not None else self.settings.operation_logs_default_tail_lines
+            result = log_show(name, number=effective_tail)
+            logs = result.get("logs")
+            if isinstance(logs, list):
+                result = {**result, "logs": [redact_text(line) if isinstance(line, str) else line for line in logs]}
+            return {"fake": False, **result}
+        return self._dispatch_read(
+            "operation.logs",
+            {"name": name, "tail_lines": tail_lines},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def updates_check(self) -> dict[str, Any]:
         # Deliberately the no-refresh, cache-only variant: a real network
         # catalog refresh (tools_update()) mutates on-disk cache state and
         # belongs with Phase 5's write tools, not v0.1's read-only scope.
-        brokered = self._broker_call("updates.check", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "apps": [{"id": "nextcloud", "current_version": "28.0.1~ynh1", "new_version": "28.0.2~ynh1"}],
                 "system": [],
             }
-        tools_update_norefresh = _import_attr("yunohost.tools", "tools_update_norefresh")
-        return {"fake": False, **tools_update_norefresh()}
+        def _real():
+            tools_update_norefresh = _import_attr("yunohost.tools", "tools_update_norefresh")
+            return {"fake": False, **tools_update_norefresh()}
+        return self._dispatch_read(
+            "updates.check",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     _UPDATES_REFRESH_TARGETS = frozenset({"system", "apps", "all"})
 
@@ -1958,23 +2131,27 @@ class YunohostAdapter:
         the same way diagnosis_run's underlying call is - see this class's
         Phase 5/6 comment on why no operation_logger is passed here.
         """
-        brokered = self._broker_call("updates.refresh", {"target": target})
-        if brokered is not None:
-            return brokered
         if target not in self._UPDATES_REFRESH_TARGETS:
             raise ToolInputError(f"target must be one of {sorted(self._UPDATES_REFRESH_TARGETS)}, got {target!r}")
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "target": target,
                 "apps": [{"id": "nextcloud", "current_version": "28.0.1~ynh1", "new_version": "28.0.2~ynh1"}],
                 "system": [],
             }
-        # Refreshing app/system metadata loads YunoHost's update/catalog
-        # stack, so keep it in the same system runtime as other operations
-        # that may touch LDAP or legacy YunoHost dependencies.
-        result = _call_via_system_python("yunohost.tools", "tools_update", {"target": target}, self.settings)
-        return {"fake": False, "target": target, **result}
+        def _real():
+            # Refreshing app/system metadata loads YunoHost's update/catalog
+            # stack, so keep it in the same system runtime as other operations
+            # that may touch LDAP or legacy YunoHost dependencies.
+            result = _call_via_system_python("yunohost.tools", "tools_update", {"target": target}, self.settings)
+            return {"fake": False, "target": target, **result}
+        return self._dispatch_read(
+            "updates.refresh",
+            {"target": target},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def plan_app_upgrade(self, app: str) -> dict[str, Any]:
         """Read-only facts for one app's upgrade (PLAN.md Phase 7) - current
@@ -2008,53 +2185,54 @@ class YunohostAdapter:
     def domain_add(
         self, domain: str, install_letsencrypt_cert: bool = False, confirmation_id: str | None = None
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "domain.add",
-            {"domain": domain, "install_letsencrypt_cert": install_letsencrypt_cert, "confirmation_id": confirmation_id},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "operation_id": "20260903-000000-domain_add",
                 "domain": domain,
                 "certificate": {"CA_type": "letsencrypt" if install_letsencrypt_cert else "selfsigned"},
             }
-        # @is_unit_operation-decorated (yunohost.domain), same
-        # no-manual-operation_logger convention as service_restart et al
-        # just below. ignore_dyndns=True is deliberate and not exposed as
-        # a parameter: without it, a bare *.nohost.me/*.noho.st/*.ynh.fr
-        # *top-level* domain name (e.g. "newname.nohost.me", not a
-        # subdomain of one already registered) triggers a real DynDNS
-        # account subscription - and domain_add()'s ToS-acknowledgement
-        # prompt only fires when Moulinette.interface.type == "cli" and
-        # the process has a tty, neither true here, so that consent step
-        # would be silently skipped entirely rather than raising. Always
-        # treating the name as a plain custom domain avoids that; a
-        # subdomain of an already-registered DynDNS domain (the normal
-        # case - e.g. new-app.example.nohost.me under an existing
-        # example.nohost.me) is unaffected either way.
-        #
-        # domain_add() transitively imports yunohost.utils.form (domain
-        # registration re-parses the same DomainOption/GroupOption machinery
-        # app_install does) - same pydantic v1/v2 conflict as app_install/
-        # backup_create/package_inspect, see _call_via_system_python's
-        # docstring. Must go through the system-python subprocess too.
-        _call_via_system_python(
-            "yunohost.domain",
-            "domain_add",
-            {"domain": domain, "ignore_dyndns": True, "install_letsencrypt_cert": install_letsencrypt_cert},
-            self.settings,
+        def _real():
+            # @is_unit_operation-decorated (yunohost.domain), same
+            # no-manual-operation_logger convention as service_restart et al
+            # just below. ignore_dyndns=True is deliberate and not exposed as
+            # a parameter: without it, a bare *.nohost.me/*.noho.st/*.ynh.fr
+            # *top-level* domain name (e.g. "newname.nohost.me", not a
+            # subdomain of one already registered) triggers a real DynDNS
+            # account subscription - and domain_add()'s ToS-acknowledgement
+            # prompt only fires when Moulinette.interface.type == "cli" and
+            # the process has a tty, neither true here, so that consent step
+            # would be silently skipped entirely rather than raising. Always
+            # treating the name as a plain custom domain avoids that; a
+            # subdomain of an already-registered DynDNS domain (the normal
+            # case - e.g. new-app.example.nohost.me under an existing
+            # example.nohost.me) is unaffected either way.
+            #
+            # domain_add() transitively imports yunohost.utils.form (domain
+            # registration re-parses the same DomainOption/GroupOption machinery
+            # app_install does) - same pydantic v1/v2 conflict as app_install/
+            # backup_create/package_inspect, see _call_via_system_python's
+            # docstring. Must go through the system-python subprocess too.
+            _call_via_system_python(
+                "yunohost.domain",
+                "domain_add",
+                {"domain": domain, "ignore_dyndns": True, "install_letsencrypt_cert": install_letsencrypt_cert},
+                self.settings,
+            )
+            certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+            certificate = certificate_status([domain]).get("certificates", {}).get(domain, {})
+            return {
+                "fake": False,
+                "operation_id": _latest_operation_id(),
+                "domain": domain,
+                "certificate": certificate,
+            }
+        return self._dispatch_write(
+            "domain.add",
+            {"domain": domain, "install_letsencrypt_cert": install_letsencrypt_cert, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
-        certificate = certificate_status([domain]).get("certificates", {}).get(domain, {})
-        return {
-            "fake": False,
-            "operation_id": _latest_operation_id(),
-            "domain": domain,
-            "certificate": certificate,
-        }
 
     def domain_cert_info(self, domain: str) -> dict[str, Any]:
         """Read-only certificate status for an already-registered domain
@@ -2064,10 +2242,7 @@ class YunohostAdapter:
         so - unlike domain_add - no pydantic v1/v2 conflict; a plain
         in-process _import_attr call is fine.
         """
-        brokered = self._broker_call("domain.certificate_info", {"domain": domain})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "domain": domain,
@@ -2081,9 +2256,16 @@ class YunohostAdapter:
                     "has_wildcards": False,
                 },
             }
-        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
-        certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
-        return {"fake": False, "domain": domain, "certificate": certificate}
+        def _real():
+            certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+            certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+            return {"fake": False, "domain": domain, "certificate": certificate}
+        return self._dispatch_read(
+            "domain.certificate_info",
+            {"domain": domain},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def domain_cert_install(
         self, domain: str, letsencrypt: bool = True, staging: bool = False, confirmation_id: str | None = None
@@ -2107,19 +2289,13 @@ class YunohostAdapter:
         certificate status, rather than surfacing as an opaque tool
         crash.
         """
-        brokered = self._broker_call(
-            "domain.cert_install",
-            {"domain": domain, "letsencrypt": letsencrypt, "staging": staging, "confirmation_id": confirmation_id},
-        )
-        if brokered is not None:
-            return brokered
         if staging:
             raise ToolInputError(
                 "staging ACME issuance is not supported by this YunoHost version "
                 "(certmanager only has the production Let's Encrypt endpoint configured); "
                 "call with staging=False"
             )
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "operation_id": "20260903-000000-domain_cert_install",
@@ -2128,62 +2304,69 @@ class YunohostAdapter:
                 "acme_error": None,
                 "certificate": {"CA_type": "letsencrypt" if letsencrypt else "selfsigned"},
             }
-        certificate_install = _import_attr("yunohost.certificate", "certificate_install")
-        YunohostError = _import_attr("yunohost.utils.error", "YunohostError")
-        acme_error: str | None = None
-        try:
-            certificate_install([domain], force=True, self_signed=not letsencrypt)
-        except YunohostError as exc:
-            acme_error = str(exc)
-        certificate_status = _import_attr("yunohost.certificate", "certificate_status")
-        certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
-        # certificate_install() can raise YunohostError even when the
-        # certificate it was asked to install actually did get placed - e.g.
-        # a later step (nginx reload) failing after the CSR/cert itself
-        # succeeded. Confirmed live: a real call raised "Let's Encrypt
-        # certificate install failed for <domain>" while certificate_status()
-        # immediately after showed CA_type == "letsencrypt" with normal
-        # validity (a real cert, not a stale selfsigned one) - trusting the
-        # exception alone would have reported a working install as failed.
-        # Reconcile against the actual resulting certificate rather than the
-        # exception, the same principle the silent-no-op check below applies
-        # in the opposite direction.
-        if acme_error is not None and letsencrypt and certificate.get("CA_type") == "letsencrypt":
-            acme_error = None
-        # yunohost.certificate._certificate_install_letsencrypt() runs a
-        # pre-ACME readiness check (_check_domain_is_ready_for_ACME) per
-        # domain and, on failure, just logs the error and `continue`s to the
-        # next domain - it does NOT add the domain to failed_cert_install.
-        # certificate_install() only raises YunohostError if
-        # failed_cert_install ends up non-empty, so a domain that fails that
-        # readiness check (most commonly: no diagnosis result yet exists for
-        # its 'DNS records'/'Web' categories, which is always true for a
-        # domain added in the same session) is silently skipped - no
-        # exception, no trace, nothing to catch above. Confirmed live: two
-        # consecutive real calls against a freshly-added domain each
-        # returned acme_error=None with the certificate still selfsigned,
-        # while yunohost_mcp-helper's own log carried "There is no diagnosis
-        # result for domain ... yet" both times. Detect that silent no-op
-        # here by comparing what was requested against what actually
-        # resulted, rather than trusting the absence of an exception.
-        if acme_error is None and letsencrypt and certificate.get("CA_type") != "letsencrypt":
-            acme_error = (
-                "certificate_install() returned without raising, but the certificate is still "
-                f"{certificate.get('CA_type', 'unknown')!r}. YunoHost's certmanager silently skips "
-                "a domain that fails its pre-ACME readiness check "
-                "(yunohost.certificate._check_domain_is_ready_for_ACME) instead of raising - most "
-                "commonly because no diagnosis result yet exists for that domain's 'DNS records' "
-                "and 'Web' categories (always true right after domain_add). Run diagnosis_run for "
-                "those categories (or wait for the next scheduled diagnosis) and retry."
-            )
-        return {
-            "fake": False,
-            "operation_id": _latest_operation_id(),
-            "domain": domain,
-            "requested": "letsencrypt" if letsencrypt else "selfsigned",
-            "acme_error": acme_error,
-            "certificate": certificate,
-        }
+        def _real():
+            certificate_install = _import_attr("yunohost.certificate", "certificate_install")
+            YunohostError = _import_attr("yunohost.utils.error", "YunohostError")
+            acme_error: str | None = None
+            try:
+                certificate_install([domain], force=True, self_signed=not letsencrypt)
+            except YunohostError as exc:
+                acme_error = str(exc)
+            certificate_status = _import_attr("yunohost.certificate", "certificate_status")
+            certificate = certificate_status([domain], full=True).get("certificates", {}).get(domain, {})
+            # certificate_install() can raise YunohostError even when the
+            # certificate it was asked to install actually did get placed - e.g.
+            # a later step (nginx reload) failing after the CSR/cert itself
+            # succeeded. Confirmed live: a real call raised "Let's Encrypt
+            # certificate install failed for <domain>" while certificate_status()
+            # immediately after showed CA_type == "letsencrypt" with normal
+            # validity (a real cert, not a stale selfsigned one) - trusting the
+            # exception alone would have reported a working install as failed.
+            # Reconcile against the actual resulting certificate rather than the
+            # exception, the same principle the silent-no-op check below applies
+            # in the opposite direction.
+            if acme_error is not None and letsencrypt and certificate.get("CA_type") == "letsencrypt":
+                acme_error = None
+            # yunohost.certificate._certificate_install_letsencrypt() runs a
+            # pre-ACME readiness check (_check_domain_is_ready_for_ACME) per
+            # domain and, on failure, just logs the error and `continue`s to the
+            # next domain - it does NOT add the domain to failed_cert_install.
+            # certificate_install() only raises YunohostError if
+            # failed_cert_install ends up non-empty, so a domain that fails that
+            # readiness check (most commonly: no diagnosis result yet exists for
+            # its 'DNS records'/'Web' categories, which is always true for a
+            # domain added in the same session) is silently skipped - no
+            # exception, no trace, nothing to catch above. Confirmed live: two
+            # consecutive real calls against a freshly-added domain each
+            # returned acme_error=None with the certificate still selfsigned,
+            # while yunohost_mcp-helper's own log carried "There is no diagnosis
+            # result for domain ... yet" both times. Detect that silent no-op
+            # here by comparing what was requested against what actually
+            # resulted, rather than trusting the absence of an exception.
+            if acme_error is None and letsencrypt and certificate.get("CA_type") != "letsencrypt":
+                acme_error = (
+                    "certificate_install() returned without raising, but the certificate is still "
+                    f"{certificate.get('CA_type', 'unknown')!r}. YunoHost's certmanager silently skips "
+                    "a domain that fails its pre-ACME readiness check "
+                    "(yunohost.certificate._check_domain_is_ready_for_ACME) instead of raising - most "
+                    "commonly because no diagnosis result yet exists for that domain's 'DNS records' "
+                    "and 'Web' categories (always true right after domain_add). Run diagnosis_run for "
+                    "those categories (or wait for the next scheduled diagnosis) and retry."
+                )
+            return {
+                "fake": False,
+                "operation_id": _latest_operation_id(),
+                "domain": domain,
+                "requested": "letsencrypt" if letsencrypt else "selfsigned",
+                "acme_error": acme_error,
+                "certificate": certificate,
+            }
+        return self._dispatch_write(
+            "domain.cert_install",
+            {"domain": domain, "letsencrypt": letsencrypt, "staging": staging, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     # -- DNS ----------------------------------------------------------------
     #
@@ -2217,41 +2400,47 @@ class YunohostAdapter:
     # documented loudly on both tools' docstrings instead.
 
     def domain_dns_suggest(self, domain: str) -> dict[str, Any]:
-        brokered = self._broker_call("domain.dns_suggest", {"domain": domain})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "domain": domain,
                 "dns_conf": "; Basic ipv4/ipv6 records\n@ 3600 IN A 203.0.113.1",
             }
-        dns_conf = _call_via_system_python(
-            "yunohost.dns", "domain_dns_suggest", {"domain": domain}, self.settings
+        def _real():
+            dns_conf = _call_via_system_python(
+                "yunohost.dns", "domain_dns_suggest", {"domain": domain}, self.settings
+            )
+            return {"fake": False, "domain": domain, "dns_conf": dns_conf}
+        return self._dispatch_read(
+            "domain.dns_suggest",
+            {"domain": domain},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "domain": domain, "dns_conf": dns_conf}
 
     def domain_dns_push_preview(
         self, domain: str, force: bool = False, purge: bool = False
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "domain.dns_push_preview", {"domain": domain, "force": force, "purge": purge}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "domain": domain,
                 "changes": {"create": [], "update": [], "delete": [], "unchanged": []},
             }
-        changes = _call_via_system_python(
-            "yunohost.dns",
-            "domain_dns_push",
-            {"domain": domain, "dry_run": True, "force": force, "purge": purge},
-            self.settings,
+        def _real():
+            changes = _call_via_system_python(
+                "yunohost.dns",
+                "domain_dns_push",
+                {"domain": domain, "dry_run": True, "force": force, "purge": purge},
+                self.settings,
+            )
+            return {"fake": False, "domain": domain, "changes": changes}
+        return self._dispatch_read(
+            "domain.dns_push_preview",
+            {"domain": domain, "force": force, "purge": purge},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "domain": domain, "changes": changes}
 
     def domain_dns_push(
         self,
@@ -2260,73 +2449,79 @@ class YunohostAdapter:
         purge: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "operation_id": "20260903-000000-domain_dns_push", "domain": domain, "result": {}}
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.dns",
+                "domain_dns_push",
+                {"domain": domain, "dry_run": False, "force": force, "purge": purge},
+                self.settings,
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "domain": domain, "result": result}
+        return self._dispatch_write(
             "domain.dns_push",
             {"domain": domain, "force": force, "purge": purge, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "operation_id": "20260903-000000-domain_dns_push", "domain": domain, "result": {}}
-        result = _call_via_system_python(
-            "yunohost.dns",
-            "domain_dns_push",
-            {"domain": domain, "dry_run": False, "force": force, "purge": purge},
-            self.settings,
-        )
-        return {"fake": False, "operation_id": _latest_operation_id(), "domain": domain, "result": result}
 
     def domain_remove(
         self, domain: str, remove_apps: bool = False, force: bool = False, confirmation_id: str | None = None
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "domain.remove",
-            {"domain": domain, "remove_apps": remove_apps, "force": force, "confirmation_id": confirmation_id},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "operation_id": "20260903-000000-domain_remove",
                 "domain": domain,
                 "remove_apps": remove_apps,
             }
-        # @is_unit_operation-decorated (yunohost.domain), and uses
-        # _get_ldap_interface() directly to delete the domain's LDAP entry -
-        # same "keep it in the system interpreter" reasoning as domain_list/
-        # users_list (see their comments), not the pydantic-conflict one
-        # domain_add/domain_dns_* are routed for. ignore_dyndns=True always
-        # (not exposed) for the same reason domain_add always sets it: this
-        # server doesn't manage the DynDNS subscription lifecycle, only
-        # plain custom domains - see domain_add's comment. Running headless
-        # (interface_type="api", the default) also means the CLI-only
-        # "remove these N apps too?" confirmation prompt inside
-        # domain_remove itself never fires, which is what we want - our own
-        # require_confirmation is the gate here, remove_apps=True executes
-        # every affected app's removal directly once confirmed.
-        _call_via_system_python(
-            "yunohost.domain",
-            "domain_remove",
-            {"domain": domain, "remove_apps": remove_apps, "force": force, "ignore_dyndns": True},
-            self.settings,
+        def _real():
+            # @is_unit_operation-decorated (yunohost.domain), and uses
+            # _get_ldap_interface() directly to delete the domain's LDAP entry -
+            # same "keep it in the system interpreter" reasoning as domain_list/
+            # users_list (see their comments), not the pydantic-conflict one
+            # domain_add/domain_dns_* are routed for. ignore_dyndns=True always
+            # (not exposed) for the same reason domain_add always sets it: this
+            # server doesn't manage the DynDNS subscription lifecycle, only
+            # plain custom domains - see domain_add's comment. Running headless
+            # (interface_type="api", the default) also means the CLI-only
+            # "remove these N apps too?" confirmation prompt inside
+            # domain_remove itself never fires, which is what we want - our own
+            # require_confirmation is the gate here, remove_apps=True executes
+            # every affected app's removal directly once confirmed.
+            _call_via_system_python(
+                "yunohost.domain",
+                "domain_remove",
+                {"domain": domain, "remove_apps": remove_apps, "force": force, "ignore_dyndns": True},
+                self.settings,
+            )
+            return {
+                "fake": False,
+                "operation_id": _latest_operation_id(),
+                "domain": domain,
+                "remove_apps": remove_apps,
+            }
+        return self._dispatch_write(
+            "domain.remove",
+            {"domain": domain, "remove_apps": remove_apps, "force": force, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {
-            "fake": False,
-            "operation_id": _latest_operation_id(),
-            "domain": domain,
-            "remove_apps": remove_apps,
-        }
 
     def service_restart(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("service.restart", {"names": names, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "restarted": names}
-        service_restart = _import_attr("yunohost.service", "service_restart")
-        service_restart(names)
-        return {"fake": False, "restarted": names}
+        def _real():
+            service_restart = _import_attr("yunohost.service", "service_restart")
+            service_restart(names)
+            return {"fake": False, "restarted": names}
+        return self._dispatch_write(
+            "service.restart",
+            {"names": names, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def service_stop(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
         """Stop one or more services (yunohost.service.service_stop).
@@ -2334,14 +2529,18 @@ class YunohostAdapter:
         Unlike service_restart, this is not atomic - the service stays
         down until something calls service_start.
         """
-        brokered = self._broker_call("service.stop", {"names": names, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "stopped": names}
-        service_stop = _import_attr("yunohost.service", "service_stop")
-        service_stop(names)
-        return {"fake": False, "stopped": names}
+        def _real():
+            service_stop = _import_attr("yunohost.service", "service_stop")
+            service_stop(names)
+            return {"fake": False, "stopped": names}
+        return self._dispatch_write(
+            "service.stop",
+            {"names": names, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def service_start(self, names: list[str], confirmation_id: str | None = None) -> dict[str, Any]:
         """Start one or more stopped services (yunohost.service.service_start).
@@ -2355,15 +2554,19 @@ class YunohostAdapter:
         run it in a system-python subprocess with a CLI-style headless
         context instead of importing and calling it in-process.
         """
-        brokered = self._broker_call("service.start", {"names": names, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "started": names}
-        _call_via_system_python(
-            "yunohost.service", "service_start", {"names": names}, self.settings, interface_type="cli"
+        def _real():
+            _call_via_system_python(
+                "yunohost.service", "service_start", {"names": names}, self.settings, interface_type="cli"
+            )
+            return {"fake": False, "started": names}
+        return self._dispatch_write(
+            "service.start",
+            {"names": names, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "started": names}
 
     def backup_create(
         self,
@@ -2373,7 +2576,26 @@ class YunohostAdapter:
         system: list[str] | None = None,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {
+                "fake": True,
+                "operation_id": "20260903-000000-backup_create",
+                "name": name or "fake-backup",
+            }
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.backup",
+                "backup_create",
+                {"name": name, "description": description, "apps": apps or [], "system": system or []},
+                self.settings,
+            )
+            # backup_create()'s own return is {"name": ..., "size": ..., "results": ...}
+            # (real archive name, possibly auto-generated if `name` was None) -
+            # surfaced at the top level here too so callers (package_run_tests
+            # included) get a consistent "name" field regardless of fake/real mode.
+            archive_name = result.get("name", name) if isinstance(result, dict) else name
+            return {"fake": False, "operation_id": _latest_operation_id(), "name": archive_name, "result": result}
+        return self._dispatch_write(
             "backup.create",
             {
                 "name": name,
@@ -2382,42 +2604,28 @@ class YunohostAdapter:
                 "system": system,
                 "confirmation_id": confirmation_id,
             },
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {
-                "fake": True,
-                "operation_id": "20260903-000000-backup_create",
-                "name": name or "fake-backup",
-            }
-        result = _call_via_system_python(
-            "yunohost.backup",
-            "backup_create",
-            {"name": name, "description": description, "apps": apps or [], "system": system or []},
-            self.settings,
-        )
-        # backup_create()'s own return is {"name": ..., "size": ..., "results": ...}
-        # (real archive name, possibly auto-generated if `name` was None) -
-        # surfaced at the top level here too so callers (package_run_tests
-        # included) get a consistent "name" field regardless of fake/real mode.
-        archive_name = result.get("name", name) if isinstance(result, dict) else name
-        return {"fake": False, "operation_id": _latest_operation_id(), "name": archive_name, "result": result}
 
     def backup_delete(self, name: str, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("backup.delete", {"name": name, "confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "name": name, "deleted": True}
-        # backup_delete() is a bounded native archive operation and returns
-        # no useful result of its own. Keep it in the system interpreter so
-        # the broker never imports YunoHost's backup module into the MCP
-        # venv, and report the exact archive that was deleted.
-        result = _call_via_system_python(
-            "yunohost.backup", "backup_delete", {"name": name}, self.settings
+        def _real():
+            # backup_delete() is a bounded native archive operation and returns
+            # no useful result of its own. Keep it in the system interpreter so
+            # the broker never imports YunoHost's backup module into the MCP
+            # venv, and report the exact archive that was deleted.
+            result = _call_via_system_python(
+                "yunohost.backup", "backup_delete", {"name": name}, self.settings
+            )
+            return {"fake": False, "name": name, "deleted": True, "result": result}
+        return self._dispatch_write(
+            "backup.delete",
+            {"name": name, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "name": name, "deleted": True, "result": result}
 
     def app_install(
         self,
@@ -2427,30 +2635,31 @@ class YunohostAdapter:
         force: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "operation_id": "20260903-000000-app_install", "app": app}
+        def _real():
+            # app_install() re-parses the target manifest's [install] options
+            # (ask_questions_and_parse_answers -> parse_raw_options ->
+            # OptionsModel) every call, which for any app with a `type =
+            # "domain"`/`"group"` question hits DomainOption/GroupOption's
+            # pydantic v1-style @validator("choices", pre=True, always=True)
+            # (yunohost.utils.form again - same conflict as backup_create/
+            # backup_restore/package_inspect, see _call_via_system_python's
+            # docstring). In-process, that validator silently never runs
+            # under this venv's pydantic v2, so `choices` - meant to be
+            # auto-populated from domain_list()/user_group_list() - looks
+            # like a plain missing required field instead: "While parsing
+            # manifest: ... options.0.domain.choices Field required".
+            result = _call_via_system_python(
+                "yunohost.app", "app_install", {"app": app, "label": label, "args": args, "force": force}, self.settings
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+        return self._dispatch_write(
             "app.install",
             {"app": app, "label": label, "args": args, "force": force, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "operation_id": "20260903-000000-app_install", "app": app}
-        # app_install() re-parses the target manifest's [install] options
-        # (ask_questions_and_parse_answers -> parse_raw_options ->
-        # OptionsModel) every call, which for any app with a `type =
-        # "domain"`/`"group"` question hits DomainOption/GroupOption's
-        # pydantic v1-style @validator("choices", pre=True, always=True)
-        # (yunohost.utils.form again - same conflict as backup_create/
-        # backup_restore/package_inspect, see _call_via_system_python's
-        # docstring). In-process, that validator silently never runs
-        # under this venv's pydantic v2, so `choices` - meant to be
-        # auto-populated from domain_list()/user_group_list() - looks
-        # like a plain missing required field instead: "While parsing
-        # manifest: ... options.0.domain.choices Field required".
-        result = _call_via_system_python(
-            "yunohost.app", "app_install", {"app": app, "label": label, "args": args, "force": force}, self.settings
-        )
-        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
 
     def app_upgrade(
         self,
@@ -2460,84 +2669,81 @@ class YunohostAdapter:
         url: str | None = None,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "app": app, "file": file, "url": url, "result": "success"}
+        def _real():
+            # app_upgrade() is not @is_unit_operation-decorated; it builds its
+            # own OperationLogger internally, once per app it actually
+            # upgrades, so there's no single id to hand back for a multi-app
+            # call - the per-app result dict plus operations_list() cover it.
+            # `file` (a local folder or tarball) is what package_upgrade_test
+            # uses to upgrade an already-installed app from a candidate source
+            # instead of the catalog. `url` is the same idea for an app that
+            # isn't in any registered catalog at all (installed via `app
+            # install <url>` directly, e.g. this server's own yunohost_mcp
+            # app) - without it, real app_upgrade() has no catalog entry to
+            # compare against and raises "No apps can be upgraded" even
+            # though a newer commit genuinely exists at that url. Both accept
+            # only a single app (PHASE0-style check of the real source), same
+            # as the real function.
+            # Routed via _call_via_system_python for the same reason as
+            # app_install() just above - app_upgrade() can re-parse manifest
+            # [install] options too (e.g. an upgrade that adds a new question,
+            # or reconfirms an existing domain/group one).
+            try:
+                result = _call_via_system_python(
+                    "yunohost.app",
+                    "app_upgrade",
+                    {"app": app or [], "force": force, "file": file, "url": url},
+                    self.settings,
+                )
+            except YunohostUnavailableError as exc:
+                # YunoHost reports an already-current app as a subprocess
+                # failure ("No apps can be upgraded"). Preserve that expected
+                # operational outcome so the broker returns a useful tool error
+                # instead of masking it as an internal failure.
+                if "no apps can be upgraded" in str(exc).lower():
+                    raise NoAppsToUpgradeError("nothing to upgrade") from exc
+                raise
+            return {"fake": False, "app": app, "result": result}
+        return self._dispatch_write(
             "app.upgrade",
             {"app": app, "force": force, "url": url, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "app": app, "file": file, "url": url, "result": "success"}
-        # app_upgrade() is not @is_unit_operation-decorated; it builds its
-        # own OperationLogger internally, once per app it actually
-        # upgrades, so there's no single id to hand back for a multi-app
-        # call - the per-app result dict plus operations_list() cover it.
-        # `file` (a local folder or tarball) is what package_upgrade_test
-        # uses to upgrade an already-installed app from a candidate source
-        # instead of the catalog. `url` is the same idea for an app that
-        # isn't in any registered catalog at all (installed via `app
-        # install <url>` directly, e.g. this server's own yunohost_mcp
-        # app) - without it, real app_upgrade() has no catalog entry to
-        # compare against and raises "No apps can be upgraded" even
-        # though a newer commit genuinely exists at that url. Both accept
-        # only a single app (PHASE0-style check of the real source), same
-        # as the real function.
-        # Routed via _call_via_system_python for the same reason as
-        # app_install() just above - app_upgrade() can re-parse manifest
-        # [install] options too (e.g. an upgrade that adds a new question,
-        # or reconfirms an existing domain/group one).
-        try:
-            result = _call_via_system_python(
-                "yunohost.app",
-                "app_upgrade",
-                {"app": app or [], "force": force, "file": file, "url": url},
-                self.settings,
-            )
-        except YunohostUnavailableError as exc:
-            # YunoHost reports an already-current app as a subprocess
-            # failure ("No apps can be upgraded"). Preserve that expected
-            # operational outcome so the broker returns a useful tool error
-            # instead of masking it as an internal failure.
-            if "no apps can be upgraded" in str(exc).lower():
-                raise NoAppsToUpgradeError("nothing to upgrade") from exc
-            raise
-        return {"fake": False, "app": app, "result": result}
 
     def app_remove(self, app: str, purge: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "app.remove", {"app": app, "purge": purge, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-app_remove", "app": app, "purged": purge}
-        # YunoHost's @is_unit_operation wrapper creates an OperationLogger
-        # whose registration path expects a real Moulinette/Bottle request
-        # context when the interface is "api". The privileged broker is a
-        # local worker, not an HTTP request, so invoke this lifecycle write in
-        # a clean system-python subprocess with a CLI-style headless context.
-        # This keeps the YunoHost operation logger on its supported CLI path
-        # and prevents the secondary `NoneType.removeHandler` failure from
-        # masking the original missing-request-context error.
-        result = _call_via_system_python(
-            "yunohost.app",
-            "app_remove",
-            {"app": app, "purge": purge},
-            self.settings,
-            interface_type="cli",
+        def _real():
+            # YunoHost's @is_unit_operation wrapper creates an OperationLogger
+            # whose registration path expects a real Moulinette/Bottle request
+            # context when the interface is "api". The privileged broker is a
+            # local worker, not an HTTP request, so invoke this lifecycle write in
+            # a clean system-python subprocess with a CLI-style headless context.
+            # This keeps the YunoHost operation logger on its supported CLI path
+            # and prevents the secondary `NoneType.removeHandler` failure from
+            # masking the original missing-request-context error.
+            result = _call_via_system_python(
+                "yunohost.app",
+                "app_remove",
+                {"app": app, "purge": purge},
+                self.settings,
+                interface_type="cli",
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
+        return self._dispatch_write(
+            "app.remove",
+            {"app": app, "purge": purge, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "result": result}
 
     def app_change_url(
         self, app: str, domain: str, path: str, confirmation_id: str | None = None
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "app.change_url",
-            {"app": app, "domain": domain, "path": path, "confirmation_id": confirmation_id},
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "operation_id": "20260903-000000-app_change_url",
@@ -2545,20 +2751,27 @@ class YunohostAdapter:
                 "domain": domain,
                 "path": path,
             }
-        # @is_unit_operation-decorated (yunohost.app), same
-        # no-manual-operation_logger convention as app_remove just above -
-        # but unlike app_remove, it imports yunohost.utils.form
-        # (DomainOption, WebPathOption, to normalize/validate the new
-        # domain and path) - same pydantic v1/v2 conflict as app_install/
-        # domain_add/backup_create, see _call_via_system_python's
-        # docstring. Must go through the system-python subprocess too.
-        # Returns None on success (the app's own settings are updated
-        # in-place, nothing meaningful to hand back beyond the operation
-        # id), unlike app_install/app_remove which return a result dict.
-        _call_via_system_python(
-            "yunohost.app", "app_change_url", {"app": app, "domain": domain, "path": path}, self.settings
+        def _real():
+            # @is_unit_operation-decorated (yunohost.app), same
+            # no-manual-operation_logger convention as app_remove just above -
+            # but unlike app_remove, it imports yunohost.utils.form
+            # (DomainOption, WebPathOption, to normalize/validate the new
+            # domain and path) - same pydantic v1/v2 conflict as app_install/
+            # domain_add/backup_create, see _call_via_system_python's
+            # docstring. Must go through the system-python subprocess too.
+            # Returns None on success (the app's own settings are updated
+            # in-place, nothing meaningful to hand back beyond the operation
+            # id), unlike app_install/app_remove which return a result dict.
+            _call_via_system_python(
+                "yunohost.app", "app_change_url", {"app": app, "domain": domain, "path": path}, self.settings
+            )
+            return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "domain": domain, "path": path}
+        return self._dispatch_write(
+            "app.change_url",
+            {"app": app, "domain": domain, "path": path, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "operation_id": _latest_operation_id(), "app": app, "domain": domain, "path": path}
 
     def backup_restore(
         self,
@@ -2568,33 +2781,38 @@ class YunohostAdapter:
         force: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "name": name, "apps": apps or [], "system": system or []}
+        def _real():
+            # backup_restore() is not @is_unit_operation-decorated either - no
+            # operation id to capture here at all, best-effort or otherwise.
+            result = _call_via_system_python(
+                "yunohost.backup",
+                "backup_restore",
+                {"name": name, "system": system or [], "apps": apps or [], "force": force},
+                self.settings,
+            )
+            return {"fake": False, "name": name, "result": result}
+        return self._dispatch_write(
             "backup.restore",
             {"name": name, "apps": apps, "system": system, "force": force, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "name": name, "apps": apps or [], "system": system or []}
-        # backup_restore() is not @is_unit_operation-decorated either - no
-        # operation id to capture here at all, best-effort or otherwise.
-        result = _call_via_system_python(
-            "yunohost.backup",
-            "backup_restore",
-            {"name": name, "system": system or [], "apps": apps or [], "force": force},
-            self.settings,
-        )
-        return {"fake": False, "name": name, "result": result}
 
     def system_upgrade(self, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("system.upgrade", {"confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-tools_upgrade", "result": "success"}
-        tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
-        result = tools_upgrade(target="system")
-        return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+        def _real():
+            tools_upgrade = _import_attr("yunohost.tools", "tools_upgrade")
+            result = tools_upgrade(target="system")
+            return {"fake": False, "operation_id": _latest_operation_id(), "result": result}
+        return self._dispatch_write(
+            "system.upgrade",
+            {"confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     # -- Power ----------------------------------------------------------------
     #
@@ -2610,24 +2828,32 @@ class YunohostAdapter:
     # _import_attr treatment as tools_upgrade just above.
 
     def system_reboot(self, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("system.reboot", {"confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-tools_reboot", "rebooting": True}
-        tools_reboot = _import_attr("yunohost.tools", "tools_reboot")
-        tools_reboot(force=True)
-        return {"fake": False, "operation_id": _latest_operation_id(), "rebooting": True}
+        def _real():
+            tools_reboot = _import_attr("yunohost.tools", "tools_reboot")
+            tools_reboot(force=True)
+            return {"fake": False, "operation_id": _latest_operation_id(), "rebooting": True}
+        return self._dispatch_write(
+            "system.reboot",
+            {"confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def system_shutdown(self, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call("system.shutdown", {"confirmation_id": confirmation_id})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "operation_id": "20260903-000000-tools_shutdown", "shutting_down": True}
-        tools_shutdown = _import_attr("yunohost.tools", "tools_shutdown")
-        tools_shutdown(force=True)
-        return {"fake": False, "operation_id": _latest_operation_id(), "shutting_down": True}
+        def _real():
+            tools_shutdown = _import_attr("yunohost.tools", "tools_shutdown")
+            tools_shutdown(force=True)
+            return {"fake": False, "operation_id": _latest_operation_id(), "shutting_down": True}
+        return self._dispatch_write(
+            "system.shutdown",
+            {"confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     # -- Migrations ---------------------------------------------------------
     #
@@ -2636,22 +2862,30 @@ class YunohostAdapter:
     # _import_attr calls are fine here, same as service_restart/system_upgrade.
 
     def migrations_list(self, pending: bool = False, done: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("migrations.list", {"pending": pending, "done": done})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "migrations": []}
-        tools_migrations_list = _import_attr("yunohost.tools", "tools_migrations_list")
-        return {"fake": False, **tools_migrations_list(pending=pending, done=done)}
+        def _real():
+            tools_migrations_list = _import_attr("yunohost.tools", "tools_migrations_list")
+            return {"fake": False, **tools_migrations_list(pending=pending, done=done)}
+        return self._dispatch_read(
+            "migrations.list",
+            {"pending": pending, "done": done},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def migrations_state(self) -> dict[str, Any]:
-        brokered = self._broker_call("migrations.state", {})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "migrations": {}}
-        tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
-        return {"fake": False, **tools_migrations_state()}
+        def _real():
+            tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
+            return {"fake": False, **tools_migrations_state()}
+        return self._dispatch_read(
+            "migrations.state",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def migrations_run(
         self,
@@ -2663,7 +2897,27 @@ class YunohostAdapter:
         skip_postmigrations: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "targets": targets or [], "state": {}}
+        def _real():
+            tools_migrations_run = _import_attr("yunohost.tools", "tools_migrations_run")
+            # tools_migrations_run() returns None - like app_upgrade(), it builds
+            # its own OperationLogger internally, once per migration it actually
+            # runs (not one per call), so there's no single operation id to hand
+            # back either. Fetch migrations_state() afterward instead, so the
+            # caller gets an immediate, no-second-call picture of what changed
+            # rather than having to separately call migrations_state() to find out.
+            tools_migrations_run(
+                targets=targets or [],
+                skip=skip,
+                auto=auto,
+                force_rerun=force_rerun,
+                accept_disclaimer=accept_disclaimer,
+                skip_postmigrations=skip_postmigrations,
+            )
+            tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
+            return {"fake": False, "targets": targets or [], "state": tools_migrations_state()}
+        return self._dispatch_write(
             "migrations.run",
             {
                 "targets": targets,
@@ -2674,28 +2928,9 @@ class YunohostAdapter:
                 "skip_postmigrations": skip_postmigrations,
                 "confirmation_id": confirmation_id,
             },
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "targets": targets or [], "state": {}}
-        tools_migrations_run = _import_attr("yunohost.tools", "tools_migrations_run")
-        # tools_migrations_run() returns None - like app_upgrade(), it builds
-        # its own OperationLogger internally, once per migration it actually
-        # runs (not one per call), so there's no single operation id to hand
-        # back either. Fetch migrations_state() afterward instead, so the
-        # caller gets an immediate, no-second-call picture of what changed
-        # rather than having to separately call migrations_state() to find out.
-        tools_migrations_run(
-            targets=targets or [],
-            skip=skip,
-            auto=auto,
-            force_rerun=force_rerun,
-            accept_disclaimer=accept_disclaimer,
-            skip_postmigrations=skip_postmigrations,
-        )
-        tools_migrations_state = _import_attr("yunohost.tools", "tools_migrations_state")
-        return {"fake": False, "targets": targets or [], "state": tools_migrations_state()}
 
     # -- Firewall -------------------------------------------------------------
     #
@@ -2709,27 +2944,35 @@ class YunohostAdapter:
     def firewall_list(
         self, raw: bool = False, protocol: str = "tcp", forwarded: bool = False
     ) -> dict[str, Any]:
-        brokered = self._broker_call("firewall.list", {"raw": raw, "protocol": protocol, "forwarded": forwarded})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, protocol: []}
-        firewall_list = _import_attr("yunohost.firewall", "firewall_list")
-        return {"fake": False, **firewall_list(raw=raw, protocol=protocol, forwarded=forwarded)}
+        def _real():
+            firewall_list = _import_attr("yunohost.firewall", "firewall_list")
+            return {"fake": False, **firewall_list(raw=raw, protocol=protocol, forwarded=forwarded)}
+        return self._dispatch_read(
+            "firewall.list",
+            {"raw": raw, "protocol": protocol, "forwarded": forwarded},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def firewall_is_open(self, port: int | str, protocol: str) -> dict[str, Any]:
-        brokered = self._broker_call("firewall.is_open", {"port": port, "protocol": protocol})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "port": port, "protocol": protocol, "open": False}
-        firewall_is_open = _import_attr("yunohost.firewall", "firewall_is_open")
-        return {
-            "fake": False,
-            "port": port,
-            "protocol": protocol,
-            "open": firewall_is_open(port, protocol),
-        }
+        def _real():
+            firewall_is_open = _import_attr("yunohost.firewall", "firewall_is_open")
+            return {
+                "fake": False,
+                "port": port,
+                "protocol": protocol,
+                "open": firewall_is_open(port, protocol),
+            }
+        return self._dispatch_read(
+            "firewall.is_open",
+            {"port": port, "protocol": protocol},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def firewall_open(
         self,
@@ -2740,32 +2983,33 @@ class YunohostAdapter:
         no_reload: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "port": port, "protocol": protocol}
+        def _real():
+            # yunohost.firewall transitively imports yunohost.utils.form (the
+            # same ConfigPanel/pydantic-v1-@validator(field=..., config=...)
+            # machinery as settings_set/domain_add - see
+            # _call_via_system_python's docstring) via its regenconf hook.
+            # Live-tested 2026-09-07: firewall_open raised the exact
+            # "field and config parameters are not available in Pydantic V2"
+            # error through plain in-process _import_attr despite the
+            # test_firewall_open_unaffected stub assuming otherwise - same
+            # class of wrong-sibling-assumption bug as service_start (see
+            # yunohost_mcp_new_tool_sync_points memory). Routed through the
+            # system-python subprocess like the other affected writes.
+            _call_via_system_python(
+                "yunohost.firewall",
+                "firewall_open",
+                {"port": port, "protocol": protocol, "comment": comment, "upnp": upnp, "no_reload": no_reload},
+                self.settings,
+            )
+            return {"fake": False, "port": port, "protocol": protocol}
+        return self._dispatch_write(
             "firewall.open",
             {"port": port, "protocol": protocol, "comment": comment, "upnp": upnp, "no_reload": no_reload, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "port": port, "protocol": protocol}
-        # yunohost.firewall transitively imports yunohost.utils.form (the
-        # same ConfigPanel/pydantic-v1-@validator(field=..., config=...)
-        # machinery as settings_set/domain_add - see
-        # _call_via_system_python's docstring) via its regenconf hook.
-        # Live-tested 2026-09-07: firewall_open raised the exact
-        # "field and config parameters are not available in Pydantic V2"
-        # error through plain in-process _import_attr despite the
-        # test_firewall_open_unaffected stub assuming otherwise - same
-        # class of wrong-sibling-assumption bug as service_start (see
-        # yunohost_mcp_new_tool_sync_points memory). Routed through the
-        # system-python subprocess like the other affected writes.
-        _call_via_system_python(
-            "yunohost.firewall",
-            "firewall_open",
-            {"port": port, "protocol": protocol, "comment": comment, "upnp": upnp, "no_reload": no_reload},
-            self.settings,
-        )
-        return {"fake": False, "port": port, "protocol": protocol}
 
     def firewall_close(
         self,
@@ -2775,36 +3019,39 @@ class YunohostAdapter:
         no_reload: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
+        def _fake():
+            return {"fake": True, "port": port, "protocol": protocol}
+        def _real():
+            # Same pydantic v1/v2 conflict as firewall_open - see there.
+            _call_via_system_python(
+                "yunohost.firewall",
+                "firewall_close",
+                {"port": port, "protocol": protocol, "upnp_only": upnp_only, "no_reload": no_reload},
+                self.settings,
+            )
+            return {"fake": False, "port": port, "protocol": protocol}
+        return self._dispatch_write(
             "firewall.close",
             {"port": port, "protocol": protocol, "upnp_only": upnp_only, "no_reload": no_reload, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
-            return {"fake": True, "port": port, "protocol": protocol}
-        # Same pydantic v1/v2 conflict as firewall_open - see there.
-        _call_via_system_python(
-            "yunohost.firewall",
-            "firewall_close",
-            {"port": port, "protocol": protocol, "upnp_only": upnp_only, "no_reload": no_reload},
-            self.settings,
-        )
-        return {"fake": False, "port": port, "protocol": protocol}
 
     def firewall_reload(self, skip_upnp: bool = False, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "firewall.reload", {"skip_upnp": skip_upnp, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "reloaded": True}
-        # Same pydantic v1/v2 conflict as firewall_open - see there.
-        _call_via_system_python(
-            "yunohost.firewall", "firewall_reload", {"skip_upnp": skip_upnp}, self.settings
+        def _real():
+            # Same pydantic v1/v2 conflict as firewall_open - see there.
+            _call_via_system_python(
+                "yunohost.firewall", "firewall_reload", {"skip_upnp": skip_upnp}, self.settings
+            )
+            return {"fake": False, "reloaded": True}
+        return self._dispatch_write(
+            "firewall.reload",
+            {"skip_upnp": skip_upnp, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "reloaded": True}
 
     # -- Settings ---------------------------------------------------------
     #
@@ -2816,41 +3063,51 @@ class YunohostAdapter:
     # through the subprocess instead, same as domain_add/domain_dns_*.
 
     def settings_list(self, full: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("settings.list", {"full": full})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "settings": {}}
-        result = _call_via_system_python("yunohost.settings", "settings_list", {"full": full}, self.settings)
-        return {"fake": False, "settings": result}
+        def _real():
+            result = _call_via_system_python("yunohost.settings", "settings_list", {"full": full}, self.settings)
+            return {"fake": False, "settings": result}
+        return self._dispatch_read(
+            "settings.list",
+            {"full": full},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def settings_get(self, key: str, full: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("settings.get", {"key": key, "full": full})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "key": key, "value": None}
-        value = _call_via_system_python(
-            "yunohost.settings", "settings_get", {"key": key, "full": full}, self.settings
+        def _real():
+            value = _call_via_system_python(
+                "yunohost.settings", "settings_get", {"key": key, "full": full}, self.settings
+            )
+            return {"fake": False, "key": key, "value": value}
+        return self._dispatch_read(
+            "settings.get",
+            {"key": key, "full": full},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "key": key, "value": value}
 
     def settings_set(self, key: str, value: Any, confirmation_id: str | None = None) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "settings.set", {"key": key, "value": value, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "key": key, "value": value}
-        _call_via_system_python("yunohost.settings", "settings_set", {"key": key, "value": value}, self.settings)
-        # settings_set() returns None - read the value back so the caller
-        # gets confirmation of what actually landed (e.g. a coerced type)
-        # without a separate settings_get() round trip.
-        new_value = _call_via_system_python(
-            "yunohost.settings", "settings_get", {"key": key, "full": False}, self.settings
+        def _real():
+            _call_via_system_python("yunohost.settings", "settings_set", {"key": key, "value": value}, self.settings)
+            # settings_set() returns None - read the value back so the caller
+            # gets confirmation of what actually landed (e.g. a coerced type)
+            # without a separate settings_get() round trip.
+            new_value = _call_via_system_python(
+                "yunohost.settings", "settings_get", {"key": key, "full": False}, self.settings
+            )
+            return {"fake": False, "key": key, "value": new_value}
+        return self._dispatch_write(
+            "settings.set",
+            {"key": key, "value": value, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "key": key, "value": new_value}
 
     # -- Regen-conf ---------------------------------------------------------
     #
@@ -2863,18 +3120,22 @@ class YunohostAdapter:
     # by inspection) - routed through _call_via_system_python too.
 
     def regenconf_pending(self, names: list[str] | None = None, with_diff: bool = False) -> dict[str, Any]:
-        brokered = self._broker_call("regenconf.pending", {"names": names, "with_diff": with_diff})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "pending": {}}
-        result = _call_via_system_python(
-            "yunohost.regenconf",
-            "regen_conf",
-            {"names": names or [], "with_diff": with_diff, "list_pending": True},
-            self.settings,
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.regenconf",
+                "regen_conf",
+                {"names": names or [], "with_diff": with_diff, "list_pending": True},
+                self.settings,
+            )
+            return {"fake": False, "pending": result}
+        return self._dispatch_read(
+            "regenconf.pending",
+            {"names": names, "with_diff": with_diff},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "pending": result}
 
     def regenconf_apply(
         self,
@@ -2882,17 +3143,19 @@ class YunohostAdapter:
         force: bool = False,
         confirmation_id: str | None = None,
     ) -> dict[str, Any]:
-        brokered = self._broker_call(
-            "regenconf.apply", {"names": names, "force": force, "confirmation_id": confirmation_id}
-        )
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "applied": {}}
-        result = _call_via_system_python(
-            "yunohost.regenconf", "regen_conf", {"names": names or [], "force": force}, self.settings
+        def _real():
+            result = _call_via_system_python(
+                "yunohost.regenconf", "regen_conf", {"names": names or [], "force": force}, self.settings
+            )
+            return {"fake": False, "applied": result}
+        return self._dispatch_write(
+            "regenconf.apply",
+            {"names": names, "force": force, "confirmation_id": confirmation_id},
+            fake_result=_fake,
+            real_call=_real,
         )
-        return {"fake": False, "applied": result}
 
     # -- Phase 8: package development -------------------------------------
     #
@@ -2908,10 +3171,7 @@ class YunohostAdapter:
         installing it - app_manifest() already does exactly this (accepts a
         local path or git URL, not just a catalog id), so no separate
         parsing of manifest.toml is needed here."""
-        brokered = self._broker_call("package.inspect", {"source": source})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "id": "example",
@@ -2919,18 +3179,25 @@ class YunohostAdapter:
                 "resources": {"system_user": {}, "install_dir": {}, "permissions": {}},
                 "unknown_resource_types": [],
             }
-        # app_manifest() imports yunohost.utils.form (for its "install"
-        # questions field), which hits the same pydantic v1/v2 conflict as
-        # backup_create/backup_restore (see _call_via_system_python's
-        # docstring) - route it through the same subprocess.
-        manifest = _call_via_system_python("yunohost.app", "app_manifest", {"app": source}, self.settings)
-        resources = manifest.get("resources", {})
-        try:
-            known_types = set(_import_attr("yunohost.utils.resources", "AppResourceClassesByType").keys())
-            unknown = sorted(set(resources.keys()) - known_types)
-        except YunohostUnavailableError:
-            unknown = []
-        return {"fake": False, **manifest, "unknown_resource_types": unknown}
+        def _real():
+            # app_manifest() imports yunohost.utils.form (for its "install"
+            # questions field), which hits the same pydantic v1/v2 conflict as
+            # backup_create/backup_restore (see _call_via_system_python's
+            # docstring) - route it through the same subprocess.
+            manifest = _call_via_system_python("yunohost.app", "app_manifest", {"app": source}, self.settings)
+            resources = manifest.get("resources", {})
+            try:
+                known_types = set(_import_attr("yunohost.utils.resources", "AppResourceClassesByType").keys())
+                unknown = sorted(set(resources.keys()) - known_types)
+            except YunohostUnavailableError:
+                unknown = []
+            return {"fake": False, **manifest, "unknown_resource_types": unknown}
+        return self._dispatch_read(
+            "package.inspect",
+            {"source": source},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def package_lint(self, source: str) -> dict[str, Any]:
         """Run github.com/YunoHost/package_linter against `source` (a local
@@ -2938,43 +3205,44 @@ class YunohostAdapter:
         Settings.package_linter_path. Returns unavailable=True (not fake
         data, not an error) when it isn't configured, since there's no
         in-process equivalent to fall back to."""
-        brokered = self._broker_call("package.lint", {"source": source})
-        if brokered is not None:
-            return brokered
-        if self.settings.fake_yunohost:
+        def _fake():
             return {"fake": True, "passed": True, "success": [], "info": [], "warning": [], "error": [], "critical": []}
-        if self.settings.package_linter_path is None:
-            return {"fake": False, "unavailable": True, "reason": "package_linter_path not configured"}
+        def _real():
+            if self.settings.package_linter_path is None:
+                return {"fake": False, "unavailable": True, "reason": "package_linter_path not configured"}
 
-        import json
-        import subprocess
+            import json
+            import subprocess
 
-        linter_script = self.settings.package_linter_path / "package_linter.py"
-        proc = subprocess.run(
-            [self.settings.package_linter_python, str(linter_script), source, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=self.settings.package_linter_timeout_seconds,
-            cwd=self.settings.package_linter_path,
+            linter_script = self.settings.package_linter_path / "package_linter.py"
+            proc = subprocess.run(
+                [self.settings.package_linter_python, str(linter_script), source, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=self.settings.package_linter_timeout_seconds,
+                cwd=self.settings.package_linter_path,
+            )
+            try:
+                report = json.loads(proc.stdout)
+            except ValueError as exc:
+                raise YunohostUnavailableError(
+                    f"package_linter produced non-JSON output (exit {proc.returncode}): {proc.stderr[-2000:]}"
+                ) from exc
+            passed = not report.get("error") and not report.get("critical")
+            return {"fake": False, "passed": passed, **report}
+        return self._dispatch_read(
+            "package.lint",
+            {"source": source},
+            fake_result=_fake,
+            real_call=_real,
         )
-        try:
-            report = json.loads(proc.stdout)
-        except ValueError as exc:
-            raise YunohostUnavailableError(
-                f"package_linter produced non-JSON output (exit {proc.returncode}): {proc.stderr[-2000:]}"
-            ) from exc
-        passed = not report.get("error") and not report.get("critical")
-        return {"fake": False, "passed": passed, **report}
 
     # -- Nostr YunoHost catalogue -----------------------------------------
 
     def catalog_package_inspect(self, source: str, ref: str | None = None) -> dict[str, Any]:
         """Inspect a local or remote package without signing or publishing."""
-        brokered = self._broker_call("catalog.package_inspect", {"source": source, "ref": ref})
-        if brokered is not None:
-            return brokered
         self._validate_catalog_source(source, ref)
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "source": source,
@@ -2985,16 +3253,23 @@ class YunohostAdapter:
                 "manifest_hash": "sha256:" + "0" * 64,
                 "content_hash": "sha256:" + "1" * 64,
             }
-        if ref is not None or source.startswith(("https://", "http://")):
-            if not source.startswith("https://"):
-                raise ToolInputError("remote catalogue package sources must use HTTPS")
-            args = ["preview"]
-            if ref:
-                args += ["--ref", ref]
-            args.append(source)
-            return {"fake": False, **self._run_catalog_json(args)}
-        package = self.package_inspect(source)
-        return {"fake": False, "source": str(Path(source).resolve()), **package}
+        def _real():
+            if ref is not None or source.startswith(("https://", "http://")):
+                if not source.startswith("https://"):
+                    raise ToolInputError("remote catalogue package sources must use HTTPS")
+                args = ["preview"]
+                if ref:
+                    args += ["--ref", ref]
+                args.append(source)
+                return {"fake": False, **self._run_catalog_json(args)}
+            package = self.package_inspect(source)
+            return {"fake": False, "source": str(Path(source).resolve()), **package}
+        return self._dispatch_read(
+            "catalog.package_inspect",
+            {"source": source, "ref": ref},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def catalog_publish_plan(
         self,
@@ -3013,12 +3288,6 @@ class YunohostAdapter:
         publisher key - self-attestation, not a second verifier identity.
         See nostr-yunohost's docs/attestations.md.
         """
-        brokered = self._broker_call(
-            "catalog.publish_plan",
-            {"source": source, "ref": ref, "ci_result": ci_result, "ci_provider": ci_provider, "ci_ref": ci_ref},
-        )
-        if brokered is not None:
-            return brokered
         self._validate_catalog_source(source, ref)
         relays = self._catalog_relays()
         args = ["publish", "--json", "--dry-run", "--private-key-file", str(self.settings.catalog_publisher_key_path)]
@@ -3028,7 +3297,7 @@ class YunohostAdapter:
             args += ["--repository-url", source, "--ref", ref]
         else:
             args += ["--repo", source]
-        if self.settings.fake_yunohost:
+        def _fake():
             plan: dict[str, Any] = {
                 "fake": True,
                 "source": source,
@@ -3048,28 +3317,35 @@ class YunohostAdapter:
             if ci_result is not None:
                 plan["attestation"] = {"event": {"id": "1" * 64, "kind": 30080}, "naddr": "naddr1qqxyz-attest", "published": False}
             return plan
-        with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
-            result = self._run_catalog_json(args, requires_key=True)
-        event = result.get("event", {})
-        tags = {tag[0]: tag[1] for tag in event.get("tags", []) if len(tag) >= 2}
-        return {
-            "fake": False,
-            "source": source,
-            "ref": ref,
-            "relays": relays,
-            "app_id": tags.get("d"),
-            "version": tags.get("version"),
-            "commit": tags.get("commit"),
-            "manifest_hash": tags.get("manifest"),
-            "content_hash": tags.get("content"),
-            # Echoed back (not just consumed) so a subsequent catalog_publish
-            # call for this plan_id can re-derive them from the stored plan,
-            # the same way it already does for source/ref.
-            "ci_result": ci_result,
-            "ci_provider": ci_provider,
-            "ci_ref": ci_ref,
-            **result,
-        }
+        def _real():
+            with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
+                result = self._run_catalog_json(args, requires_key=True)
+            event = result.get("event", {})
+            tags = {tag[0]: tag[1] for tag in event.get("tags", []) if len(tag) >= 2}
+            return {
+                "fake": False,
+                "source": source,
+                "ref": ref,
+                "relays": relays,
+                "app_id": tags.get("d"),
+                "version": tags.get("version"),
+                "commit": tags.get("commit"),
+                "manifest_hash": tags.get("manifest"),
+                "content_hash": tags.get("content"),
+                # Echoed back (not just consumed) so a subsequent catalog_publish
+                # call for this plan_id can re-derive them from the stored plan,
+                # the same way it already does for source/ref.
+                "ci_result": ci_result,
+                "ci_provider": ci_provider,
+                "ci_ref": ci_ref,
+                **result,
+            }
+        return self._dispatch_read(
+            "catalog.publish_plan",
+            {"source": source, "ref": ref, "ci_result": ci_result, "ci_provider": ci_provider, "ci_ref": ci_ref},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     @contextlib.contextmanager
     def _ci_result_arg(
@@ -3106,20 +3382,6 @@ class YunohostAdapter:
     ) -> dict[str, Any]:
         """Publish a previously planned package declaration to configured
         relays. ci_result mirrors catalog_publish_plan's - see there."""
-        brokered = self._broker_call(
-            "catalog.publish",
-            {
-                "source": source,
-                "ref": ref,
-                "confirmation_id": confirmation_id,
-                "plan_id": plan_id,
-                "ci_result": ci_result,
-                "ci_provider": ci_provider,
-                "ci_ref": ci_ref,
-            },
-        )
-        if brokered is not None:
-            return brokered
         self._validate_catalog_source(source, ref)
         relays = self._catalog_relays()
         if not relays:
@@ -3129,7 +3391,7 @@ class YunohostAdapter:
             args += ["--repository-url", source, "--ref", ref]
         else:
             args += ["--repo", source]
-        if self.settings.fake_yunohost:
+        def _fake():
             result: dict[str, Any] = {
                 "fake": True,
                 "source": source,
@@ -3148,12 +3410,27 @@ class YunohostAdapter:
                     "relays": [{"relay": r, "published": True} for r in relays],
                 }
             return result
-        with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
-            result = self._run_catalog_json(args, requires_key=True)
-        event = result.get("event")
-        if result.get("published") and isinstance(event, dict):
-            result["verification"] = self.catalog_verify(json.dumps(event))
-        return {"fake": False, **result}
+        def _real():
+            with self._ci_result_arg(args, ci_result, ci_provider, ci_ref):
+                result = self._run_catalog_json(args, requires_key=True)
+            event = result.get("event")
+            if result.get("published") and isinstance(event, dict):
+                result["verification"] = self.catalog_verify(json.dumps(event))
+            return {"fake": False, **result}
+        return self._dispatch_write(
+            "catalog.publish",
+            {
+                "source": source,
+                "ref": ref,
+                "confirmation_id": confirmation_id,
+                "plan_id": plan_id,
+                "ci_result": ci_result,
+                "ci_provider": ci_provider,
+                "ci_ref": ci_ref,
+            },
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def catalog_verify(self, event_or_naddr: str) -> dict[str, Any]:
         """Verify a declaration event or fetch and verify an naddr."""
@@ -3185,11 +3462,8 @@ class YunohostAdapter:
         app id. Read-only - the CLI's own `catalog` subcommand does the
         relay round trip; nothing here signs or publishes anything.
         """
-        brokered = self._broker_call("catalog.list", {})
-        if brokered is not None:
-            return brokered
         relays = self._catalog_relays()
-        if self.settings.fake_yunohost:
+        def _fake():
             return {
                 "fake": True,
                 "relays": relays,
@@ -3197,14 +3471,21 @@ class YunohostAdapter:
                     "example": {"id": "example", "name": "Example", "version": "1.0~ynh1"},
                 },
             }
-        if not relays:
-            raise ToolInputError("catalog_relays must contain at least one relay URL")
-        args = ["catalog", "--relays", ",".join(relays)]
-        trusted_publishers = self._catalog_trusted_publishers()
-        if trusted_publishers:
-            args += ["--trusted-publishers", ",".join(trusted_publishers)]
-        result = self._run_catalog_json(args)
-        return {"fake": False, "relays": relays, **result}
+        def _real():
+            if not relays:
+                raise ToolInputError("catalog_relays must contain at least one relay URL")
+            args = ["catalog", "--relays", ",".join(relays)]
+            trusted_publishers = self._catalog_trusted_publishers()
+            if trusted_publishers:
+                args += ["--trusted-publishers", ",".join(trusted_publishers)]
+            result = self._run_catalog_json(args)
+            return {"fake": False, "relays": relays, **result}
+        return self._dispatch_read(
+            "catalog.list",
+            {},
+            fake_result=_fake,
+            real_call=_real,
+        )
 
     def _catalog_relays(self) -> list[str]:
         relays = [relay.strip() for relay in self.settings.catalog_relays.split(",") if relay.strip()]
