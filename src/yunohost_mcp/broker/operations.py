@@ -50,9 +50,17 @@ def _require_str(
     return value
 
 
-def _require_bool(arguments: dict[str, Any], name: str, default: bool, message: str) -> bool:
-    """Validate that ``arguments[name]`` (or ``default`` if absent) is a bool."""
+def _require_bool(
+    arguments: dict[str, Any], name: str, default: bool | None, message: str, *, optional: bool = False
+) -> bool | None:
+    """Validate that ``arguments[name]`` (or ``default`` if absent) is a bool.
+
+    When ``optional`` is True, a missing/None value is allowed and returns None
+    instead of raising.
+    """
     value = arguments.get(name, default)
+    if value is None and optional:
+        return None
     if not isinstance(value, bool):
         raise ValueError(message)
     return value
@@ -445,9 +453,8 @@ def _package_change_url_test(adapter: YunohostAdapter, arguments: dict[str, Any]
 
 def _package_remove_test(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_keys(arguments, {"app", "purge", "session_id", "confirmation_id"}, "unknown package remove-test argument")
-    app, purge = arguments.get("app"), arguments.get("purge", True)
-    if not isinstance(app, str) or not app or len(app) > 128 or not isinstance(purge, bool):
-        raise ValueError("app and purge are invalid")
+    app = _require_str(arguments, "app", 128, "app and purge are invalid")
+    purge = _require_bool(arguments, "purge", True, "app and purge are invalid")
     if not isinstance(arguments.get("session_id"), str) or not arguments["session_id"]:
         raise ValueError("session_id is required")
     return adapter.package_remove_test(app, purge=purge, session_id=arguments["session_id"], confirmation_id=arguments.get("confirmation_id"))
@@ -478,9 +485,8 @@ def _diagnose_app(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[s
 
 
 def _migrations_list(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
-    pending, done = arguments.get("pending", False), arguments.get("done", False)
-    if not isinstance(pending, bool) or not isinstance(done, bool):
-        raise ValueError("pending and done must be booleans")
+    pending = _require_bool(arguments, "pending", False, "pending and done must be booleans")
+    done = _require_bool(arguments, "done", False, "pending and done must be booleans")
     return adapter.migrations_list(pending=pending, done=done)
 
 
@@ -723,8 +729,8 @@ def _migrations_run(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     ):
         raise ValueError("targets must be a list of bounded non-empty strings")
     flags = ("skip", "auto", "force_rerun", "accept_disclaimer", "skip_postmigrations")
-    if any(not isinstance(arguments.get(flag, False), bool) for flag in flags):
-        raise ValueError("migration flags must be booleans")
+    for flag in flags:
+        _require_bool(arguments, flag, False, "migration flags must be booleans")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.migrations_run(
@@ -758,8 +764,7 @@ def _firewall_open(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
     if not isinstance(comment, str) or len(comment) > 1024:
         raise ValueError("comment must be a string of at most 1024 characters")
     for flag in ("upnp", "no_reload"):
-        if not isinstance(arguments.get(flag, False), bool):
-            raise ValueError(f"{flag} must be a boolean")
+        _require_bool(arguments, flag, False, f"{flag} must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_open(port, protocol, comment=comment, upnp=arguments.get("upnp", False), no_reload=arguments.get("no_reload", False), confirmation_id=confirmation_id)
@@ -770,8 +775,7 @@ def _firewall_close(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     _reject_unknown_keys(arguments, allowed, "unknown firewall close argument")
     port, protocol = _port_and_protocol(arguments)
     for flag in ("upnp_only", "no_reload"):
-        if not isinstance(arguments.get(flag, False), bool):
-            raise ValueError(f"{flag} must be a boolean")
+        _require_bool(arguments, flag, False, f"{flag} must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_close(port, protocol, upnp_only=arguments.get("upnp_only", False), no_reload=arguments.get("no_reload", False), confirmation_id=confirmation_id)
@@ -779,8 +783,7 @@ def _firewall_close(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
 
 def _firewall_reload(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_keys(arguments, {"skip_upnp", "confirmation_id"}, "unknown firewall reload argument")
-    if not isinstance(arguments.get("skip_upnp", False), bool):
-        raise ValueError("skip_upnp must be a boolean")
+    _require_bool(arguments, "skip_upnp", False, "skip_upnp must be a boolean")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.firewall_reload(skip_upnp=arguments.get("skip_upnp", False), confirmation_id=confirmation_id)
@@ -900,12 +903,8 @@ def _permission_update(adapter: YunohostAdapter, arguments: dict[str, Any]) -> d
     label = arguments.get("label")
     if label is not None and (not isinstance(label, str) or not label or len(label) > 256):
         raise ValueError("label must be a bounded non-empty string")
-    show_tile = arguments.get("show_tile")
-    if show_tile is not None and not isinstance(show_tile, bool):
-        raise ValueError("show_tile must be a boolean")
-    protected = arguments.get("protected")
-    if protected is not None and not isinstance(protected, bool):
-        raise ValueError("protected must be a boolean")
+    show_tile = _require_bool(arguments, "show_tile", None, "show_tile must be a boolean", optional=True)
+    protected = _require_bool(arguments, "protected", None, "protected must be a boolean", optional=True)
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.user_permission_update(
@@ -927,10 +926,8 @@ def _domain_remove(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict[
     allowed = {"domain", "remove_apps", "force", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown domain remove argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    remove_apps = arguments.get("remove_apps", False)
-    force = arguments.get("force", False)
-    if not isinstance(remove_apps, bool) or not isinstance(force, bool):
-        raise ValueError("remove_apps and force must be booleans")
+    remove_apps = _require_bool(arguments, "remove_apps", False, "remove_apps and force must be booleans")
+    force = _require_bool(arguments, "force", False, "remove_apps and force must be booleans")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_remove(domain, remove_apps=remove_apps, force=force, confirmation_id=confirmation_id)
@@ -940,10 +937,8 @@ def _domain_cert_install(adapter: YunohostAdapter, arguments: dict[str, Any]) ->
     allowed = {"domain", "letsencrypt", "staging", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown domain certificate argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    letsencrypt = arguments.get("letsencrypt", True)
-    staging = arguments.get("staging", False)
-    if not isinstance(letsencrypt, bool) or not isinstance(staging, bool):
-        raise ValueError("letsencrypt and staging must be booleans")
+    letsencrypt = _require_bool(arguments, "letsencrypt", True, "letsencrypt and staging must be booleans")
+    staging = _require_bool(arguments, "staging", False, "letsencrypt and staging must be booleans")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.domain_cert_install(
@@ -961,10 +956,8 @@ def _domain_dns_suggest(adapter: YunohostAdapter, arguments: dict[str, Any]) -> 
 def _domain_dns_push_args(arguments: dict[str, Any], allowed: set[str]) -> tuple[str, bool, bool]:
     _reject_unknown_keys(arguments, allowed, "unknown domain dns push argument")
     domain = _bounded_string(arguments, "domain", 253, required=True)
-    force = arguments.get("force", False)
-    purge = arguments.get("purge", False)
-    if not isinstance(force, bool) or not isinstance(purge, bool):
-        raise ValueError("force and purge must be booleans")
+    force = _require_bool(arguments, "force", False, "force and purge must be booleans")
+    purge = _require_bool(arguments, "purge", False, "force and purge must be booleans")
     return domain, force, purge
 
 
