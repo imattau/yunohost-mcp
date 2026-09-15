@@ -623,9 +623,7 @@ def _app_change_url(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     allowed = {"app", "domain", "path", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown app URL argument")
     for key, max_length in (("app", 128), ("domain", 253), ("path", 4096)):
-        value = arguments.get(key)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{key} must be a non-empty bounded string")
+        _require_str(arguments, key, max_length, f"{key} must be a non-empty bounded string")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_change_url(
@@ -637,9 +635,7 @@ def _app_config_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dict
     allowed = {"app", "key", "value", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown app config argument")
     for name, max_length in (("app", 128), ("key", 512), ("value", 8192)):
-        value = arguments.get(name)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{name} must be a non-empty bounded string")
+        _require_str(arguments, name, max_length, f"{name} must be a non-empty bounded string")
     confirmation_id = arguments.get("confirmation_id")
     _require_str(arguments, "confirmation_id", 128, "confirmation_id must be a string", required=False)
     return adapter.app_config_set(
@@ -651,9 +647,7 @@ def _app_setting_set(adapter: YunohostAdapter, arguments: dict[str, Any]) -> dic
     allowed = {"app", "key", "value", "delete", "confirmation_id"}
     _reject_unknown_keys(arguments, allowed, "unknown app setting argument")
     for name, max_length in (("app", 128), ("key", 512)):
-        value = arguments.get(name)
-        if not isinstance(value, str) or not value or len(value) > max_length:
-            raise ValueError(f"{name} must be a non-empty bounded string")
+        _require_str(arguments, name, max_length, f"{name} must be a non-empty bounded string")
     value = arguments.get("value")
     if value is not None and (not isinstance(value, str) or len(value) > 8192):
         raise ValueError("value must be a bounded string")
